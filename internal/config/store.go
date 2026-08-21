@@ -1,0 +1,420 @@
+package config
+
+import (
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
+
+	"gopkg.in/yaml.v3"
+)
+
+const (
+	configDirectoryName = ".gg"
+	configFileName      = "config.yaml"
+	projectsDirectory   = "projects"
+)
+
+// Store persists global and project configuration as YAML.
+type Store struct{ userConfigDir func() (string, error) }
+
+// NewStore constructs a configuration store using the operating system's user configuration directory.
+func NewStore() *Store { return newStore(userConfigDir) }
+func newStore(userConfigDir func() (string, error)) *Store {
+	return &Store{userConfigDir: userConfigDir}
+}
+
+func appendUniqueFolder(folders []string, folder string) []string {
+	for _, existing := range folders {
+		if existing == folder {
+			return folders
+		}
+	}
+	return append(folders, folder)
+}
+
+// userConfigDir honors XDG_CONFIG_HOME on every platform. os.UserConfigDir
+// ignores it on macOS and Windows, which lets sandboxed environments — most
+// importantly gg's own test suite, which isolates itself by setting
+// XDG_CONFIG_HOME — leak reads and writes into the user's real configuration.
+func userConfigDir() (string, error) {
+	if dir := strings.TrimSpace(os.Getenv("XDG_CONFIG_HOME")); dir != "" {
+		return dir, nil
+	}
+	return os.UserConfigDir()
+}
+
+// GlobalConfigPath returns the stable path to the user's global gg config.
+func (s *Store) GlobalConfigPath() (string, error) {
+	dir, err := s.userConfigDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve user configuration directory: %w", err)
+	}
+	return filepath.Join(dir, "gg", configFileName), nil
+}
+
+// ProjectConfigPath returns the configuration path for projectRoot.
+func (s *Store) ProjectConfigPath(root string) string {
+	return filepath.Join(root, configDirectoryName, configFileName)
+}
+
+// ProjectRuntimeDir returns the directory used for project runtime state.
+func (s *Store) ProjectRuntimeDir(root string) string {
+	return filepath.Join(root, configDirectoryName, projectsDirectory)
+}
+
+// LoadGlobal loads and validates the global configuration.
+func (s *Store) LoadGlobal() (GlobalConfig, error) {
+	path, err := s.GlobalConfigPath()
+	if err != nil {
+		return GlobalConfig{}, err
+	}
+	var cfg GlobalConfig
+	if err := readYAML(path, &cfg); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return GlobalConfig{}, ErrGlobalConfigNotFound
+		}
+		return GlobalConfig{}, fmt.Errorf("load global configuration: %w", err)
+	}
+	if err := ValidateGlobalConfig(cfg); err != nil {
+		return GlobalConfig{}, fmt.Errorf("validate global configuration: %w", err)
+	}
+	return cfg, nil
+}
+
+// SaveGlobal validates and atomically persists the global configuration.
+func (s *Store) SaveGlobal(cfg GlobalConfig) error {
+	if err := ValidateGlobalConfig(cfg); err != nil {
+		return fmt.Errorf("validate global configuration: %w", err)
+	}
+	path, err := s.GlobalConfigPath()
+	if err != nil {
+		return err
+	}
+	if err := writeYAMLAtomic(path, cfg); err != nil {
+		return fmt.Errorf("save global configuration: %w", err)
+	}
+	return nil
+}
+
+// LoadProject loads and validates configuration for projectRoot.
+func (s *Store) LoadProject(root string) (ProjectConfig, error) {
+	var cfg ProjectConfig
+	if err := readYAML(s.ProjectConfigPath(root), &cfg); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return ProjectConfig{}, ErrProjectNotConfigured
+		}
+		return ProjectConfig{}, fmt.Errorf("load project configuration: %w", err)
+	}
+	if err := ValidateProjectConfig(cfg); err != nil {
+		return ProjectConfig{}, fmt.Errorf("validate project configuration: %w", err)
+	}
+	cfg.PhaseOverrides = NormalizePhaseOverrides(cfg.PhaseOverrides)
+	return cfg, nil
+}
+
+// SaveProject validates and atomically persists project configuration and creates its runtime directory.
+func (s *Store) SaveProject(root string, cfg ProjectConfig) error {
+	if err := ValidateProjectConfig(cfg); err != nil {
+		return fmt.Errorf("validate project configuration: %w", err)
+	}
+	cfg.PhaseOverrides = NormalizePhaseOverrides(cfg.PhaseOverrides)
+	if err := ensurePrivateDir(s.ProjectRuntimeDir(root)); err != nil {
+		return fmt.Errorf("create project runtime directory: %w", err)
+	}
+	if err := writeYAMLAtomic(s.ProjectConfigPath(root), cfg); err != nil {
+		return fmt.Errorf("save project configuration: %w", err)
+	}
+	return nil
+}
+
+// SaveConfiguration coordinates global and project persistence for configure.
+// Project paths are prepared before global state changes. If the later project
+// save fails, the previous global file is restored byte-for-byte (or removed
+// when this was a first-time configuration).
+func (s *Store) SaveConfiguration(root string, global GlobalConfig, project ProjectConfig) error {
+	if err := ValidateGlobalConfig(global); err != nil {
+		return fmt.Errorf("validate global configuration: %w", err)
+	}
+	if err := ValidateProjectConfig(project); err != nil {
+		return fmt.Errorf("validate project configuration: %w", err)
+	}
+	globalPath, err := s.GlobalConfigPath()
+	if err != nil {
+		return err
+	}
+	if err := s.preflightConfigurationPaths(root, globalPath); err != nil {
+		return err
+	}
+	if err := s.prepareProject(root); err != nil {
+		return err
+	}
+	previousGlobal, globalExisted, err := snapshotFile(globalPath)
+	if err != nil {
+		return fmt.Errorf("snapshot global configuration: %w", err)
+	}
+	// Register the folder machine-wide so the global project view can list
+	// its projects from any directory.
+	if canonical, canonicalErr := filepath.Abs(root); canonicalErr == nil {
+		global.Folders = appendUniqueFolder(global.Folders, filepath.Clean(canonical))
+	}
+	if err := s.SaveGlobal(global); err != nil {
+		return err
+	}
+	if err := s.SaveProject(root, project); err != nil {
+		if rollbackErr := restoreFile(globalPath, previousGlobal, globalExisted); rollbackErr != nil {
+			return errors.Join(err, fmt.Errorf("restore global configuration: %w", rollbackErr))
+		}
+		return err
+	}
+	return nil
+}
+
+func (s *Store) preflightConfigurationPaths(root, globalPath string) error {
+	canonicalRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return fmt.Errorf("resolve project root: %w", err)
+	}
+	canonicalRoot, err = filepath.Abs(canonicalRoot)
+	if err != nil {
+		return fmt.Errorf("resolve absolute project root: %w", err)
+	}
+	rootInfo, err := os.Stat(canonicalRoot)
+	if err != nil {
+		return fmt.Errorf("inspect project root: %w", err)
+	}
+	if !rootInfo.IsDir() {
+		return fmt.Errorf("project root %q is not a directory", root)
+	}
+
+	projectDir := filepath.Join(canonicalRoot, configDirectoryName)
+	if err := rejectSymlink(projectDir, "project configuration directory"); err != nil {
+		return err
+	}
+	if info, err := os.Lstat(projectDir); err == nil && !info.IsDir() {
+		return fmt.Errorf("prepare project configuration directory: %q is not a directory", projectDir)
+	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("inspect project configuration directory: %w", err)
+	}
+	for _, candidate := range []struct {
+		path string
+		name string
+	}{
+		{path: filepath.Join(projectDir, configFileName), name: "project configuration file"},
+		{path: filepath.Join(projectDir, projectsDirectory), name: "project runtime directory"},
+	} {
+		if err := rejectSymlink(candidate.path, candidate.name); err != nil {
+			return err
+		}
+	}
+
+	canonicalGlobal, err := canonicalPath(globalPath)
+	if err != nil {
+		return fmt.Errorf("resolve canonical global configuration path: %w", err)
+	}
+	canonicalProject, err := canonicalPath(filepath.Join(projectDir, configFileName))
+	if err != nil {
+		return fmt.Errorf("resolve canonical project configuration path: %w", err)
+	}
+	if canonicalGlobal == canonicalProject {
+		return fmt.Errorf("global and project configuration resolve to the same canonical path %q", canonicalGlobal)
+	}
+	return nil
+}
+
+func rejectSymlink(path, name string) error {
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("inspect %s: %w", name, err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("%s %q must not be a symbolic link", name, path)
+	}
+	return nil
+}
+
+// canonicalPath resolves every existing path component while retaining any
+// not-yet-created suffix. It performs no filesystem mutation.
+func canonicalPath(path string) (string, error) {
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	current := filepath.Clean(absolute)
+	var suffix []string
+	for {
+		if _, err := os.Lstat(current); err == nil {
+			resolved, err := filepath.EvalSymlinks(current)
+			if err != nil {
+				return "", err
+			}
+			for i := len(suffix) - 1; i >= 0; i-- {
+				resolved = filepath.Join(resolved, suffix[i])
+			}
+			return filepath.Clean(resolved), nil
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return "", err
+		}
+
+		parent := filepath.Dir(current)
+		if parent == current {
+			return "", fmt.Errorf("no existing parent for %q", path)
+		}
+		suffix = append(suffix, filepath.Base(current))
+		current = parent
+	}
+}
+
+func (s *Store) prepareProject(root string) error {
+	if err := ensurePrivateDir(filepath.Dir(s.ProjectConfigPath(root))); err != nil {
+		return fmt.Errorf("prepare project configuration directory: %w", err)
+	}
+	if err := ensurePrivateDir(s.ProjectRuntimeDir(root)); err != nil {
+		return fmt.Errorf("prepare project runtime directory: %w", err)
+	}
+	return nil
+}
+
+func snapshotFile(path string) ([]byte, bool, error) {
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	return data, true, nil
+}
+
+func restoreFile(path string, data []byte, existed bool) error {
+	if !existed {
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		return nil
+	}
+	return writeBytesAtomic(path, data)
+}
+
+// IsConfigured reports whether projectRoot contains a readable, valid project configuration.
+func (s *Store) IsConfigured(root string) (bool, error) {
+	_, err := s.LoadProject(root)
+	if errors.Is(err, ErrProjectNotConfigured) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func readYAML(path string, dst any) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	d := yaml.NewDecoder(f)
+	d.KnownFields(true)
+	if err := d.Decode(dst); err != nil {
+		return fmt.Errorf("decode %s: %w", path, err)
+	}
+	var extra any
+	if err := d.Decode(&extra); err != io.EOF {
+		if err == nil {
+			return fmt.Errorf("decode %s: multiple YAML documents are not allowed", path)
+		}
+		return fmt.Errorf("decode %s: %w", path, err)
+	}
+	return nil
+}
+func writeYAMLAtomic(path string, value any) (retErr error) {
+	if err := ensurePrivateDir(filepath.Dir(path)); err != nil {
+		return fmt.Errorf("create configuration directory: %w", err)
+	}
+	f, err := os.CreateTemp(filepath.Dir(path), ".config-*.tmp")
+	if err != nil {
+		return fmt.Errorf("create temporary configuration: %w", err)
+	}
+	tmp := f.Name()
+	defer func() {
+		if err := os.Remove(tmp); err != nil && !errors.Is(err, os.ErrNotExist) && retErr == nil {
+			retErr = fmt.Errorf("remove temporary configuration: %w", err)
+		}
+	}()
+	if err := f.Chmod(0600); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("secure temporary configuration: %w", err)
+	}
+	enc := yaml.NewEncoder(f)
+	enc.SetIndent(2)
+	if err := enc.Encode(value); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("encode configuration: %w", err)
+	}
+	if err := enc.Close(); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("finish configuration encoding: %w", err)
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("sync configuration: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("close configuration: %w", err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return fmt.Errorf("replace configuration: %w", err)
+	}
+	return nil
+}
+
+func writeBytesAtomic(path string, data []byte) (retErr error) {
+	if err := ensurePrivateDir(filepath.Dir(path)); err != nil {
+		return fmt.Errorf("create configuration directory: %w", err)
+	}
+	f, err := os.CreateTemp(filepath.Dir(path), ".config-*.tmp")
+	if err != nil {
+		return fmt.Errorf("create temporary configuration: %w", err)
+	}
+	tmp := f.Name()
+	defer func() {
+		if err := os.Remove(tmp); err != nil && !errors.Is(err, os.ErrNotExist) && retErr == nil {
+			retErr = fmt.Errorf("remove temporary configuration: %w", err)
+		}
+	}()
+	if err := f.Chmod(0600); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("secure temporary configuration: %w", err)
+	}
+	if _, err := f.Write(data); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("write temporary configuration: %w", err)
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("sync configuration: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("close configuration: %w", err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return fmt.Errorf("replace configuration: %w", err)
+	}
+	return nil
+}
+
+func ensurePrivateDir(path string) error {
+	if err := os.MkdirAll(path, 0700); err != nil {
+		return err
+	}
+	if err := os.Chmod(path, 0700); err != nil {
+		return err
+	}
+	return nil
+}

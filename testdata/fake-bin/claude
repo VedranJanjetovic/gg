@@ -1,0 +1,10 @@
+#!/bin/sh
+set -eu
+log=${GG_FAKE_AGENT_LOG:-}
+if [ -n "$log" ]; then
+  {
+    printf 'agent=claude\n'
+    for arg do printf 'arg=%s\n' "$arg"; done
+  } >>"$log"
+fi
+printf '%s\n' 'fake-claude: deterministic response'

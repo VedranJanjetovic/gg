@@ -1,0 +1,379 @@
+package state
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"strings"
+	"time"
+)
+
+// CurrentSchemaVersion is the version of ProjectState understood by this package.
+const CurrentSchemaVersion = 1
+
+// LifecycleStatus is the persisted lifecycle state of a project.
+type LifecycleStatus string
+
+const (
+	StatusPending    LifecycleStatus = "pending"
+	StatusRunning    LifecycleStatus = "running"
+	StatusStopped    LifecycleStatus = "stopped"
+	StatusFailed     LifecycleStatus = "failed"
+	StatusFinished   LifecycleStatus = "finished"
+	StatusTerminated LifecycleStatus = "terminated"
+)
+
+// IsValid reports whether status is one of the supported persisted lifecycle states.
+func (status LifecycleStatus) IsValid() bool {
+	switch status {
+	case StatusPending, StatusRunning, StatusStopped, StatusFailed, StatusFinished, StatusTerminated:
+		return true
+	default:
+		return false
+	}
+}
+
+// IsTerminal reports whether a lifecycle status cannot transition further.
+func (status LifecycleStatus) IsTerminal() bool {
+	return status == StatusFinished || status == StatusTerminated
+}
+
+// IsActive reports whether a project is not in a terminal state.
+func (status LifecycleStatus) IsActive() bool {
+	return status.IsValid() && !status.IsTerminal()
+}
+
+// PipelineConfigSnapshot stores the exact pipeline configuration used by a run.
+// Data is kept as JSON so this package does not own the pipeline configuration schema.
+type PipelineConfigSnapshot struct {
+	SchemaVersion int             `json:"schemaVersion"`
+	Data          json.RawMessage `json:"data"`
+}
+
+// PhaseRecord records one visit to a pipeline phase or subphase.
+type PhaseRecord struct {
+	Phase         string          `json:"phase"`
+	Subphase      string          `json:"subphase,omitempty"`
+	Status        LifecycleStatus `json:"status"`
+	StartedAt     time.Time       `json:"startedAt"`
+	CompletedAt   *time.Time      `json:"completedAt,omitempty"`
+	ArtifactPaths []string        `json:"artifactPaths,omitempty"`
+	// Outcome is populated when an executable agent process has completed.
+	// It is optional so state written by earlier versions remains compatible.
+	Outcome *ExecutionOutcome `json:"outcome,omitempty"`
+}
+
+// ExecutionOutcome is the durable, machine-readable result of one phase
+// process. Log and metadata paths are relative to the project state root when
+// possible, making the record portable across application restarts.
+type ExecutionOutcome struct {
+	Runtime               string        `json:"runtime,omitempty"`
+	Model                 string        `json:"model,omitempty"`
+	Effort                string        `json:"effort,omitempty"`
+	ExitCode              int           `json:"exitCode"`
+	StartedAt             time.Time     `json:"startedAt"`
+	FinishedAt            time.Time     `json:"finishedAt"`
+	Duration              time.Duration `json:"duration"`
+	LogPath               string        `json:"logPath,omitempty"`
+	MetadataPath          string        `json:"metadataPath,omitempty"`
+	Canceled              bool          `json:"canceled,omitempty"`
+	DevelopmentBaseCommit string        `json:"developmentBaseCommit,omitempty"`
+	// TokensUsed is the agent-reported total token count for this execution;
+	// zero when the agent did not report usage.
+	TokensUsed int64 `json:"tokensUsed,omitempty"`
+	// CostUSD is the agent-reported cost of this execution in US dollars
+	// (claude reports total_cost_usd); zero when the agent does not report
+	// cost — gg never estimates.
+	CostUSD float64 `json:"costUsd,omitempty"`
+	// Error is the human-readable failure reason for a failed execution, so
+	// attached screens can explain the failure without reading log files.
+	Error string `json:"error,omitempty"`
+}
+
+// InterviewQA is one answered grooming question.
+type InterviewQA struct {
+	Question string `json:"question"`
+	Answer   string `json:"answer"`
+}
+
+// InterviewState is the durable grooming interview progress: questions still
+// waiting for the user and the clarifications already collected.
+type InterviewState struct {
+	Pending        []string      `json:"pending,omitempty"`
+	Clarifications []InterviewQA `json:"clarifications,omitempty"`
+	Rounds         int           `json:"rounds,omitempty"`
+	Done           bool          `json:"done"`
+}
+
+// PlanState mirrors the machine-readable implementation-phase list from the
+// planning artifact and the phases development has completed, so plan
+// progress is visible without parsing worktree artifacts.
+type PlanState struct {
+	Phases    []string `json:"phases,omitempty"`
+	Completed []string `json:"completed,omitempty"`
+}
+
+// ProjectState is the durable, versioned state for one project.
+type ProjectState struct {
+	SchemaVersion      int                    `json:"schemaVersion"`
+	Name               string                 `json:"name"`
+	Slug               string                 `json:"slug"`
+	OriginalGoal       string                 `json:"originalGoal"`
+	AcceptanceCriteria []string               `json:"acceptanceCriteria"`
+	PipelineConfig     PipelineConfigSnapshot `json:"pipelineConfig"`
+	CurrentPhase       string                 `json:"currentPhase"`
+	CurrentSubphase    string                 `json:"currentSubphase,omitempty"`
+	Status             LifecycleStatus        `json:"status"`
+	// Terminal records the explicit terminal reason when a later integration
+	// observes one. It is optional for backwards-compatible legacy state.
+	Terminal *TerminalState `json:"terminal,omitempty"`
+	// Interview persists the grooming interview so a session that exits
+	// mid-interview re-enters it on the next attach. It is optional for
+	// backwards-compatible legacy state (nil means no interview is owed).
+	Interview *InterviewState `json:"interview,omitempty"`
+	// Plan mirrors the planning artifact's phase list and development's
+	// completion marks. It is optional display data for legacy state.
+	Plan         *PlanState `json:"plan,omitempty"`
+	WorktreePath string     `json:"worktreePath"`
+	BranchName   string     `json:"branchName"`
+	// GitDisabled marks projects whose configured folder is not a git
+	// repository: they execute directly in that folder (no worktree, no
+	// branch) and every git-dependent behavior — commit enforcement, proof
+	// uncommitted checks, and the rebase/PR/CI phases — is skipped.
+	GitDisabled   bool          `json:"gitDisabled,omitempty"`
+	PhaseHistory  []PhaseRecord `json:"phaseHistory,omitempty"`
+	ArtifactPaths []string      `json:"artifactPaths,omitempty"`
+	// PullRequestURL is the created PR identity used by later GitOps phases.
+	// It is optional so legacy state continues to use branch fallback.
+	PullRequestURL  string    `json:"pullRequestUrl,omitempty"`
+	CreatedAt       time.Time `json:"createdAt"`
+	UpdatedAt       time.Time `json:"updatedAt"`
+	StatusChangedAt time.Time `json:"statusChangedAt"`
+	// RunReservationToken identifies the reservation that currently owns a
+	// running state. It is optional for compatibility with legacy state files.
+	RunReservationToken string `json:"runReservationToken,omitempty"`
+	// ActiveRunID identifies the process-owned execution currently using the
+	// project. Stop requests use it to reject stale requests from an older run.
+	ActiveRunID string `json:"activeRunId,omitempty"`
+	// RunOwnerPID is the OS process that owns the running state. Observers
+	// use it to distinguish a live run from one left behind by a dead
+	// process. Zero means unknown (legacy state).
+	RunOwnerPID int `json:"runOwnerPid,omitempty"`
+	// DispatchClaimRunID is the durable launch linearization point for the
+	// current phase. A later stop request is ordered after this claim; the
+	// phase result clears it.
+	DispatchClaimRunID string `json:"dispatchClaimRunId,omitempty"`
+	// StopRequested is a durable cancellation signal consumed by the active
+	// runner. It is cleared by the next run or by terminal bookkeeping.
+	StopRequested bool   `json:"stopRequested,omitempty"`
+	StopRequestID string `json:"stopRequestId,omitempty"`
+	// MaxQAAttempts and the QA loop cursor make the bounded feedback loop
+	// restart-safe. They are optional for compatibility with existing state.
+	MaxQAAttempts           int      `json:"maxQaAttempts,omitempty"`
+	QACompletedAttempts     int      `json:"qaCompletedAttempts,omitempty"`
+	QALoopStage             string   `json:"qaLoopStage,omitempty"`
+	QAFeedbackArtifactPaths []string `json:"qaFeedbackArtifactPaths,omitempty"`
+	// QAFixNextSubphase is the next configured Development fix subphase. It is
+	// advanced after every durable fix result so resume never replays a
+	// successful subphase.
+	QAFixNextSubphase string `json:"qaFixNextSubphase,omitempty"`
+	// PendingRebaseConflict distinguishes an actual persisted unmerged-index
+	// failure from an ordinary Rebase phase failure.
+	PendingRebaseConflict       bool     `json:"pendingRebaseConflict,omitempty"`
+	RebaseConflictArtifactPaths []string `json:"rebaseConflictArtifactPaths,omitempty"`
+	// PostRebaseContinuationPhase is recorded only after post-conflict QA has
+	// succeeded. It bridges the restart window before the next phase starts.
+	PostRebaseContinuationPhase string `json:"postRebaseContinuationPhase,omitempty"`
+	// PRCIMonitor is the restart-safe cursor and terminal outcome for the
+	// post-pipeline pull-request lifecycle monitor.
+	PRCIMonitor *PRCIMonitorState `json:"prCiMonitor,omitempty"`
+}
+
+// PRCIMonitorState is provider-neutral. Cursor is an opaque provider cursor;
+// Result is the last normalized observation.
+type PRCIMonitorState struct {
+	Cursor string `json:"cursor,omitempty"`
+	Result string `json:"result,omitempty"`
+	// LastRemediation is retained for decoding snapshots written before the
+	// durable collection was introduced. New writes also include every key.
+	LastRemediation string    `json:"lastRemediation,omitempty"`
+	RemediationKeys []string  `json:"remediationKeys,omitempty"`
+	Terminal        bool      `json:"terminal,omitempty"`
+	Failed          bool      `json:"failed,omitempty"`
+	Error           string    `json:"error,omitempty"`
+	UpdatedAt       time.Time `json:"updatedAt"`
+}
+
+// NewProjectState validates and returns a project state suitable for persistence.
+// It copies caller-owned slices before returning so the persisted model is not
+// accidentally changed through the constructor's input.
+func NewProjectState(input ProjectState) (ProjectState, error) {
+	state := input
+	state.AcceptanceCriteria = append([]string(nil), input.AcceptanceCriteria...)
+	state.PhaseHistory = append([]PhaseRecord(nil), input.PhaseHistory...)
+	state.ArtifactPaths = append([]string(nil), input.ArtifactPaths...)
+	state.QAFeedbackArtifactPaths = append([]string(nil), input.QAFeedbackArtifactPaths...)
+	state.RebaseConflictArtifactPaths = append([]string(nil), input.RebaseConflictArtifactPaths...)
+	state.PipelineConfig.Data = append(json.RawMessage(nil), input.PipelineConfig.Data...)
+	if input.PRCIMonitor != nil {
+		monitor := *input.PRCIMonitor
+		monitor.RemediationKeys = append([]string(nil), input.PRCIMonitor.RemediationKeys...)
+		state.PRCIMonitor = &monitor
+	}
+	if input.Interview != nil {
+		interview := *input.Interview
+		interview.Pending = append([]string(nil), input.Interview.Pending...)
+		interview.Clarifications = append([]InterviewQA(nil), input.Interview.Clarifications...)
+		state.Interview = &interview
+	}
+	if input.Plan != nil {
+		plan := PlanState{
+			Phases:    append([]string(nil), input.Plan.Phases...),
+			Completed: append([]string(nil), input.Plan.Completed...),
+		}
+		state.Plan = &plan
+	}
+	for i := range state.PhaseHistory {
+		state.PhaseHistory[i].ArtifactPaths = append([]string(nil), input.PhaseHistory[i].ArtifactPaths...)
+		if input.PhaseHistory[i].Outcome != nil {
+			outcome := *input.PhaseHistory[i].Outcome
+			state.PhaseHistory[i].Outcome = &outcome
+		}
+	}
+	if state.SchemaVersion == 0 {
+		state.SchemaVersion = CurrentSchemaVersion
+	}
+	if err := state.Validate(); err != nil {
+		return ProjectState{}, err
+	}
+	return state, nil
+}
+
+// Validate checks the invariants required before a state can be persisted.
+func (state ProjectState) Validate() error {
+	if state.SchemaVersion != CurrentSchemaVersion {
+		return fmt.Errorf("unsupported state schema version %d", state.SchemaVersion)
+	}
+	if state.Name == "" {
+		return errors.New("project name is required")
+	}
+	if !validSlug(state.Slug) {
+		return fmt.Errorf("invalid project slug %q", state.Slug)
+	}
+	if strings.TrimSpace(state.OriginalGoal) == "" {
+		return errors.New("original goal is required")
+	}
+	if len(state.AcceptanceCriteria) == 0 {
+		return errors.New("at least one acceptance criterion is required")
+	}
+	for i, criterion := range state.AcceptanceCriteria {
+		if strings.TrimSpace(criterion) == "" {
+			return fmt.Errorf("acceptance criterion %d is empty", i)
+		}
+	}
+	if state.PipelineConfig.SchemaVersion <= 0 || !json.Valid(state.PipelineConfig.Data) {
+		return errors.New("pipeline configuration snapshot must contain valid versioned JSON")
+	}
+	if strings.TrimSpace(state.CurrentPhase) == "" {
+		return errors.New("current phase is required")
+	}
+	if !state.Status.IsValid() {
+		return fmt.Errorf("invalid lifecycle status %q", state.Status)
+	}
+	if state.Terminal != nil {
+		if !state.Terminal.Kind.IsValid() || state.Terminal.Kind == TerminalNone {
+			return fmt.Errorf("invalid terminal kind %q", state.Terminal.Kind)
+		}
+		if !state.Status.IsTerminal() {
+			return errors.New("terminal marker requires a terminal lifecycle status")
+		}
+		if state.Terminal.At.IsZero() {
+			return errors.New("terminal marker requires a timestamp")
+		}
+	}
+	if strings.TrimSpace(state.WorktreePath) == "" {
+		return errors.New("worktree path is required")
+	}
+	if strings.TrimSpace(state.BranchName) == "" && !state.GitDisabled {
+		// Git-disabled projects run directly in a non-git folder and own no
+		// branch; every other project must name its worktree branch.
+		return errors.New("branch name is required")
+	}
+	if state.CreatedAt.IsZero() || state.UpdatedAt.IsZero() || state.StatusChangedAt.IsZero() {
+		return errors.New("created, updated, and status-changed timestamps are required")
+	}
+	if state.UpdatedAt.Before(state.CreatedAt) {
+		return errors.New("updated timestamp precedes created timestamp")
+	}
+	for i, phase := range state.PhaseHistory {
+		if strings.TrimSpace(phase.Phase) == "" || !phase.Status.IsValid() || phase.StartedAt.IsZero() {
+			return fmt.Errorf("invalid phase history entry %d", i)
+		}
+	}
+	if state.MaxQAAttempts < 0 || state.QACompletedAttempts < 0 {
+		return errors.New("QA attempt counts cannot be negative")
+	}
+	if state.QACompletedAttempts > state.MaxQAAttempts {
+		return errors.New("completed QA attempts exceed configured maximum")
+	}
+	switch state.QALoopStage {
+	case "":
+		if state.QACompletedAttempts != 0 {
+			return errors.New("completed QA attempts require a loop stage")
+		}
+		if state.QAFixNextSubphase != "" {
+			return errors.New("QA fix cursor requires the fix loop stage")
+		}
+	case "qa":
+		if state.MaxQAAttempts == 0 {
+			return errors.New("QA loop stage requires a configured maximum")
+		}
+		if state.QACompletedAttempts >= state.MaxQAAttempts {
+			return errors.New("QA stage requires attempts remaining")
+		}
+		if state.QAFixNextSubphase != "" {
+			return errors.New("QA stage cannot retain a fix subphase cursor")
+		}
+	case "fix":
+		if state.MaxQAAttempts == 0 {
+			return errors.New("QA loop stage requires a configured maximum")
+		}
+		if state.QACompletedAttempts == 0 || state.QACompletedAttempts >= state.MaxQAAttempts {
+			return errors.New("QA fix stage requires a failed attempt and attempts remaining")
+		}
+		if strings.TrimSpace(state.QAFixNextSubphase) == "" {
+			return errors.New("QA fix stage requires the next Development subphase")
+		}
+	case "exhausted":
+		if state.MaxQAAttempts == 0 || state.QACompletedAttempts != state.MaxQAAttempts {
+			return errors.New("exhausted QA stage requires all configured attempts")
+		}
+		if state.QAFixNextSubphase != "" {
+			return errors.New("exhausted QA stage cannot retain a fix subphase cursor")
+		}
+	default:
+		return fmt.Errorf("invalid QA loop stage %q", state.QALoopStage)
+	}
+	if state.PendingRebaseConflict && state.PostRebaseContinuationPhase != "" {
+		return errors.New("pending rebase conflict cannot have a post-QA continuation")
+	}
+	if state.PostRebaseContinuationPhase == "rebase" {
+		return errors.New("post-Rebase continuation cannot point to Rebase")
+	}
+	if state.RunReservationToken != "" && state.ActiveRunID != "" {
+		return errors.New("run reservation and active run identity are mutually exclusive")
+	}
+	return nil
+}
+
+func validSlug(slug string) bool {
+	if slug == "" || strings.HasPrefix(slug, "-") || strings.HasSuffix(slug, "-") || strings.Contains(slug, "--") {
+		return false
+	}
+	for _, character := range slug {
+		if (character < 'a' || character > 'z') && (character < '0' || character > '9') && character != '-' {
+			return false
+		}
+	}
+	return true
+}
