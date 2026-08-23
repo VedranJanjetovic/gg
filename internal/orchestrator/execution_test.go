@@ -1144,6 +1144,106 @@ func planLoopRequest(t *testing.T, completed ...string) (orchestrator.Request, *
 	return request(t, resolvedPipeline(t)), store
 }
 
+type planningRetryRunner struct {
+	worktree  string
+	validFrom int
+	attempts  int
+	runIDs    []string
+	prompts   []string
+}
+
+func (r *planningRetryRunner) Run(_ context.Context, req agent.RunRequest) (agent.RunResult, error) {
+	if req.Phase == pipeline.PhasePlanning {
+		r.attempts++
+		r.runIDs = append(r.runIDs, req.RunID)
+		r.prompts = append(r.prompts, req.Prompt)
+		if err := os.MkdirAll(filepath.Join(r.worktree, ".gg"), 0o755); err != nil {
+			return agent.RunResult{Phase: req.Phase, Status: state.StatusFailed}, err
+		}
+		plan := planningTestArtifact(r.attempts >= r.validFrom)
+		if err := os.WriteFile(filepath.Join(r.worktree, ".gg", "plan.md"), []byte(plan), 0o644); err != nil {
+			return agent.RunResult{Phase: req.Phase, Status: state.StatusFailed}, err
+		}
+	}
+	return agent.RunResult{Phase: req.Phase, Status: state.StatusFinished, Disposition: agent.DispositionPassed}, nil
+}
+
+func planningTestArtifact(valid bool) string {
+	if !valid {
+		return "---\ngg_run_id: \"run\"\ngg_disposition: passed\ngg_plan_complexity: \"Trivial\"\ngg_plan_complexity_evidence: [\"one outcome\"]\ngg_plan_phases: [\"Phase 1: first\", \"Phase 2: second\"]\ngg_plan_phase_boundaries: [{\"phase\":\"Phase 1: first\",\"justification\":\"split\"}, {\"phase\":\"Phase 2: second\",\"justification\":\"split\"}]\n---\n## Complexity assessment\n\n- Complexity category: **Trivial**\n- Selected phase count: **2**\n\nSupporting evidence:\n\n1. one outcome\n\n## Phase 1: first\n\nBoundary justification: split\n\n## Phase 2: second\n\nBoundary justification: split\n"
+	}
+	return "---\ngg_run_id: \"run\"\ngg_disposition: passed\ngg_plan_complexity: \"Trivial\"\ngg_plan_complexity_evidence: [\"one outcome\"]\ngg_plan_phases: [\"Phase 1: first\"]\ngg_plan_phase_boundaries: [{\"phase\":\"Phase 1: first\",\"justification\":\"one cohesive outcome\"}]\n---\n## Complexity assessment\n\n- Complexity category: **Trivial**\n- Selected phase count: **1**\n\nSupporting evidence:\n\n1. one outcome\n\n## Phase 1: first\n\nBoundary justification: one cohesive outcome\n"
+}
+
+func TestPlanningRetriesInvalidArtifactWithFreshInvocationAndExactEvidence(t *testing.T) {
+	worktree := t.TempDir()
+	retryRunner := &planningRetryRunner{worktree: worktree, validFrom: 2}
+	prompts := &scopeCapturePrompt{}
+	req := request(t, resolvedPipeline(t, config.PhasePlanning))
+	req.Project.WorktreePath = worktree
+	req.Project.PipelineConfig = state.PipelineConfigSnapshot{SchemaVersion: 1, Data: []byte(`{"planningContractVersion":1}`)}
+	_, err := orchestrator.NewController(
+		orchestrator.WithRunner(retryRunner),
+		orchestrator.WithPhaseState(&fakeState{}),
+		orchestrator.WithPromptBuilder(prompts),
+	).Execute(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retryRunner.attempts != 2 || len(retryRunner.runIDs) != 2 || retryRunner.runIDs[0] == retryRunner.runIDs[1] {
+		t.Fatalf("planning attempts=%d run IDs=%v, want two fresh invocations", retryRunner.attempts, retryRunner.runIDs)
+	}
+	var planningInputs []agent.PromptInput
+	for _, input := range prompts.inputs {
+		if input.Phase == pipeline.PhasePlanning {
+			planningInputs = append(planningInputs, input)
+		}
+	}
+	if len(planningInputs) != 2 || planningInputs[1].PlanningAttempt != 2 {
+		t.Fatalf("planning prompt inputs=%#v, want corrective attempt 2", planningInputs)
+	}
+	if !strings.Contains(planningInputs[1].RejectedPlanningArtifact, "Phase 2: second") || len(planningInputs[1].PlanningValidationErrors) == 0 {
+		t.Fatalf("retry evidence=%#v", planningInputs[1])
+	}
+}
+
+func TestPlanningStopsAfterThreeInvalidAttemptsWithoutFourthDispatch(t *testing.T) {
+	worktree := t.TempDir()
+	retryRunner := &planningRetryRunner{worktree: worktree, validFrom: 4}
+	req := request(t, resolvedPipeline(t, config.PhasePlanning))
+	req.Project.WorktreePath = worktree
+	req.Project.PipelineConfig = state.PipelineConfigSnapshot{SchemaVersion: 1, Data: []byte(`{"planningContractVersion":1}`)}
+	_, err := orchestrator.NewController(
+		orchestrator.WithRunner(retryRunner),
+		orchestrator.WithPhaseState(&fakeState{}),
+		orchestrator.WithPromptBuilder(&scopeCapturePrompt{}),
+	).Execute(context.Background(), req)
+	if err == nil || !strings.Contains(err.Error(), "phase-limit-exceeded") {
+		t.Fatalf("error=%v, want clear phase-limit-exceeded failure", err)
+	}
+	if retryRunner.attempts != agent.MaxPlanningAttempts {
+		t.Fatalf("planning attempts=%d, want exactly %d", retryRunner.attempts, agent.MaxPlanningAttempts)
+	}
+}
+
+func TestLegacyPlanningSnapshotBypassesNewContractGate(t *testing.T) {
+	worktree := t.TempDir()
+	retryRunner := &planningRetryRunner{worktree: worktree, validFrom: 4}
+	req := request(t, resolvedPipeline(t, config.PhasePlanning))
+	req.Project.WorktreePath = worktree
+	req.Project.PipelineConfig = state.PipelineConfigSnapshot{SchemaVersion: 1, Data: []byte(`{"schemaVersion":1}`)}
+	if _, err := orchestrator.NewController(
+		orchestrator.WithRunner(retryRunner),
+		orchestrator.WithPhaseState(&fakeState{}),
+		orchestrator.WithPromptBuilder(&scopeCapturePrompt{}),
+	).Execute(context.Background(), req); err != nil {
+		t.Fatalf("legacy plan was revalidated: %v", err)
+	}
+	if retryRunner.attempts != 1 {
+		t.Fatalf("legacy planning attempts=%d, want one tolerant execution", retryRunner.attempts)
+	}
+}
+
 func TestDevelopmentRunsFreshScopedSequencePerPendingPlanPhase(t *testing.T) {
 	req, store := planLoopRequest(t, "P1")
 	runner := &fakeSeqRunner{}

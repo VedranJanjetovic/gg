@@ -38,6 +38,16 @@ type Request struct {
 	// nil means the run covers the whole worktree (no plan, or a QA feedback
 	// fix pass). Set per-dispatch by the development loop, never persisted.
 	PlanScope *PlanPhaseScope
+	// PlanningRetry is transient context for a corrective Planning invocation.
+	// It is never persisted as project state; the rejected artifact and exact
+	// violations are quoted into the fresh standalone prompt.
+	PlanningRetry *PlanningRetry
+}
+
+type PlanningRetry struct {
+	Attempt    int
+	Artifact   string
+	Violations []string
 }
 
 // PlanPhaseScope names the plan phase a Development run is confined to.

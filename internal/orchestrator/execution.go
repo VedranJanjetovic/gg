@@ -296,6 +296,15 @@ func (c *sequentialController) execute(ctx context.Context, request Request, res
 			}
 			resuming = true
 		}
+		if phase == pipeline.PhasePlanning {
+			planningOutcomes, err := c.executePlanningLoop(ctx, &request, executable)
+			outcomes = append(outcomes, planningOutcomes...)
+			request.PlanningRetry = nil
+			if err != nil {
+				return outcomes, err
+			}
+			continue
+		}
 		if phase == pipeline.PhaseQA {
 			if err := ctx.Err(); err != nil {
 				return outcomes, c.stopBeforeDispatch(request, phase, "", err)
@@ -813,6 +822,35 @@ func (c *sequentialController) executeDevelopmentLoop(ctx context.Context, reque
 	return outcomes, nil
 }
 
+// executePlanningLoop validates only Planning artifacts from snapshots that
+// carry the new contract marker. Each invalid artifact gets a fresh agent
+// invocation and the same complete scope plus exact rejection evidence.
+func (c *sequentialController) executePlanningLoop(ctx context.Context, request *Request, executable pipeline.ExecutablePhase) ([]PhaseOutcome, error) {
+	if !pipeline.PlanningContractEnforced(request.Project.PipelineConfig) {
+		outcome, err := c.executePhase(ctx, *request, executable, "", 0, nil)
+		return []PhaseOutcome{outcome}, err
+	}
+
+	var outcomes []PhaseOutcome
+	for attempt := 1; attempt <= agent.MaxPlanningAttempts; attempt++ {
+		outcome, err := c.executePhase(ctx, *request, executable, "", attempt-1, nil)
+		outcomes = append(outcomes, outcome)
+		request.Project.ArtifactPaths = appendUnique(request.Project.ArtifactPaths, outcome.Result.ArtifactPaths...)
+		if err == nil {
+			return outcomes, nil
+		}
+		var contractErr *agent.PlanningContractError
+		if !errors.As(err, &contractErr) {
+			return outcomes, err
+		}
+		if attempt == agent.MaxPlanningAttempts {
+			return outcomes, fmt.Errorf("phase-limit-exceeded: Planning artifact remained invalid after %d attempts: %w", agent.MaxPlanningAttempts, err)
+		}
+		request.PlanningRetry = &PlanningRetry{Attempt: attempt + 1, Artifact: contractErr.Artifact, Violations: append([]string(nil), contractErr.Violations...)}
+	}
+	return outcomes, errors.New("phase-limit-exceeded: Planning attempts exhausted")
+}
+
 // pendingPlanPhases returns the plan phases not yet completed, freshly loaded
 // from durable state (planning records the plan earlier in the same run).
 func (c *sequentialController) pendingPlanPhases(ctx context.Context, slug string) (pending []string, total int) {
@@ -847,6 +885,11 @@ func (c *sequentialController) executePhase(ctx context.Context, request Request
 	artifacts := appendUnique(request.Project.ArtifactPaths, feedback...)
 	invocationID := phaseInvocationID(request.RunID, phase, subphase, iteration)
 	promptInput := agent.PromptInput{Project: request.Project, Phase: phase, Subphase: subphase, PhaseContract: request.PhaseContracts[phase], ArtifactPaths: artifacts, WorkingDirectory: request.Project.WorktreePath, RunID: invocationID, Development: phase == pipeline.PhaseDevelopment}
+	if request.PlanningRetry != nil && phase == pipeline.PhasePlanning {
+		promptInput.PlanningAttempt = request.PlanningRetry.Attempt
+		promptInput.RejectedPlanningArtifact = request.PlanningRetry.Artifact
+		promptInput.PlanningValidationErrors = append([]string(nil), request.PlanningRetry.Violations...)
+	}
 	if request.PlanScope != nil {
 		promptInput.PlanPhase = request.PlanScope.Name
 		promptInput.PlanPhaseIndex = request.PlanScope.Index
@@ -960,13 +1003,6 @@ func (c *sequentialController) executePhase(ctx context.Context, request Request
 			runResult.Status = state.StatusFailed
 		}
 	}
-	if dispatched && (phase == pipeline.PhasePlanning || (phase == pipeline.PhaseDevelopment && request.PlanScope == nil)) {
-		// Scoped development runs are excluded: their plan-phase completion is
-		// orchestrator-owned (recorded after the phase's review passes), and an
-		// agent-reported early completion must not skip that phase's testing or
-		// review on resume.
-		c.recordPlanProgress(context.WithoutCancel(ctx), request, phase)
-	}
 	outcome := PhaseOutcome{Result: runResult, Iteration: iteration, FeedbackArtifactPaths: append([]string(nil), feedback...)}
 	if runErr == nil && runResult.Status != state.StatusFailed && runResult.Status != state.StatusStopped {
 		if cancellation := ctx.Err(); cancellation != nil {
@@ -985,6 +1021,19 @@ func (c *sequentialController) executePhase(ctx context.Context, request Request
 			}
 		}
 		return c.finishFailedPhase(ctx, request, phase, subphase, runResult, runErr, iteration, feedback, previousHead)
+	}
+	if phase == pipeline.PhasePlanning && pipeline.PlanningContractEnforced(request.Project.PipelineConfig) {
+		if _, validationErr := agent.ValidatePlanningArtifact(request.Project.WorktreePath); validationErr != nil {
+			return c.finishFailedPhase(ctx, request, phase, subphase, runResult, validationErr, iteration, feedback, previousHead)
+		}
+	}
+	if dispatched && (phase == pipeline.PhasePlanning || (phase == pipeline.PhaseDevelopment && request.PlanScope == nil)) {
+		// Scoped development runs are excluded: their plan-phase completion is
+		// orchestrator-owned (recorded after the phase's review passes), and an
+		// agent-reported early completion must not skip that phase's testing or
+		// review on resume. Planning reaches this point only after strict
+		// validation succeeds; legacy plans retain tolerant display parsing.
+		c.recordPlanProgress(context.WithoutCancel(ctx), request, phase)
 	}
 
 	if err := c.recordResult(ctx, request.Project.Slug, phase, subphase, runResult, state.StatusFinished, previousHead); err != nil {

@@ -279,3 +279,32 @@ func TestPlanningPromptUpdatesExistingPlanWithoutDiscardingCompletedWork(t *test
 		t.Fatalf("fresh project must not carry the update instruction: err=%v", err)
 	}
 }
+
+func TestPlanningPromptIncludesRubricAndExactCorrectionEvidence(t *testing.T) {
+	got, err := BuildPrompt(PromptInput{
+		Project: state.ProjectState{OriginalGoal: "update README wording", AcceptanceCriteria: []string{"the README explains the new wording"}},
+		Phase:   pipeline.PhasePlanning, PhaseContract: "contract", WorkingDirectory: "/tmp/worktree",
+		RunID: "run/planning/iteration-1", PlanningAttempt: 2,
+		RejectedPlanningArtifact: "bad plan with eleven phases",
+		PlanningValidationErrors: []string{"phase-limit-exceeded: plan contains 11 phases, maximum is 10", "body phase names do not match frontmatter"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"Trivial is one cohesive localized outcome",
+		"Simple is one localized component",
+		"Moderate means multiple components",
+		"Complex means cross-service work",
+		"README-only wording update is Trivial with exactly one phase",
+		"This is Planning attempt 2 of 3",
+		`Rejected artifact path: ".gg/plan.md"`,
+		`"bad plan with eleven phases"`,
+		`"phase-limit-exceeded: plan contains 11 phases, maximum is 10"`,
+		"complete original goal and acceptance criteria",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("planning prompt missing %q:\n%s", want, got)
+		}
+	}
+}

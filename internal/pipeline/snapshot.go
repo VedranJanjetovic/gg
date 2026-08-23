@@ -13,8 +13,14 @@ import (
 
 const executionSnapshotSchemaVersion = 1
 
+// PlanningContractVersion identifies snapshots created after the strict
+// Planning artifact contract became enforceable. A missing marker means the
+// project predates that contract and is grandfathered on resume and updates.
+const PlanningContractVersion = 1
+
 type executionSnapshot struct {
 	SchemaVersion    int                           `json:"schemaVersion"`
+	PlanningContract int                           `json:"planningContractVersion,omitempty"`
 	Phases           []executionSnapshotPhase      `json:"phases"`
 	Subphases        DevelopmentSubphaseGeneration `json:"developmentSubphases"`
 	MaxQAAttempts    int                           `json:"maxQaAttempts"`
@@ -41,6 +47,7 @@ func SnapshotExecution(plan ExecutablePipeline, subphases DevelopmentSubphaseGen
 	}
 	snapshot := executionSnapshot{
 		SchemaVersion:    executionSnapshotSchemaVersion,
+		PlanningContract: PlanningContractVersion,
 		Subphases:        cloneSubphaseGeneration(subphases),
 		MaxQAAttempts:    maxQAAttempts,
 		GitOps:           effectiveGitOps,
@@ -61,6 +68,20 @@ func SnapshotExecution(plan ExecutablePipeline, subphases DevelopmentSubphaseGen
 		return state.PipelineConfigSnapshot{}, fmt.Errorf("encode pipeline execution snapshot: %w", err)
 	}
 	return state.PipelineConfigSnapshot{SchemaVersion: executionSnapshotSchemaVersion, Data: data}, nil
+}
+
+// PlanningContractEnforced reports whether a persisted execution snapshot was
+// created under the strict Planning contract. Legacy snapshots intentionally
+// return false so accepted plans remain resumable and updateable unchanged.
+func PlanningContractEnforced(snapshot state.PipelineConfigSnapshot) bool {
+	if snapshot.SchemaVersion != executionSnapshotSchemaVersion || len(bytes.TrimSpace(snapshot.Data)) == 0 {
+		return false
+	}
+	var persisted executionSnapshot
+	if err := json.Unmarshal(snapshot.Data, &persisted); err != nil {
+		return false
+	}
+	return persisted.PlanningContract >= PlanningContractVersion
 }
 
 // RestoreExecution restores only persisted execution data. Ambient

@@ -8,6 +8,7 @@ import (
 
 	"github.com/VedranJanjetovic/gg/internal/config"
 	"github.com/VedranJanjetovic/gg/internal/pipeline"
+	"github.com/VedranJanjetovic/gg/internal/state"
 )
 
 func TestResolveBuildsExecutablePipeline(t *testing.T) {
@@ -386,6 +387,38 @@ func TestSnapshotExecutionPersistsGitOpsSettings(t *testing.T) {
 	}
 	if legacyGitOps.Configured {
 		t.Fatal("legacy snapshot without configured marker was treated as configured")
+	}
+}
+
+func TestPlanningContractMarkerGrandfathersSnapshotsWithoutIt(t *testing.T) {
+	resolved := resolvedConfig()
+	resolved.Defaults = config.AgentSettings{Agent: config.AgentClaude, Model: "default-model", Effort: config.EffortMedium}
+	plan, err := pipeline.Resolve(pipeline.DefaultPipeline(), resolved)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := pipeline.SnapshotExecution(plan, pipeline.DevelopmentSubphaseGeneration{}, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !pipeline.PlanningContractEnforced(snapshot) {
+		t.Fatal("new execution snapshot did not carry the Planning contract marker")
+	}
+	var legacy map[string]json.RawMessage
+	if err := json.Unmarshal(snapshot.Data, &legacy); err != nil {
+		t.Fatal(err)
+	}
+	delete(legacy, "planningContractVersion")
+	legacyData, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot.Data = legacyData
+	if pipeline.PlanningContractEnforced(snapshot) {
+		t.Fatal("snapshot without the marker was not grandfathered")
+	}
+	if pipeline.PlanningContractEnforced(state.PipelineConfigSnapshot{SchemaVersion: 1, Data: []byte(`{}`)}) {
+		t.Fatal("empty legacy snapshot was treated as a new contract snapshot")
 	}
 }
 

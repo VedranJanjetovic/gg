@@ -245,15 +245,39 @@ if [ -z "$run_id" ]; then
 	printf 'missing run ID protocol in prompt\n' >&2
 	exit 65
 fi
-printf '%s\n' '---' "gg_run_id: \"$run_id\"" "gg_disposition: $disposition" '---' \
-	"phase=$phase subphase=$subphase disposition=$disposition" > ".gg/$artifact"
-if [ "$phase" = qa ]; then
-cat > PROOF.md <<EOF
-# PROOF
-
+if [ "$phase" = planning ]; then
+cat > ".gg/$artifact" <<EOF
 ---
 gg_run_id: "$run_id"
-gg_disposition: $([ "$disposition" = failed ] && printf feedback || printf pass)
+gg_disposition: passed
+gg_plan_complexity: "Trivial"
+gg_plan_complexity_evidence: ["The fixture exercises one cohesive pipeline outcome."]
+gg_plan_phases: ["Phase 1: production pipeline"]
+gg_plan_phase_boundaries: [{"phase":"Phase 1: production pipeline","justification":"The fixture is one cohesive outcome with no dependency ordering."}]
+---
+# Implementation Plan
+
+## Complexity assessment
+
+- Complexity category: **Trivial**
+- Selected phase count: **1**
+
+Supporting evidence:
+
+1. The fixture exercises one cohesive pipeline outcome.
+
+## Phase 1: production pipeline
+
+Boundary justification: The fixture is one cohesive outcome with no dependency ordering.
+EOF
+else
+printf '%s\n' '---' "gg_run_id: \"$run_id\"" "gg_disposition: $disposition" '---' \
+	"phase=$phase subphase=$subphase disposition=$disposition" > ".gg/$artifact"
+fi
+if [ "$phase" = qa ]; then
+cat > .gg/PROOF.md <<EOF
+---
+gg_run_id: "$run_id"
 ---
 
 ## Validation: production flow
@@ -265,14 +289,14 @@ gg_disposition: $([ "$disposition" = failed ] && printf feedback || printf pass)
 - Proof it passed: \$ go test ./cmd/gg -run TestProductionCompositionRunsFakeAgentsGitStateAndPersistsAllEvents -count=1; result: exit code 0
 - Manual run instructions: configure the repository and run gg run e2e-production.
 EOF
-if [ "$disposition" = failed ]; then printf '%s\n' '## Feedback' 'The first QA attempt needs the prior QA report before it can pass.' >> PROOF.md; fi
-printf '%s\n' '---' "gg_run_id: \"$run_id\"" 'gg_disposition: passed' '---' 'legacy qa report' > qa-report.md
+if [ "$disposition" = failed ]; then printf '%s\n' '## Feedback' 'The first QA attempt needs the prior QA report before it can pass.' >> .gg/PROOF.md; fi
+printf '%s\n' '---' "gg_run_id: \"$run_id\"" 'gg_disposition: passed' '---' 'legacy qa report' > .gg/qa-report.md
 fi
 printf 'fake-agent phase=%s subphase=%s\n' "$phase" "$subphase"
 
 if [ "$phase" = development ]; then
 	printf '%s\n' "$subphase" >> development-progress.txt
-	git add development.md development-progress.txt
+	git add -f .gg/development.md; git add development-progress.txt
 	git -c commit.gpgsign=false commit -m "development-$subphase"
 fi
 
