@@ -115,3 +115,63 @@ func TestValidatePlanningArtifactEnforcesExactlyOneTrivialPhase(t *testing.T) {
 		t.Fatalf("error=%v, want Trivial phase-count violation", err)
 	}
 }
+
+func TestValidatePlanningArtifactRejectsNonFixedBodyStructure(t *testing.T) {
+	valid := planningFixture(PlanningTrivial, []string{"Phase 1: README wording"}, []string{"One cohesive outcome."}, []PlanningPhaseBoundary{{Phase: "Phase 1: README wording", Justification: "No dependency ordering."}})
+	cases := []struct {
+		name   string
+		mutate func(string) string
+		want   string
+	}{
+		{
+			name:   "missing complexity heading",
+			mutate: func(value string) string { return strings.Replace(value, "## Complexity assessment\n\n", "", 1) },
+			want:   "Complexity assessment section",
+		},
+		{
+			name: "unformatted count",
+			mutate: func(value string) string {
+				return strings.Replace(value, "- Selected phase count: **1**", "- Selected phase count: 1", 1)
+			},
+			want: "selected phase count",
+		},
+		{
+			name: "missing evidence section",
+			mutate: func(value string) string {
+				return strings.Replace(value, "Supporting evidence:\n\n1. One cohesive outcome.\n", "", 1)
+			},
+			want: "Supporting evidence section",
+		},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.MkdirAll(filepath.Join(dir, ".gg"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, ".gg", "plan.md"), []byte(test.mutate(valid)), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			_, err := ValidatePlanningArtifact(dir)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("error=%v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestValidatePlanningArtifactRejectsUnindentedMultilineFrontmatter(t *testing.T) {
+	data := planningFixture(PlanningTrivial, []string{"Phase 1: README wording"}, []string{"One cohesive outcome."}, []PlanningPhaseBoundary{{Phase: "Phase 1: README wording", Justification: "No dependency ordering."}})
+	data = strings.Replace(data, `gg_plan_phases: ["Phase 1: README wording"]`, "gg_plan_phases:\n- Phase 1: README wording", 1)
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".gg"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".gg", "plan.md"), []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := ValidatePlanningArtifact(dir)
+	if err == nil || !strings.Contains(err.Error(), "parse planning frontmatter") {
+		t.Fatalf("error=%v, want rejected multiline frontmatter", err)
+	}
+}

@@ -37,15 +37,17 @@ type PlanningPhaseBoundary struct {
 // PlanningArtifact is the structural portion of plan.md used by the
 // Planning execution gate.
 type PlanningArtifact struct {
-	Complexity     PlanningComplexity      `yaml:"gg_plan_complexity" json:"gg_plan_complexity"`
-	Evidence       []string                `yaml:"gg_plan_complexity_evidence" json:"gg_plan_complexity_evidence"`
-	Phases         []string                `yaml:"gg_plan_phases" json:"gg_plan_phases"`
-	Boundaries     []PlanningPhaseBoundary `yaml:"gg_plan_phase_boundaries" json:"gg_plan_phase_boundaries"`
-	BodyCategory   PlanningComplexity      `json:"-"`
-	BodyEvidence   []string                `json:"-"`
-	BodyPhaseCount int                     `json:"-"`
-	BodyPhases     []string                `json:"-"`
-	BodyBoundaries []PlanningPhaseBoundary `json:"-"`
+	Complexity                  PlanningComplexity      `yaml:"gg_plan_complexity" json:"gg_plan_complexity"`
+	Evidence                    []string                `yaml:"gg_plan_complexity_evidence" json:"gg_plan_complexity_evidence"`
+	Phases                      []string                `yaml:"gg_plan_phases" json:"gg_plan_phases"`
+	Boundaries                  []PlanningPhaseBoundary `yaml:"gg_plan_phase_boundaries" json:"gg_plan_phase_boundaries"`
+	BodyCategory                PlanningComplexity      `json:"-"`
+	BodyEvidence                []string                `json:"-"`
+	BodyPhaseCount              int                     `json:"-"`
+	BodyPhases                  []string                `json:"-"`
+	BodyBoundaries              []PlanningPhaseBoundary `json:"-"`
+	BodyHasComplexityAssessment bool                    `json:"-"`
+	BodyHasSupportingEvidence   bool                    `json:"-"`
 }
 
 // PlanningContractError contains every deterministic violation found in one
@@ -85,6 +87,8 @@ func ParsePlanningArtifact(data []byte) (PlanningArtifact, error) {
 	artifact.BodyPhaseCount = planningBodyPhaseCount(body)
 	artifact.BodyPhases = planningBodyPhases(body)
 	artifact.BodyBoundaries = planningBodyBoundaries(body)
+	artifact.BodyHasComplexityAssessment = hasPlanningComplexityAssessmentBody(body)
+	artifact.BodyHasSupportingEvidence = hasPlanningSupportingEvidenceBody(body)
 	return artifact, nil
 }
 
@@ -115,14 +119,25 @@ func validatePlanningFrontmatterShape(frontmatter string) []string {
 	violations := make([]string, 0)
 	for _, key := range keys {
 		for index, line := range lines {
-			if !strings.HasPrefix(line, key+":") {
+			field, value, found := strings.Cut(strings.TrimSpace(line), ":")
+			if !found || field != key {
 				continue
 			}
-			if strings.TrimSpace(strings.TrimPrefix(line, key+":")) == "" {
+			if strings.TrimSpace(value) == "" {
 				violations = append(violations, fmt.Sprintf("frontmatter %s must be a single-line value", key))
-			}
-			if index+1 < len(lines) && strings.HasPrefix(lines[index+1], " ") {
-				violations = append(violations, fmt.Sprintf("frontmatter %s must not use a multiline value", key))
+			} else {
+				for _, continuation := range lines[index+1:] {
+					trimmed := strings.TrimSpace(continuation)
+					if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+						continue
+					}
+					field, _, isField := strings.Cut(trimmed, ":")
+					if isField && field != "" && !strings.ContainsAny(field, " []{}") {
+						break
+					}
+					violations = append(violations, fmt.Sprintf("frontmatter %s must not use a multiline value", key))
+					break
+				}
 			}
 			break
 		}
@@ -191,6 +206,12 @@ func validatePlanningArtifact(artifact PlanningArtifact) []string {
 	} else if artifact.BodyCategory != artifact.Complexity {
 		violations = append(violations, fmt.Sprintf("body complexity %q does not match frontmatter %q", artifact.BodyCategory, artifact.Complexity))
 	}
+	if !hasPlanningComplexityAssessment(artifact) {
+		violations = append(violations, "plan body is missing the Complexity assessment section")
+	}
+	if !hasPlanningSupportingEvidence(artifact) {
+		violations = append(violations, "plan body is missing the Supporting evidence section")
+	}
 	if artifact.BodyPhaseCount == 0 {
 		violations = append(violations, "plan body is missing the selected phase count")
 	} else if artifact.BodyPhaseCount != len(artifact.Phases) {
@@ -227,18 +248,63 @@ func splitPlanningFrontmatter(data string) (frontmatter, body string, err error)
 		return "", data, errors.New("plan artifact has unterminated YAML frontmatter")
 	}
 	end += 4
-	return data[4:end], data[end+6:], nil
+	return data[4:end], data[end+5:], nil
 }
 
 var (
-	bodyCategoryPattern = regexp.MustCompile(`(?m)^- Complexity category:\s*(?:\*\*|` + "`" + `)([^*` + "`" + `\n]+)(?:\*\*|` + "`" + `)\s*$`)
-	bodyCountPattern    = regexp.MustCompile(`(?m)^- Selected phase count:\s*(?:\*\*|` + "`" + `)?([0-9]+)(?:\*\*|` + "`" + `)?\s*$`)
+	bodyCategoryPattern = regexp.MustCompile(`(?m)^- Complexity category:\s*\*\*([^*\n]+)\*\*\s*$`)
+	bodyCountPattern    = regexp.MustCompile(`(?m)^- Selected phase count:\s*\*\*([0-9]+)\*\*\s*$`)
 	bodyPhasePattern    = regexp.MustCompile(`(?m)^##\s+(Phase\s+[0-9]+:\s+.+?)\s*$`)
 	bodyBoundaryPattern = regexp.MustCompile(`(?m)^Boundary justification:\s*(.+?)\s*$`)
+	bodySectionPattern  = regexp.MustCompile(`(?m)^##\s+(.+?)\s*$`)
 )
 
+func planningComplexitySection(body string) (string, bool) {
+	lines := strings.Split(strings.ReplaceAll(body, "\r\n", "\n"), "\n")
+	start := -1
+	for index, line := range lines {
+		if strings.TrimSpace(line) == "## Complexity assessment" {
+			start = index + 1
+			break
+		}
+	}
+	if start < 0 {
+		return "", false
+	}
+	end := len(lines)
+	for index := start; index < len(lines); index++ {
+		if bodySectionPattern.MatchString(lines[index]) {
+			end = index
+			break
+		}
+	}
+	return strings.Join(lines[start:end], "\n"), true
+}
+
+func hasPlanningComplexityAssessment(artifact PlanningArtifact) bool {
+	return artifact.BodyHasComplexityAssessment
+}
+
+func hasPlanningSupportingEvidence(artifact PlanningArtifact) bool {
+	return artifact.BodyHasSupportingEvidence
+}
+
+func hasPlanningComplexityAssessmentBody(body string) bool {
+	_, ok := planningComplexitySection(body)
+	return ok
+}
+
+func hasPlanningSupportingEvidenceBody(body string) bool {
+	section, ok := planningComplexitySection(body)
+	return ok && strings.Contains(section, "Supporting evidence:")
+}
+
 func planningBodyCategory(body string) PlanningComplexity {
-	match := bodyCategoryPattern.FindStringSubmatch(body)
+	section, ok := planningComplexitySection(body)
+	if !ok {
+		return ""
+	}
+	match := bodyCategoryPattern.FindStringSubmatch(section)
 	if len(match) == 2 {
 		return PlanningComplexity(strings.TrimSpace(match[1]))
 	}
@@ -246,11 +312,15 @@ func planningBodyCategory(body string) PlanningComplexity {
 }
 
 func planningBodyEvidence(body string) []string {
-	start := strings.Index(body, "Supporting evidence:")
+	section, ok := planningComplexitySection(body)
+	if !ok {
+		return nil
+	}
+	start := strings.Index(section, "Supporting evidence:")
 	if start < 0 {
 		return nil
 	}
-	rest := body[start+len("Supporting evidence:"):]
+	rest := section[start+len("Supporting evidence:"):]
 	rest = strings.TrimLeft(rest, "\n")
 	if end := strings.Index(rest, "\n\n"); end >= 0 {
 		rest = rest[:end]
@@ -259,7 +329,11 @@ func planningBodyEvidence(body string) []string {
 }
 
 func planningBodyPhaseCount(body string) int {
-	match := bodyCountPattern.FindStringSubmatch(body)
+	section, ok := planningComplexitySection(body)
+	if !ok {
+		return 0
+	}
+	match := bodyCountPattern.FindStringSubmatch(section)
 	if len(match) != 2 {
 		return 0
 	}
