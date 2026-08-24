@@ -1,47 +1,52 @@
 ---
-gg_run_id: "gg-tool-generally-great-but-1787557476767017000/development/testing/iteration-0"
+gg_run_id: "gg-tool-generally-great-but-1787557476767017000/development/review/iteration-0"
 gg_disposition: passed
 ---
 
-# Development testing
+# Development review
 
 ## Scope
 
-Validated Phase 7: Review, PR, CI, and documentation handoff. Added regression and integration coverage for exact QA proof waivers, skipped pre-PR disclosures, deferred-check handoff, retained external identities, and the latest skipped Development Testing evidence supplied to Review.
+Reviewed and corrected plan Phase 7: Review, PR, CI, and documentation handoff. The review covered skipped Development Testing evidence passed to Review, exact QA proof waivers, skipped pre-PR and deferred-check PR disclosure, external identity persistence, and the Phase 7 documentation/tests already present in the worktree.
 
-## Changed files
+## Findings and fixes
 
-- `internal/pr/service.go` — honor an explicitly authorized proof waiver when `PROOF.md` is absent, while retaining the required-proof failure for ordinary PRs.
-- `internal/pr/service_test.go` — cover the direct missing-proof QA waiver path.
-- `internal/orchestrator/phase7_handoff_test.go` — cover all eligible pre-PR disclosure units, deferred-check validation/copying/deduplication, and latest Testing occurrence semantics.
-- `internal/orchestrator/gitops_wiring_test.go` — cover controller-to-PR propagation of the exact QA waiver and deferred validations.
-- `.gg/development.md` — this testing artifact.
+- `internal/pr/service.go` now states explicitly in the PR body that the exact QA occurrence was skipped, even when a proof file exists.
+- An explicitly waived QA occurrence bypasses stale or malformed `PROOF.md` validation instead of allowing an unrelated artifact to block the PR. The body records the waiver and does not reuse stale proof as validation evidence.
+- `internal/pr/service_test.go` covers both existing-proof disclosure and malformed-proof waiver behavior.
 
 ## Generated subphases
 
 ### Implementation
 
-The Phase 7 implementation was present in the assigned worktree. Testing found one boundary defect: the PR service rejected a missing proof artifact even when the request explicitly carried the confirmed QA waiver. The condition was corrected and covered by a regression test.
+Reviewed the existing Phase 7 implementation and identified the proof-waiver disclosure/validation boundary defect. Applied the focused fix and added regression coverage.
 
 ### Testing
 
-Added and ran focused tests for the Review prompt handoff, all eligible pre-PR skip disclosures, original failure preservation, deferred-check filtering and copying, exact/latest QA waiver behavior, controller-to-PR propagation, and direct proof-waiver handling.
+Ran the focused PR, orchestrator, agent, CLI, TUI, and command tests. Repeated the orchestration, PR, and TUI suites with `-count=10`.
 
 ### Review
 
-Reviewed the Phase 7 diff and new tests for stale QA waivers, ineligible PR/CI disclosures, repeated deferred checks, mutable handoff slices, and ordinary proof-required behavior. No actionable findings remain.
+Audited exact QA occurrence selection, skipped Testing evidence, pre-PR disclosure ordering, deferred-check copying/deduplication, retained external identities, disabled-versus-waived proof behavior, and ordinary proof-required behavior. No actionable findings remain.
+
+## Changed files in this review run
+
+- `internal/pr/service.go`
+- `internal/pr/service_test.go`
+- `.gg/development.md`
 
 ## Verification
 
-- `go test ./internal/agent ./internal/orchestrator ./internal/pr ./internal/ci ./internal/cli ./internal/tui ./internal/e2e ./cmd/gg` — phase packages passed; the existing `internal/e2e.TestRealCLIConfigureCreatesProjectAndDisposableWorktree` baseline failed because persisted state was not found under the test’s asserted temporary root.
-- `go test ./...` — same single pre-existing E2E failure; all other packages passed.
+- `go test ./internal/pr ./internal/orchestrator ./internal/agent ./internal/cli ./internal/tui ./cmd/gg` — passed.
 - `go test -race ./internal/orchestrator ./internal/pr` — passed.
-- `go test -race ./...` — same single pre-existing E2E failure; all other packages passed and no race was reported.
-- `go test ./internal/pipeline -run 'TestCanonicalContractTextMatchesSource'` — passed.
-- `go vet ./...` — blocked by pre-existing diagnostics because existing tests use `testing.Context` and `testing.Chdir` (Go 1.24 APIs) while `go.mod` declares Go 1.22.
+- `go test -count=10 ./internal/orchestrator ./internal/pr ./internal/tui` — passed.
+- `go test ./...` — all packages passed except the unchanged baseline failure `internal/e2e.TestRealCLIConfigureCreatesProjectAndDisposableWorktree`, which cannot find persisted state under the test’s asserted temporary root.
+- `go test -race ./...` — same unchanged E2E baseline failure; all other packages passed and no race was reported.
+- `go vet ./...` — blocked by existing `testing.Context` and `testing.Chdir` diagnostics because those tests use Go 1.24 APIs while `go.mod` declares Go 1.22.
 - `git diff --check` — passed.
+- `gofmt -l internal/pr/service.go internal/pr/service_test.go` — no output; formatted.
 
-## Residual risk and handoff
+## Handoff risks
 
 - No live GitHub, CI, AWS, remote endpoint, browser, or interactive TUI session was contacted. Those remain external/reviewer verification.
-- The full-suite E2E failure and vet/toolchain diagnostics are unrelated to the Phase 7 changes and remain explicitly recorded rather than reclassified as deferred remote checks.
+- The repository-wide E2E baseline failure and vet/toolchain diagnostics are unrelated to this Phase 7 review fix and are recorded rather than reclassified as remote deferrals.

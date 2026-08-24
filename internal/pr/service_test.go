@@ -194,3 +194,41 @@ func TestCreateAllowsMissingProofForExplicitQAWaiver(t *testing.T) {
 		t.Fatalf("result = %#v", result)
 	}
 }
+
+func TestCreateDisclosesQASkipWhenProofArtifactExists(t *testing.T) {
+	req := request(proofWorktree(t))
+	req.ProofWaived = true
+	gh := &fakeGH{url: "https://github.com/o/r/pull/12"}
+
+	result, err := pr.NewService(&fakeGit{uncommitted: true}, gh).Create(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(result.Body, "QA: skipped for the exact confirmed occurrence") {
+		t.Fatalf("body omitted explicit QA skip: %q", result.Body)
+	}
+	if strings.Contains(result.Body, "PROOF.md: passed") {
+		t.Fatalf("body reused proof from the waived occurrence: %q", result.Body)
+	}
+}
+
+func TestCreateIgnoresMalformedProofForExplicitQAWaiver(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".gg"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".gg", "PROOF.md"), []byte("not a proof artifact"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	req := request(dir)
+	req.ProofWaived = true
+	gh := &fakeGH{url: "https://github.com/o/r/pull/13"}
+
+	result, err := pr.NewService(&fakeGit{}, gh).Create(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Created || !strings.Contains(result.Body, "PROOF.md: waived for the exact confirmed QA skip") {
+		t.Fatalf("result = %#v", result)
+	}
+}

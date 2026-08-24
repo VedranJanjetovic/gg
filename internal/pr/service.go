@@ -104,23 +104,23 @@ func (s *Service) Create(ctx context.Context, request Request) (Result, error) {
 	}
 	proofPath := filepath.Join(worktree, proof.ArtifactName)
 	var parsed *proof.Proof
-	data, err := os.ReadFile(proofPath)
-	switch {
-	case err == nil:
-		if ok, checkErr := s.git.IsUncommittedNewFile(ctx, worktree, proof.ArtifactName); checkErr != nil {
-			return Result{}, fmt.Errorf("verify proof artifact: %w", checkErr)
-		} else if !ok {
-			return Result{}, errors.New("proof artifact must be an existing uncommitted PROOF.md file")
+	if !request.ProofWaived {
+		data, err := os.ReadFile(proofPath)
+		switch {
+		case err == nil:
+			if ok, checkErr := s.git.IsUncommittedNewFile(ctx, worktree, proof.ArtifactName); checkErr != nil {
+				return Result{}, fmt.Errorf("verify proof artifact: %w", checkErr)
+			} else if !ok {
+				return Result{}, errors.New("proof artifact must be an existing uncommitted PROOF.md file")
+			}
+			p, parseErr := proof.Parse(data)
+			if parseErr != nil {
+				return Result{}, fmt.Errorf("validate proof artifact: %w", parseErr)
+			}
+			parsed = &p
+		case request.ProofRequired:
+			return Result{}, fmt.Errorf("read proof artifact: %w", err)
 		}
-		p, parseErr := proof.Parse(data)
-		if parseErr != nil {
-			return Result{}, fmt.Errorf("validate proof artifact: %w", parseErr)
-		}
-		parsed = &p
-	case request.ProofRequired && !request.ProofWaived:
-		return Result{}, fmt.Errorf("read proof artifact: %w", err)
-	default:
-		// QA is disabled or the exact QA occurrence was explicitly waived.
 	}
 	body := formatBody(request, parsed)
 	if request.Push {
@@ -138,6 +138,9 @@ func (s *Service) Create(ctx context.Context, request Request) (Result, error) {
 func formatBody(request Request, p *proof.Proof) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "# Why\n%s\n\n# What\n%s\n\n# Validation\n", strings.TrimSpace(request.Why), strings.TrimSpace(request.What))
+	if request.ProofWaived {
+		b.WriteString("- QA: skipped for the exact confirmed occurrence\n")
+	}
 	if p == nil {
 		if request.ProofWaived {
 			b.WriteString("- PROOF.md: waived for the exact confirmed QA skip\n")
