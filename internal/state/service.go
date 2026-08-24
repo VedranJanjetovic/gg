@@ -2,6 +2,7 @@
 package state
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -10,6 +11,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/VedranJanjetovic/gg/internal/proof"
 )
 
 type AgentStatus struct{ Name, Status string }
@@ -62,6 +65,8 @@ var ErrProjectExists = errors.New("project already exists")
 var ErrRunNotActive = errors.New("project run is not active")
 var ErrStaleStopRequest = errors.New("stop request does not match the active run")
 var ErrStopRequested = errors.New("project run stop requested")
+
+var ErrPipelineSnapshotChanged = errors.New("project pipeline snapshot changed")
 
 // RecoverIfStale converts a running project into a resumable stopped project
 // when its owning process is no longer alive. Projects owned by a live
@@ -363,6 +368,41 @@ func (s *LifecycleService) Save(ctx context.Context, state ProjectState) error {
 		return s.store.Save(locked, state)
 	})
 }
+
+// CompareAndUpdateProjectSnapshot is the atomic form used when a snapshot
+// edit also changes related durable metadata, such as a phase warning.
+func (s *LifecycleService) CompareAndUpdateProjectSnapshot(ctx context.Context, slug string, expected PipelineConfigSnapshot, update func(*ProjectState) error) (ProjectState, error) {
+	if err := checkContext(ctx); err != nil {
+		return ProjectState{}, err
+	}
+	if s.store == nil || s.locker == nil {
+		return ProjectState{}, errors.New("lifecycle service requires store and locker")
+	}
+	if update == nil {
+		return ProjectState{}, errors.New("project snapshot update is required")
+	}
+	var result ProjectState
+	err := s.withProjectLock(ctx, slug, func(locked context.Context) error {
+		project, err := s.store.Load(locked, slug)
+		if err != nil {
+			return err
+		}
+		if project.PipelineConfig.SchemaVersion != expected.SchemaVersion || !bytes.Equal(project.PipelineConfig.Data, expected.Data) {
+			return ErrPipelineSnapshotChanged
+		}
+		if err := update(&project); err != nil {
+			return err
+		}
+		project.UpdatedAt = s.clock.Now()
+		if err := s.store.Save(locked, project); err != nil {
+			return err
+		}
+		result = project
+		return nil
+	})
+	return result, err
+}
+
 func (s *LifecycleService) List(ctx context.Context) ([]ProjectState, error) {
 	if s.store == nil {
 		return nil, errors.New("lifecycle service requires store")
@@ -967,8 +1007,16 @@ func (s *LifecycleService) Transition(ctx context.Context, slug string, target L
 				subphase = state.CurrentSubphase
 			}
 		}
+		occurrenceID := ""
+		if target == StatusRunning {
+			var occurrenceErr error
+			occurrenceID, occurrenceErr = newOccurrenceID()
+			if occurrenceErr != nil {
+				return fmt.Errorf("create phase occurrence ID: %w", occurrenceErr)
+			}
+		}
 		state.CurrentPhase, state.CurrentSubphase = phase, subphase
-		state.PhaseHistory = updatePhaseHistory(state.PhaseHistory, phase, subphase, target, now, artifacts)
+		state.PhaseHistory = updatePhaseHistory(state.PhaseHistory, phase, subphase, target, now, artifacts, occurrenceID)
 		state.ArtifactPaths = appendUnique(state.ArtifactPaths, artifacts...)
 		if state.Status != target {
 			state.Status, state.StatusChangedAt = target, now
@@ -1029,15 +1077,26 @@ func (s *LifecycleService) RecordPhase(ctx context.Context, slug, phase, subphas
 				subphase = current.CurrentSubphase
 			}
 		}
+		occurrenceID := ""
+		if status == StatusRunning || status == StatusFailed || status == StatusFinished || status == StatusStopped {
+			var occurrenceErr error
+			occurrenceID, occurrenceErr = newOccurrenceID()
+			if occurrenceErr != nil {
+				return fmt.Errorf("create phase occurrence ID: %w", occurrenceErr)
+			}
+		}
 		current.CurrentPhase, current.CurrentSubphase = phase, subphase
 		if status == StatusRunning && current.PostRebaseContinuationPhase == phase {
 			current.PostRebaseContinuationPhase = ""
 		}
-		current.PhaseHistory = updatePhaseHistory(current.PhaseHistory, phase, subphase, status, now, artifacts)
+		current.PhaseHistory = updatePhaseHistory(current.PhaseHistory, phase, subphase, status, now, artifacts, occurrenceID)
 		current.ArtifactPaths = appendUnique(current.ArtifactPaths, artifacts...)
 		if outcome != nil && len(current.PhaseHistory) > 0 {
 			copy := *outcome
+			copy.DeferredChecks = append([]proof.DeferredCheck(nil), outcome.DeferredChecks...)
 			current.PhaseHistory[len(current.PhaseHistory)-1].Outcome = &copy
+			current.PhaseHistory[len(current.PhaseHistory)-1].DeferredChecks = appendUniqueDeferredChecks(current.PhaseHistory[len(current.PhaseHistory)-1].DeferredChecks, outcome.DeferredChecks...)
+			current.DeferredChecks = appendUniqueDeferredChecks(current.DeferredChecks, outcome.DeferredChecks...)
 		}
 		current.UpdatedAt = now
 		current.RunReservationToken = ""
@@ -1120,18 +1179,23 @@ func canTransition(from, to LifecycleStatus) bool {
 		return false
 	}
 }
-func updatePhaseHistory(history []PhaseRecord, phase, subphase string, status LifecycleStatus, now time.Time, artifacts []string) []PhaseRecord {
+func updatePhaseHistory(history []PhaseRecord, phase, subphase string, status LifecycleStatus, now time.Time, artifacts []string, occurrenceID string) []PhaseRecord {
 	history = append([]PhaseRecord(nil), history...)
 	if len(history) == 0 {
-		return append(history, PhaseRecord{Phase: phase, Subphase: subphase, Status: status, StartedAt: now, CompletedAt: completionTime(status, now), ArtifactPaths: appendUnique(nil, artifacts...)})
+		return append(history, PhaseRecord{Phase: phase, Subphase: subphase, Status: status, StartedAt: now, CompletedAt: completionTime(status, now), ArtifactPaths: appendUnique(nil, artifacts...), OccurrenceID: occurrenceID})
 	}
 	last := &history[len(history)-1]
 	if last.Phase != phase || last.Subphase != subphase || last.CompletedAt != nil {
-		completed := now
-		last.CompletedAt = &completed
-		return append(history, PhaseRecord{Phase: phase, Subphase: subphase, Status: status, StartedAt: now, CompletedAt: completionTime(status, now), ArtifactPaths: appendUnique(nil, artifacts...)})
+		if last.CompletedAt == nil {
+			completed := now
+			last.CompletedAt = &completed
+		}
+		return append(history, PhaseRecord{Phase: phase, Subphase: subphase, Status: status, StartedAt: now, CompletedAt: completionTime(status, now), ArtifactPaths: appendUnique(nil, artifacts...), OccurrenceID: occurrenceID})
 	}
 	last.Status, last.ArtifactPaths = status, appendUnique(last.ArtifactPaths, artifacts...)
+	if last.OccurrenceID == "" {
+		last.OccurrenceID = occurrenceID
+	}
 	last.CompletedAt = completionTime(status, now)
 	return history
 }
@@ -1151,6 +1215,23 @@ func appendUnique(existing []string, additions ...string) []string {
 		found := false
 		for _, value := range result {
 			if value == addition {
+				found = true
+				break
+			}
+		}
+		if !found {
+			result = append(result, addition)
+		}
+	}
+	return result
+}
+
+func appendUniqueDeferredChecks(existing []proof.DeferredCheck, additions ...proof.DeferredCheck) []proof.DeferredCheck {
+	result := append([]proof.DeferredCheck(nil), existing...)
+	for _, addition := range additions {
+		found := false
+		for _, current := range result {
+			if current == addition {
 				found = true
 				break
 			}

@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/VedranJanjetovic/gg/internal/proof"
 )
 
 // CurrentSchemaVersion is the version of ProjectState understood by this package.
@@ -58,9 +60,72 @@ type PhaseRecord struct {
 	StartedAt     time.Time       `json:"startedAt"`
 	CompletedAt   *time.Time      `json:"completedAt,omitempty"`
 	ArtifactPaths []string        `json:"artifactPaths,omitempty"`
+	// DeferredChecks contains validated remote-only checks from this execution.
+	// They are informational and do not claim that the checks passed.
+	DeferredChecks []proof.DeferredCheck `json:"deferredChecks,omitempty"`
+	// OccurrenceID identifies one execution occurrence. It is assigned when a
+	// new execution starts and is intentionally never reused by a retry.
+	OccurrenceID string `json:"occurrenceId,omitempty"`
 	// Outcome is populated when an executable agent process has completed.
 	// It is optional so state written by earlier versions remains compatible.
 	Outcome *ExecutionOutcome `json:"outcome,omitempty"`
+	// Skip records an explicit user-confirmed waiver for this failed occurrence.
+	// The original Status and Outcome remain unchanged.
+	Skip *SkipResolution `json:"skip,omitempty"`
+}
+
+// SkipCleanupStatus describes the cleanup result recorded with a confirmed
+// skip. A missing status is invalid for new skip resolutions, while old phase
+// records may omit the entire resolution.
+type SkipCleanupStatus string
+
+const (
+	SkipCleanupSucceeded   SkipCleanupStatus = "succeeded"
+	SkipCleanupNotRequired SkipCleanupStatus = "not_required"
+)
+
+// SkipCleanup is the durable result of cleanup for one skipped execution.
+// Evidence is descriptive and may include paths, commands, or Git identity.
+type SkipCleanup struct {
+	Status   SkipCleanupStatus `json:"status"`
+	Evidence []string          `json:"evidence,omitempty"`
+}
+
+// SkipResolution is attached to exactly one failed execution occurrence.
+// NextPhase and NextSubphase are the cursor selected for the continuation;
+// both are empty only when the skipped unit was the final execution unit.
+type SkipResolution struct {
+	ConfirmedAt      time.Time   `json:"confirmedAt"`
+	Cleanup          SkipCleanup `json:"cleanup"`
+	NextPhase        string      `json:"nextPhase,omitempty"`
+	NextSubphase     string      `json:"nextSubphase,omitempty"`
+	ExternalIdentity string      `json:"externalIdentity,omitempty"`
+}
+
+func (status SkipCleanupStatus) IsValid() bool {
+	return status == SkipCleanupSucceeded || status == SkipCleanupNotRequired
+}
+
+// SkipCount returns the number of confirmed skipped executions for a phase
+// and subphase. It is derived from history so a later successful retry cannot
+// erase an earlier waiver.
+func (record PhaseRecord) SkipCount() int {
+	if record.Skip == nil {
+		return 0
+	}
+	return 1
+}
+
+// SkipCount returns the sticky number of confirmed skipped executions for the
+// selected phase and subphase.
+func (state ProjectState) SkipCount(phase, subphase string) int {
+	count := 0
+	for _, record := range state.PhaseHistory {
+		if record.Phase == phase && record.Subphase == subphase {
+			count += record.SkipCount()
+		}
+	}
+	return count
 }
 
 // ExecutionOutcome is the durable, machine-readable result of one phase
@@ -88,6 +153,11 @@ type ExecutionOutcome struct {
 	// Error is the human-readable failure reason for a failed execution, so
 	// attached screens can explain the failure without reading log files.
 	Error string `json:"error,omitempty"`
+	// ExternalIdentity retains an unavoidable GitOps resource identity, such as
+	// a pull request URL, when the execution later fails or is skipped.
+	ExternalIdentity string `json:"externalIdentity,omitempty"`
+	// DeferredChecks carries validated remote-only checks into durable history.
+	DeferredChecks []proof.DeferredCheck `json:"deferredChecks,omitempty"`
 }
 
 // InterviewQA is one answered grooming question.
@@ -140,9 +210,15 @@ type ProjectState struct {
 	// repository: they execute directly in that folder (no worktree, no
 	// branch) and every git-dependent behavior — commit enforcement, proof
 	// uncommitted checks, and the rebase/PR/CI phases — is skipped.
-	GitDisabled   bool          `json:"gitDisabled,omitempty"`
-	PhaseHistory  []PhaseRecord `json:"phaseHistory,omitempty"`
-	ArtifactPaths []string      `json:"artifactPaths,omitempty"`
+	GitDisabled  bool          `json:"gitDisabled,omitempty"`
+	PhaseHistory []PhaseRecord `json:"phaseHistory,omitempty"`
+	// PhaseConfigurationWarnings are sticky, phase-scoped notices explaining a
+	// legacy tuple repair. They are removed only when that phase is explicitly
+	// edited by the user.
+	PhaseConfigurationWarnings map[string]string `json:"phaseConfigurationWarnings,omitempty"`
+	ArtifactPaths              []string          `json:"artifactPaths,omitempty"`
+	// DeferredChecks is the normalized project handoff for later PR disclosure.
+	DeferredChecks []proof.DeferredCheck `json:"deferredChecks,omitempty"`
 	// PullRequestURL is the created PR identity used by later GitOps phases.
 	// It is optional so legacy state continues to use branch fallback.
 	PullRequestURL  string    `json:"pullRequestUrl,omitempty"`
@@ -211,7 +287,14 @@ func NewProjectState(input ProjectState) (ProjectState, error) {
 	state := input
 	state.AcceptanceCriteria = append([]string(nil), input.AcceptanceCriteria...)
 	state.PhaseHistory = append([]PhaseRecord(nil), input.PhaseHistory...)
+	if input.PhaseConfigurationWarnings != nil {
+		state.PhaseConfigurationWarnings = make(map[string]string, len(input.PhaseConfigurationWarnings))
+		for phase, warning := range input.PhaseConfigurationWarnings {
+			state.PhaseConfigurationWarnings[phase] = warning
+		}
+	}
 	state.ArtifactPaths = append([]string(nil), input.ArtifactPaths...)
+	state.DeferredChecks = append([]proof.DeferredCheck(nil), input.DeferredChecks...)
 	state.QAFeedbackArtifactPaths = append([]string(nil), input.QAFeedbackArtifactPaths...)
 	state.RebaseConflictArtifactPaths = append([]string(nil), input.RebaseConflictArtifactPaths...)
 	state.PipelineConfig.Data = append(json.RawMessage(nil), input.PipelineConfig.Data...)
@@ -235,9 +318,16 @@ func NewProjectState(input ProjectState) (ProjectState, error) {
 	}
 	for i := range state.PhaseHistory {
 		state.PhaseHistory[i].ArtifactPaths = append([]string(nil), input.PhaseHistory[i].ArtifactPaths...)
+		state.PhaseHistory[i].DeferredChecks = append([]proof.DeferredCheck(nil), input.PhaseHistory[i].DeferredChecks...)
 		if input.PhaseHistory[i].Outcome != nil {
 			outcome := *input.PhaseHistory[i].Outcome
+			outcome.DeferredChecks = append([]proof.DeferredCheck(nil), input.PhaseHistory[i].Outcome.DeferredChecks...)
 			state.PhaseHistory[i].Outcome = &outcome
+		}
+		if input.PhaseHistory[i].Skip != nil {
+			skip := *input.PhaseHistory[i].Skip
+			skip.Cleanup.Evidence = append([]string(nil), input.PhaseHistory[i].Skip.Cleanup.Evidence...)
+			state.PhaseHistory[i].Skip = &skip
 		}
 	}
 	if state.SchemaVersion == 0 {
@@ -305,9 +395,52 @@ func (state ProjectState) Validate() error {
 	if state.UpdatedAt.Before(state.CreatedAt) {
 		return errors.New("updated timestamp precedes created timestamp")
 	}
+	occurrences := make(map[string]struct{}, len(state.PhaseHistory))
 	for i, phase := range state.PhaseHistory {
 		if strings.TrimSpace(phase.Phase) == "" || !phase.Status.IsValid() || phase.StartedAt.IsZero() {
 			return fmt.Errorf("invalid phase history entry %d", i)
+		}
+		if phase.OccurrenceID != "" {
+			if _, exists := occurrences[phase.OccurrenceID]; exists {
+				return fmt.Errorf("duplicate phase occurrence ID %q", phase.OccurrenceID)
+			}
+			occurrences[phase.OccurrenceID] = struct{}{}
+		}
+		if phase.Skip != nil {
+			if phase.OccurrenceID == "" {
+				return fmt.Errorf("skipped phase history entry %d has no occurrence ID", i)
+			}
+			if phase.Status != StatusFailed || phase.CompletedAt == nil {
+				return fmt.Errorf("skipped phase history entry %d is not a completed failure", i)
+			}
+			if phase.Skip.ConfirmedAt.IsZero() || !phase.Skip.Cleanup.Status.IsValid() {
+				return fmt.Errorf("invalid skip resolution in phase history entry %d", i)
+			}
+			if phase.Skip.NextPhase == "" && phase.Skip.NextSubphase != "" {
+				return fmt.Errorf("skip resolution entry %d has a subphase without a phase", i)
+			}
+		}
+		for j, check := range phase.DeferredChecks {
+			if err := check.Validate(); err != nil {
+				return fmt.Errorf("invalid deferred check %d in phase history entry %d: %w", j+1, i, err)
+			}
+		}
+		if phase.Outcome != nil {
+			for j, check := range phase.Outcome.DeferredChecks {
+				if err := check.Validate(); err != nil {
+					return fmt.Errorf("invalid deferred check %d in phase outcome %d: %w", j+1, i, err)
+				}
+			}
+		}
+	}
+	for phase, warning := range state.PhaseConfigurationWarnings {
+		if strings.TrimSpace(phase) == "" || strings.TrimSpace(warning) == "" {
+			return fmt.Errorf("invalid phase configuration warning for %q", phase)
+		}
+	}
+	for i, check := range state.DeferredChecks {
+		if err := check.Validate(); err != nil {
+			return fmt.Errorf("invalid project deferred check %d: %w", i+1, err)
 		}
 	}
 	if state.MaxQAAttempts < 0 || state.QACompletedAttempts < 0 {

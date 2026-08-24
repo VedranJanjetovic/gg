@@ -73,8 +73,73 @@ func statusSelector(args []string) (string, error) {
 }
 
 func writeProjectDetail(output io.Writer, project state.ProjectState) error {
-	_, err := fmt.Fprintf(output, "Name: %s\nSlug: %s\nStatus: %s\nCurrent phase: %s\nBranch: %s\nWorktree: %s\nUpdated: %s\n", project.Name, project.Slug, project.Status, displayValue(project.CurrentPhase), displayValue(project.BranchName), displayValue(project.WorktreePath), formatUpdated(project.UpdatedAt))
-	return err
+	if _, err := fmt.Fprintf(output, "Name: %s\nSlug: %s\nStatus: %s\nCurrent phase: %s\nBranch: %s\nWorktree: %s\nUpdated: %s\n", project.Name, project.Slug, project.Status, displayValue(project.CurrentPhase), displayValue(project.BranchName), displayValue(project.WorktreePath), formatUpdated(project.UpdatedAt)); err != nil {
+		return err
+	}
+	labels := make([]string, 0)
+	seen := make(map[string]struct{})
+	for _, record := range project.PhaseHistory {
+		if record.Skip == nil {
+			continue
+		}
+		label := skippedRecordLabel(record)
+		if _, ok := seen[label]; ok {
+			continue
+		}
+		seen[label] = struct{}{}
+		labels = append(labels, label)
+	}
+	for _, label := range labels {
+		count := 0
+		for _, record := range project.PhaseHistory {
+			if record.Skip != nil && skippedRecordLabel(record) == label {
+				count++
+			}
+		}
+		if _, err := fmt.Fprintf(output, "Skipped count: %d (%s)\n", count, label); err != nil {
+			return err
+		}
+	}
+	for _, record := range project.PhaseHistory {
+		if record.Skip == nil {
+			continue
+		}
+		label := skippedRecordLabel(record)
+		evidence := "-"
+		if len(record.Skip.Cleanup.Evidence) > 0 {
+			evidence = strings.Join(record.Skip.Cleanup.Evidence, "; ")
+		}
+		continuation := record.Skip.NextPhase
+		if record.Skip.NextSubphase != "" {
+			continuation += " / " + record.Skip.NextSubphase
+		}
+		if continuation == "" {
+			continuation = "-"
+		}
+		externalIdentity := record.Skip.ExternalIdentity
+		if externalIdentity == "" && record.Outcome != nil {
+			externalIdentity = record.Outcome.ExternalIdentity
+		}
+		if _, err := fmt.Fprintf(output, "Skipped: %s\n  Occurrence: %s\n  Failure: %s\n  Confirmed: %s\n  Cleanup: %s\n  Cleanup evidence: %s\n  External identity: %s\n  Continuation: %s\n", label, displayValue(record.OccurrenceID), skippedFailureSummary(record), formatUpdated(record.Skip.ConfirmedAt), record.Skip.Cleanup.Status, evidence, displayValue(externalIdentity), continuation); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func skippedRecordLabel(record state.PhaseRecord) string {
+	label := record.Phase
+	if record.Subphase != "" {
+		label += " / " + record.Subphase
+	}
+	return label
+}
+
+func skippedFailureSummary(record state.PhaseRecord) string {
+	if record.Outcome == nil || strings.TrimSpace(record.Outcome.Error) == "" {
+		return "-"
+	}
+	return strings.TrimSpace(record.Outcome.Error)
 }
 
 func writeProjectStatusTable(output io.Writer, projects []state.ProjectState) error {

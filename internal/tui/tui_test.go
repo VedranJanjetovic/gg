@@ -38,7 +38,7 @@ Status: pending
 Progress  ░░░░░░░░░░░░░░░░░░░░░░░░░   0%  0/4 · 4 phases remaining
 
 q quit
-Keys: i interactive  c code  t terminal  r resume  s stop  q quit
+Keys: i interactive  c code  t terminal  r resume  q quit
 `,
 		},
 		{
@@ -82,7 +82,7 @@ Status: succeeded
 Progress  █████████████████████████ 100%  4/4 · 0 phases remaining
 
 q quit
-Keys: i interactive  c code  t terminal  r resume  s stop  q quit
+Keys: i interactive  c code  t terminal  r resume  q quit
 `,
 		},
 		{
@@ -101,8 +101,8 @@ Status: failed
 
 Progress  █████████████░░░░░░░░░░░░  50%  2/4 · 2 phases remaining
 
-q quit
-Keys: i interactive  c code  t terminal  r resume  s stop  q quit
+r resume  q quit
+Keys: i interactive  c code  t terminal  r resume  q quit
 `,
 		},
 		{
@@ -127,7 +127,7 @@ Progress  ██████░░░░░░░░░░░░░░░░░�
 
 Type r to continue pipeline
 q quit
-Keys: i interactive  c code  t terminal  r resume  s stop  q quit
+Keys: i interactive  c code  t terminal  r resume  q quit
 `,
 		},
 	}
@@ -157,7 +157,7 @@ func TestProjectionUsesPersistedEnabledPhaseOrderAndDevelopmentSubphases(t *test
 		t.Fatal(err)
 	}
 	phases := model.Phases()
-	wantIDs := []string{"acceptance_criteria", "grooming", "development", "qa", "rebase", "test_document"}
+	wantIDs := []string{"acceptance_criteria", "grooming", "development", "rebase", "qa", "test_document"}
 	if len(phases) != len(wantIDs) {
 		t.Fatalf("phase count = %d, want %d: %#v", len(phases), len(wantIDs), phases)
 	}
@@ -329,6 +329,26 @@ func TestStartupOwnsForegroundWhilePollingStillEnablesStop(t *testing.T) {
 	}
 	if _, command := finishedStart.Update(key('q')); command == nil {
 		t.Fatal("q remained disabled after Start completed")
+	}
+}
+
+func TestFailedProjectCanRequestConfigurationEditAndRetainsWarning(t *testing.T) {
+	project := testProject(testSnapshot(t), state.StatusFailed, string(pipeline.PhaseTestDocument), "", nil)
+	project.PhaseConfigurationWarnings = map[string]string{string(pipeline.PhaseTestDocument): "invalid saved configuration; using project default: codex / gpt-5.6-sol / high"}
+	model, err := NewModel(context.Background(), project, nil, Actions{Configure: func(context.Context) error { return nil }}, WithColor(false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(model.View(), "e configure") || !strings.Contains(model.View(), "invalid saved configuration") {
+		t.Fatalf("configuration affordance/warning missing:\n%s", model.View())
+	}
+	updated, command := model.Update(key('e'))
+	if command == nil {
+		t.Fatal("e did not detach for configuration editing")
+	}
+	final, ok := command().(tea.QuitMsg)
+	if !ok || !updated.(Model).configureRequested {
+		t.Fatalf("configuration request = %#v, command result = %#v", updated, final)
 	}
 }
 
@@ -1024,3 +1044,129 @@ func TestFailedPhaseViewShowsPersistedFailureReason(t *testing.T) {
 		t.Fatalf("failed phase view does not surface the failure reason:\n%s", view)
 	}
 }
+
+func TestSkipRequiresNamedConfirmationAndStartsOnlyAfterConfirmation(t *testing.T) {
+	whenSkipped := 0
+	project := testProject(testSnapshot(t), state.StatusFailed, string(pipeline.PhaseQA), "", []state.PhaseRecord{{
+		Phase: string(pipeline.PhaseQA), Status: state.StatusFailed, OccurrenceID: "qa-1",
+		CompletedAt: ptrTime(time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)),
+		Outcome:     &state.ExecutionOutcome{Error: "remote check failed"},
+	}})
+	model, err := NewModel(context.Background(), project, nil, Actions{
+		Skip: func(context.Context) error { whenSkipped++; return nil }, SkipAvailable: true, SkipLabel: "QA",
+	}, WithColor(false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated, command := model.Update(key('s'))
+	model = updated.(Model)
+	if command != nil || !model.skipConfirm || whenSkipped != 0 {
+		t.Fatalf("skip opened confirmation=%t command=%v calls=%d", model.skipConfirm, command, whenSkipped)
+	}
+	if view := model.View(); !strings.Contains(view, "Confirm skip of QA?") || !strings.Contains(view, "y/Enter confirm") || strings.Contains(view, "s skip") {
+		t.Fatalf("confirmation view missing exact action:\n%s", view)
+	}
+	updated, command = model.Update(key('n'))
+	model = updated.(Model)
+	if command != nil || model.skipConfirm || whenSkipped != 0 || !strings.Contains(model.View(), "Skip cancelled.") {
+		t.Fatalf("cancel state = %#v command=%v view=%q", model, command, model.View())
+	}
+	updated, _ = model.Update(key('s'))
+	model = updated.(Model)
+	updated, command = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = updated.(Model)
+	if command == nil || !model.skipPending {
+		t.Fatalf("confirm did not start skip: pending=%t command=%v", model.skipPending, command)
+	}
+	message := command()
+	if whenSkipped != 1 {
+		t.Fatalf("skip calls = %d, want 1", whenSkipped)
+	}
+	updated, _ = model.Update(message)
+	model = updated.(Model)
+	if model.skipPending || !strings.Contains(model.View(), "continuation started") {
+		t.Fatalf("completed skip state = %#v view=%q", model, model.View())
+	}
+	updated, command = model.Update(key('s'))
+	model = updated.(Model)
+	if command != nil || model.skipConfirm {
+		t.Fatal("completed skip reopened confirmation before durable polling refresh")
+	}
+}
+
+func TestSkipConfirmationUsesPlanPhaseAndPollingCancelsStalePrompt(t *testing.T) {
+	project := testProject(testSnapshot(t), state.StatusFailed, string(pipeline.PhaseDevelopment), "testing", []state.PhaseRecord{{
+		Phase: string(pipeline.PhaseDevelopment), Subphase: "testing", Status: state.StatusFailed, OccurrenceID: "testing-1",
+	}})
+	project.Plan = &state.PlanState{Phases: []string{"Phase 2: docs"}}
+	model, err := NewModel(context.Background(), project, nil, Actions{
+		Skip: func(context.Context) error { t.Fatal("stale skip invoked"); return nil }, SkipAvailable: true,
+		SkipLabel: "Development / Phase 2: docs / Testing",
+	}, WithColor(false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated, _ := model.Update(key('s'))
+	model = updated.(Model)
+	if !strings.Contains(model.View(), "Confirm skip of Development / Phase 2: docs / Testing?") {
+		t.Fatalf("confirmation omitted plan phase:\n%s", model.View())
+	}
+	changed := project
+	changed.PhaseHistory = []state.PhaseRecord{{
+		Phase: string(pipeline.PhaseDevelopment), Subphase: "testing", Status: state.StatusFailed, OccurrenceID: "testing-2",
+	}}
+	updated, _ = model.Update(projectLoadedMsg{project: changed})
+	model = updated.(Model)
+	if model.skipConfirm || !strings.Contains(model.View(), "Skip cancelled because the failed execution changed.") {
+		t.Fatalf("stale confirmation remained active: %#v\n%s", model, model.View())
+	}
+}
+
+func TestSkippedExecutionShowsStickyCountImmediately(t *testing.T) {
+	project := testProject(testConfiguredSnapshot(t), state.StatusFailed, string(pipeline.PhaseQA), "", []state.PhaseRecord{{
+		Phase: string(pipeline.PhaseQA), Status: state.StatusFailed, OccurrenceID: "qa-1",
+		Skip: &state.SkipResolution{Cleanup: state.SkipCleanup{Status: state.SkipCleanupNotRequired}},
+	}})
+	model, err := NewModel(context.Background(), project, nil, Actions{}, WithColor(false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	view := model.View()
+	if !strings.Contains(view, "QA (1 skipped execution)") || !strings.Contains(view, "(skipped)") {
+		t.Fatalf("immediate sticky skip visibility missing:\n%s", view)
+	}
+}
+
+func TestSkipIsNotOfferedForIneligibleOrStoppedFailures(t *testing.T) {
+	for _, status := range []state.LifecycleStatus{state.StatusFailed, state.StatusStopped} {
+		project := testProject(testSnapshot(t), status, string(pipeline.PhaseDevelopment), "implementation", []state.PhaseRecord{{
+			Phase: string(pipeline.PhaseDevelopment), Subphase: "implementation", Status: state.StatusFailed,
+		}})
+		model, err := NewModel(context.Background(), project, nil, Actions{Skip: func(context.Context) error { t.Fatal("skip invoked"); return nil }, SkipAvailable: false}, WithColor(false))
+		if err != nil {
+			t.Fatal(err)
+		}
+		updated, command := model.Update(key('s'))
+		if command != nil || strings.Contains(updated.(Model).View(), "s skip") {
+			t.Fatalf("status %s offered skip:\n%s", status, updated.(Model).View())
+		}
+	}
+}
+
+func TestSkippedExecutionKeepsStickyCountAfterLaterPass(t *testing.T) {
+	project := testProject(testSnapshot(t), state.StatusRunning, string(pipeline.PhaseDevelopment), "review", []state.PhaseRecord{
+		{Phase: string(pipeline.PhaseDevelopment), Subphase: "testing", Status: state.StatusFailed, OccurrenceID: "testing-1", Skip: &state.SkipResolution{Cleanup: state.SkipCleanup{Status: state.SkipCleanupNotRequired}}},
+		{Phase: string(pipeline.PhaseDevelopment), Subphase: "testing", Status: state.StatusFinished, OccurrenceID: "testing-2"},
+		{Phase: string(pipeline.PhaseDevelopment), Subphase: "review", Status: state.StatusRunning},
+	})
+	model, err := NewModel(context.Background(), project, nil, Actions{}, WithColor(false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	view := model.View()
+	if !strings.Contains(view, "Testing (1 skipped execution)") || strings.Contains(view, "Testing (skipped)") {
+		t.Fatalf("sticky skip projection missing or stale:\n%s", view)
+	}
+}
+
+func ptrTime(value time.Time) *time.Time { return &value }

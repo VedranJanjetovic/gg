@@ -19,6 +19,7 @@ func (m Model) render(interactive bool) string {
 		width = 80
 	}
 	var output strings.Builder
+	skipAvailable, _ := m.skipTarget()
 	fmt.Fprintf(&output, "%s\n", m.styles.title.Render("gg · "+m.project.Name))
 	fmt.Fprintf(&output, "Status: %s\n\n", projectStatus(m.project.Status))
 	if line := m.interviewLine(); line != "" {
@@ -77,6 +78,10 @@ func (m Model) render(interactive bool) string {
 				output.WriteString("Stopping pipeline…\n")
 				return output.String()
 			}
+			if m.skipPending {
+				output.WriteString("Skipping failed execution…\n")
+				return output.String()
+			}
 			if m.codePending {
 				output.WriteString("Opening code editor…\n")
 				return output.String()
@@ -104,19 +109,52 @@ func (m Model) render(interactive bool) string {
 			}
 			return output.String()
 		}
-		switch m.project.Status {
-		case state.StatusRunning:
-			fmt.Fprintf(&output, "%s stop  %s quit\n", m.styles.key.Render("s"), m.styles.key.Render("q"))
-		case state.StatusStopped:
-			output.WriteString("Type r to continue pipeline\n")
-			fmt.Fprintf(&output, "%s quit\n", m.styles.key.Render("q"))
-		default:
-			fmt.Fprintf(&output, "%s quit\n", m.styles.key.Render("q"))
-		}
-		if m.interviewOpen() {
-			output.WriteString("Keys: g answer questions  c code  t terminal  r resume  s stop  q quit\n")
+		if m.skipConfirm {
+			output.WriteString("Confirm skip of " + m.skipLabel + "?  y/Enter confirm  n/Esc cancel\n")
 		} else {
-			output.WriteString("Keys: i interactive  c code  t terminal  r resume  s stop  q quit\n")
+			switch m.project.Status {
+			case state.StatusRunning:
+				fmt.Fprintf(&output, "%s stop  %s quit\n", m.styles.key.Render("s"), m.styles.key.Render("q"))
+			case state.StatusStopped:
+				output.WriteString("Type r to continue pipeline\n")
+				if m.actions.Configure != nil {
+					fmt.Fprintf(&output, "%s configure  %s quit\n", m.styles.key.Render("e"), m.styles.key.Render("q"))
+				} else {
+					fmt.Fprintf(&output, "%s quit\n", m.styles.key.Render("q"))
+				}
+			case state.StatusFailed:
+				configure := ""
+				if m.actions.Configure != nil {
+					configure = fmt.Sprintf("  %s configure", m.styles.key.Render("e"))
+				}
+				if m.actions.Skip != nil && skipAvailable {
+					fmt.Fprintf(&output, "%s skip  %s resume%s  %s quit\n", m.styles.key.Render("s"), m.styles.key.Render("r"), configure, m.styles.key.Render("q"))
+				} else {
+					fmt.Fprintf(&output, "%s resume%s  %s quit\n", m.styles.key.Render("r"), configure, m.styles.key.Render("q"))
+				}
+			default:
+				fmt.Fprintf(&output, "%s quit\n", m.styles.key.Render("q"))
+			}
+			if m.interviewOpen() {
+				keys := "Keys: g answer questions  c code  t terminal  r resume"
+				if m.project.Status == state.StatusRunning {
+					keys += "  s stop"
+				} else if m.project.Status == state.StatusFailed && skipAvailable {
+					keys += "  s skip"
+				}
+				if (m.project.Status == state.StatusFailed || m.project.Status == state.StatusStopped) && m.actions.Configure != nil {
+					keys += "  e configure"
+				}
+				output.WriteString(keys + "  q quit\n")
+			} else {
+				keys := "Keys: i interactive  c code  t terminal  r resume"
+				if m.project.Status == state.StatusRunning {
+					keys += "  s stop"
+				} else if m.project.Status == state.StatusFailed && m.actions.Skip != nil && skipAvailable {
+					keys += "  s skip"
+				}
+				output.WriteString(keys + "  q quit\n")
+			}
 		}
 	}
 	return output.String()
@@ -216,7 +254,7 @@ func formatTokens(value int64) string {
 // execution, wrapped to the screen, so the screen answers "why did it fail"
 // without digging through log files.
 func (m Model) failureLines(view PhaseView, phaseID, subphaseID string, width int) []string {
-	if view.Status != PhaseFailed {
+	if view.Status != PhaseFailed && view.Status != PhaseSkipped {
 		return nil
 	}
 	reason := ""
@@ -289,30 +327,43 @@ func (m Model) interviewLine() string {
 }
 
 func (m Model) phaseLine(phase PhaseView, interactive bool) string {
+	name := phase.Name
+	if phase.Warning != "" {
+		name += " (" + phase.Warning + ")"
+	}
+	if phase.SkipCount > 0 {
+		suffix := " skipped execution"
+		if phase.SkipCount != 1 {
+			suffix += "s"
+		}
+		name += fmt.Sprintf(" (%d%s)", phase.SkipCount, suffix)
+	}
 	var marker string
 	switch phase.Status {
 	case PhaseSucceeded:
-		return m.styles.success.Render("✓ " + phase.Name)
+		return m.styles.success.Render("✓ " + name)
 	case PhaseRunning:
 		if interactive {
 			marker = m.spinner.View()
 		} else {
 			marker = "▶"
 		}
-		return m.styles.running.Render(marker + " " + phase.Name)
+		return m.styles.running.Render(marker + " " + name)
 	case PhaseFailed:
-		return m.styles.failed.Render("✗ " + phase.Name + " (failed)")
+		return m.styles.failed.Render("✗ " + name + " (failed)")
+	case PhaseSkipped:
+		return m.styles.muted.Render("• " + name + " (skipped)")
 	case PhaseStopped:
-		return m.styles.stopped.Render("■ " + phase.Name + " (stopped)")
+		return m.styles.stopped.Render("■ " + name + " (stopped)")
 	default:
-		return m.styles.muted.Render("○ " + phase.Name)
+		return m.styles.muted.Render("○ " + name)
 	}
 }
 
 func completedPhases(phases []PhaseView) int {
 	completed := 0
 	for _, phase := range phases {
-		if phase.Status == PhaseSucceeded {
+		if phase.Status == PhaseSucceeded || phase.Status == PhaseSkipped {
 			completed++
 		}
 	}

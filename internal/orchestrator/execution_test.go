@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/VedranJanjetovic/gg/internal/agent"
+	"github.com/VedranJanjetovic/gg/internal/ci"
 	"github.com/VedranJanjetovic/gg/internal/config"
 	"github.com/VedranJanjetovic/gg/internal/orchestrator"
 	"github.com/VedranJanjetovic/gg/internal/pipeline"
@@ -309,7 +310,7 @@ func TestExecuteRunsEnabledPhasesInCanonicalOrderAndPersistsEvents(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []pipeline.PhaseID{pipeline.PhaseAcceptanceCriteria, pipeline.PhaseDevelopment, pipeline.PhaseDevelopment, pipeline.PhaseDevelopment, pipeline.PhaseQA, pipeline.PhaseRebase, pipeline.PhaseTestDocument, pipeline.PhasePR}
+	want := []pipeline.PhaseID{pipeline.PhaseAcceptanceCriteria, pipeline.PhaseDevelopment, pipeline.PhaseDevelopment, pipeline.PhaseDevelopment, pipeline.PhaseRebase, pipeline.PhaseQA, pipeline.PhaseTestDocument, pipeline.PhasePR}
 	if !reflect.DeepEqual(runner.phases, want) {
 		t.Fatalf("runner order=%v want=%v", runner.phases, want)
 	}
@@ -397,7 +398,7 @@ func TestExecuteSkipsDisabledPhases(t *testing.T) {
 	}
 }
 func TestExecuteStopsAfterFailureAndPersistsFailure(t *testing.T) {
-	runner := &fakeSeqRunner{err: errors.New("boom"), failAt: 5}
+	runner := &fakeSeqRunner{err: errors.New("boom"), failAt: 6}
 	store := &fakeState{}
 	events := &fakeEvents{}
 	req := request(t, resolvedPipeline(t, config.PhaseQA))
@@ -406,7 +407,7 @@ func TestExecuteStopsAfterFailureAndPersistsFailure(t *testing.T) {
 	if err == nil || !errors.Is(err, runner.err) {
 		t.Fatalf("err=%v", err)
 	}
-	if len(runner.phases) != 5 {
+	if len(runner.phases) != 6 {
 		t.Fatalf("dispatches=%v", runner.phases)
 	}
 	if store.calls[len(store.calls)-1].status != state.StatusFailed {
@@ -542,6 +543,163 @@ func pipelineWithQA(t *testing.T) pipeline.ExecutablePipeline {
 	return resolvedPipeline(t, config.PhaseQA)
 }
 
+func snapshotReadyPipelineWithQA(t *testing.T) pipeline.ExecutablePipeline {
+	t.Helper()
+	settings := config.AgentSettings{Agent: config.AgentClaude, Model: "snapshot-model", Effort: config.EffortMedium}
+	phases := map[config.Phase]config.ResolvedPhase{}
+	for _, phase := range config.RemovablePhases() {
+		phases[phase] = config.ResolvedPhase{Enabled: phase == config.PhaseQA, AgentSettings: settings}
+	}
+	plan, err := pipeline.Resolve(pipeline.DefaultPipeline(), config.ResolvedConfig{Defaults: settings, Phases: phases})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return plan
+}
+
+type persistedPhaseFixture struct {
+	ID       pipeline.PhaseID     `json:"id"`
+	Settings config.AgentSettings `json:"settings"`
+}
+
+type persistedPipelineFixture struct {
+	SchemaVersion    int                                    `json:"schemaVersion"`
+	PlanningContract int                                    `json:"planningContractVersion,omitempty"`
+	Phases           []persistedPhaseFixture                `json:"phases"`
+	Subphases        pipeline.DevelopmentSubphaseGeneration `json:"developmentSubphases"`
+	MaxQAAttempts    int                                    `json:"maxQaAttempts"`
+	GitOps           config.GitOpsConfig                    `json:"gitOps"`
+	GitOpsConfigured bool                                   `json:"gitOpsConfigured"`
+}
+
+func legacyPipelineWithQA(t *testing.T) (pipeline.ExecutablePipeline, state.PipelineConfigSnapshot) {
+	t.Helper()
+	current := snapshotReadyPipelineWithQA(t)
+	snapshot, err := pipeline.SnapshotExecution(current, pipeline.DevelopmentSubphaseGeneration{}, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var encoded persistedPipelineFixture
+	if err := json.Unmarshal(snapshot.Data, &encoded); err != nil {
+		t.Fatal(err)
+	}
+	encoded.SchemaVersion = 1
+	encoded.PlanningContract = 0
+	var rebaseIndex, qaIndex int
+	for index, phase := range encoded.Phases {
+		switch phase.ID {
+		case pipeline.PhaseRebase:
+			rebaseIndex = index
+		case pipeline.PhaseQA:
+			qaIndex = index
+		}
+	}
+	encoded.Phases[rebaseIndex], encoded.Phases[qaIndex] = encoded.Phases[qaIndex], encoded.Phases[rebaseIndex]
+	legacyData, err := json.Marshal(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacySnapshot := snapshot
+	legacySnapshot.Data = legacyData
+	legacy, _, _, err := pipeline.RestoreExecution(legacySnapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return legacy, legacySnapshot
+}
+
+func TestRestoredSnapshotsExecuteTheirPersistedOrder(t *testing.T) {
+	current := snapshotReadyPipelineWithQA(t)
+	newSnapshot, err := pipeline.SnapshotExecution(current, pipeline.DevelopmentSubphaseGeneration{}, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newPlan, newSubphases, newMaxAttempts, err := pipeline.RestoreExecution(newSnapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyPlan, legacySnapshot := legacyPipelineWithQA(t)
+
+	tests := []struct {
+		name      string
+		plan      pipeline.ExecutablePipeline
+		snapshot  state.PipelineConfigSnapshot
+		subphases pipeline.DevelopmentSubphaseGeneration
+		max       int
+		want      []pipeline.PhaseID
+	}{
+		{
+			name: "new snapshot uses Rebase before QA",
+			plan: newPlan, snapshot: newSnapshot, subphases: newSubphases, max: newMaxAttempts,
+			want: []pipeline.PhaseID{pipeline.PhaseAcceptanceCriteria, pipeline.PhaseDevelopment, pipeline.PhaseDevelopment, pipeline.PhaseDevelopment, pipeline.PhaseRebase, pipeline.PhaseQA, pipeline.PhaseTestDocument},
+		},
+		{
+			name: "legacy snapshot keeps QA before Rebase",
+			plan: legacyPlan, snapshot: legacySnapshot, subphases: pipeline.DevelopmentSubphaseGeneration{}, max: 3,
+			want: []pipeline.PhaseID{pipeline.PhaseAcceptanceCriteria, pipeline.PhaseDevelopment, pipeline.PhaseDevelopment, pipeline.PhaseDevelopment, pipeline.PhaseQA, pipeline.PhaseRebase, pipeline.PhaseTestDocument},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			runner := &fakeSeqRunner{}
+			req := request(t, test.plan)
+			req.Project.PipelineConfig = test.snapshot
+			req.Subphases = test.subphases
+			req.MaxIterations = test.max
+			req.RunID = test.name
+			if _, err := orchestrator.NewController(
+				orchestrator.WithRunner(runner),
+				orchestrator.WithPhaseState(&fakeState{}),
+				orchestrator.WithPromptBuilder(fakePrompt{}),
+			).Execute(context.Background(), req); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(runner.phases, test.want) {
+				t.Fatalf("executed phases = %v, want persisted order %v", runner.phases, test.want)
+			}
+		})
+	}
+}
+
+func TestLegacyQARetryDoesNotInjectNewRebaseInvariant(t *testing.T) {
+	legacyPlan, legacySnapshot := legacyPipelineWithQA(t)
+	runner := &feedbackRunner{
+		statuses: []state.LifecycleStatus{
+			state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFailed,
+			state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFinished,
+		},
+		artifacts: []string{"qa-feedback.md"},
+	}
+	req := request(t, legacyPlan)
+	req.Project.PipelineConfig = legacySnapshot
+	req.MaxIterations = 2
+	outcomes, err := executeFeedback(t, runner, &feedbackState{}, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(outcomes) != 11 {
+		t.Fatalf("outcomes = %d, want 11 for legacy QA-before-Rebase retry", len(outcomes))
+	}
+	want := []pipeline.PhaseID{
+		pipeline.PhaseAcceptanceCriteria,
+		pipeline.PhaseDevelopment, pipeline.PhaseDevelopment, pipeline.PhaseDevelopment,
+		pipeline.PhaseQA,
+		pipeline.PhaseDevelopment, pipeline.PhaseDevelopment, pipeline.PhaseDevelopment,
+		pipeline.PhaseQA, pipeline.PhaseRebase, pipeline.PhaseTestDocument,
+	}
+	if !reflect.DeepEqual(runnerRequestsPhases(runner.requests), want) {
+		t.Fatalf("legacy retry phases = %v, want %v", runnerRequestsPhases(runner.requests), want)
+	}
+}
+
+func runnerRequestsPhases(requests []agent.RunRequest) []pipeline.PhaseID {
+	phases := make([]pipeline.PhaseID, len(requests))
+	for index, request := range requests {
+		phases[index] = request.Phase
+	}
+	return phases
+}
+
 func executeFeedback(t *testing.T, runner *feedbackRunner, store *feedbackState, request orchestrator.Request) ([]orchestrator.PhaseOutcome, error) {
 	t.Helper()
 	return orchestrator.NewController(orchestrator.WithRunner(runner), orchestrator.WithPhaseState(store), orchestrator.WithEventSink(&fakeEvents{}), orchestrator.WithPromptBuilder(fakePrompt{})).Execute(context.Background(), request)
@@ -568,7 +726,7 @@ func TestExecuteQAPassesOnFirstAttemptWithoutFeedbackDispatch(t *testing.T) {
 }
 
 func TestExecuteQAFailThenFixDevelopmentThenPass(t *testing.T) {
-	runner := &feedbackRunner{statuses: []state.LifecycleStatus{state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFailed, state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFinished}, artifacts: []string{"qa-feedback.md"}}
+	runner := &feedbackRunner{statuses: []state.LifecycleStatus{state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFailed, state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFinished}, artifacts: []string{"qa-feedback.md"}}
 	store := &feedbackState{}
 	req := request(t, pipelineWithQA(t))
 	req.MaxIterations = 2
@@ -576,18 +734,21 @@ func TestExecuteQAFailThenFixDevelopmentThenPass(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(outcomes) != 11 {
-		t.Fatalf("outcomes=%d, want 11", len(outcomes))
+	if len(outcomes) != 12 {
+		t.Fatalf("outcomes=%d, want 12", len(outcomes))
 	}
-	if got := runner.calls; got != 11 {
-		t.Fatalf("dispatches=%d, want 11", got)
+	if got := runner.calls; got != 12 {
+		t.Fatalf("dispatches=%d, want 12", got)
 	}
-	for _, call := range runner.requests[5:8] {
+	for _, call := range runner.requests[6:9] {
 		if call.Phase != pipeline.PhaseDevelopment || len(call.ArtifactPaths) != 1 || call.ArtifactPaths[0] != "qa-feedback.md" {
 			t.Fatalf("fix request=%#v", call)
 		}
 	}
-	if got := runner.requests[8].ArtifactPaths; len(got) != 1 || got[0] != "qa-feedback.md" {
+	if runner.requests[9].Phase != pipeline.PhaseRebase || runner.requests[10].Phase != pipeline.PhaseQA {
+		t.Fatalf("feedback loop phases = %v, want Rebase then QA", []pipeline.PhaseID{runner.requests[9].Phase, runner.requests[10].Phase})
+	}
+	if got := runner.requests[10].ArtifactPaths; len(got) != 1 || got[0] != "qa-feedback.md" {
 		t.Fatalf("rerun QA artifacts=%v", got)
 	}
 	found := false
@@ -598,6 +759,97 @@ func TestExecuteQAFailThenFixDevelopmentThenPass(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("feedback artifact was not persisted: %#v", store.artifacts)
+	}
+}
+
+type stagedConflictReader struct {
+	checks        int
+	firstConflict int
+}
+
+func (r *stagedConflictReader) HasUnresolvedConflicts(context.Context, string) (bool, error) {
+	r.checks++
+	return r.checks >= r.firstConflict, nil
+}
+
+func TestQAFixRebaseFailurePersistsConflictRouting(t *testing.T) {
+	runner := &feedbackRunner{
+		statuses: []state.LifecycleStatus{
+			state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFinished,
+			state.StatusFinished, state.StatusFailed,
+			state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFailed,
+		},
+		artifacts: []string{"rebase-conflict.md"},
+	}
+	reader := &stagedConflictReader{firstConflict: 2}
+	events := &fakeEvents{}
+	outcomes, err := orchestrator.NewProductionController(
+		runner,
+		&fakeState{},
+		reader,
+		orchestrator.WithEventSink(events),
+		orchestrator.WithPromptBuilder(fakePrompt{}),
+	).Execute(context.Background(), request(t, pipelineWithQA(t)))
+	if err == nil {
+		t.Fatal("QA feedback Rebase failure unexpectedly succeeded")
+	}
+	if len(outcomes) != 10 || outcomes[len(outcomes)-1].Result.Phase != pipeline.PhaseRebase {
+		t.Fatalf("outcomes = %#v, want terminal feedback Rebase", outcomes)
+	}
+	if !outcomes[len(outcomes)-1].ConflictResolutionNeeded {
+		t.Fatal("feedback Rebase failure did not retain conflict-routing evidence")
+	}
+	for _, event := range events.types {
+		if event == orchestrator.EventConflictDetected {
+			return
+		}
+	}
+	t.Fatalf("events = %v, want conflict detection", events.types)
+}
+
+type retryPRService struct{}
+
+func (retryPRService) Create(context.Context, pr.Request) (pr.Result, error) {
+	return pr.Result{Created: true, URL: "https://github.com/example/repo/pull/1"}, nil
+}
+
+type retryCIService struct{ calls int }
+
+func (s *retryCIService) Monitor(context.Context, ci.Config) (ci.Result, error) {
+	s.calls++
+	if s.calls == 1 {
+		return ci.Result{Outcome: ci.OutcomeFailed}, nil
+	}
+	return ci.Result{Outcome: ci.OutcomePassed}, nil
+}
+
+func TestExecuteCIFailureRemediationRebasesBeforeQA(t *testing.T) {
+	runner := &fakeSeqRunner{}
+	checks := &retryCIService{}
+	req := request(t, resolvedPipeline(t, config.PhaseQA, config.PhasePR, config.PhaseCI))
+	req.ArtifactRoot = t.TempDir()
+	req.GitOps = config.GitOpsConfig{Configured: true, ParentBranch: "main", BaseRef: "origin/main", EnablePR: true, EnableCI: true}
+	req.MaxIterations = 2
+	if _, err := orchestrator.NewController(
+		orchestrator.WithRunner(runner),
+		orchestrator.WithPhaseState(&fakeState{}),
+		orchestrator.WithGitOpsServices(nil, retryPRService{}, checks),
+		orchestrator.WithPromptBuilder(fakePrompt{}),
+	).Execute(context.Background(), req); err != nil {
+		t.Fatal(err)
+	}
+	want := []pipeline.PhaseID{
+		pipeline.PhaseAcceptanceCriteria,
+		pipeline.PhaseDevelopment, pipeline.PhaseDevelopment, pipeline.PhaseDevelopment,
+		pipeline.PhaseRebase, pipeline.PhaseQA, pipeline.PhaseTestDocument,
+		pipeline.PhaseDevelopment, pipeline.PhaseDevelopment, pipeline.PhaseDevelopment,
+		pipeline.PhaseRebase, pipeline.PhaseQA,
+	}
+	if !reflect.DeepEqual(runner.phases, want) {
+		t.Fatalf("CI remediation phases = %v, want %v", runner.phases, want)
+	}
+	if checks.calls != 2 {
+		t.Fatalf("CI checks = %d, want initial failure plus remediation pass", checks.calls)
 	}
 }
 
@@ -622,7 +874,7 @@ func TestLifecycleBackedQAFailureKeepsDispatchClaimThroughFixAndPass(t *testing.
 		t.Fatal(err)
 	}
 	runner := &feedbackRunner{
-		statuses:  []state.LifecycleStatus{state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFailed},
+		statuses:  []state.LifecycleStatus{state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFailed},
 		artifacts: []string{"qa-report.md"},
 	}
 	req := request(t, pipelineWithQA(t))
@@ -659,7 +911,7 @@ func TestLifecycleBackedQAFailureKeepsDispatchClaimThroughFixAndPass(t *testing.
 }
 
 func TestExecuteQARepeatedFailureStopsAtMaxIterationsWithoutExtraDispatch(t *testing.T) {
-	statuses := []state.LifecycleStatus{state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFailed, state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFailed}
+	statuses := []state.LifecycleStatus{state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFailed, state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFailed}
 	runner := &feedbackRunner{statuses: statuses, artifacts: []string{"feedback.md"}}
 	store := &feedbackState{}
 	req := request(t, pipelineWithQA(t))
@@ -668,8 +920,8 @@ func TestExecuteQARepeatedFailureStopsAtMaxIterationsWithoutExtraDispatch(t *tes
 	if err == nil {
 		t.Fatal("expected max-iteration error")
 	}
-	if len(outcomes) != 9 || runner.calls != 9 {
-		t.Fatalf("outcomes=%d dispatches=%d, want 9", len(outcomes), runner.calls)
+	if len(outcomes) != 11 || runner.calls != 11 {
+		t.Fatalf("outcomes=%d dispatches=%d, want 11", len(outcomes), runner.calls)
 	}
 	if runner.requests[len(runner.requests)-1].Phase != pipeline.PhaseQA {
 		t.Fatalf("last request=%#v", runner.requests[len(runner.requests)-1])
@@ -677,7 +929,7 @@ func TestExecuteQARepeatedFailureStopsAtMaxIterationsWithoutExtraDispatch(t *tes
 }
 
 func TestExecuteQACancellationDoesNotStartFixDevelopment(t *testing.T) {
-	runner := &feedbackRunner{statuses: []state.LifecycleStatus{state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusStopped}}
+	runner := &feedbackRunner{statuses: []state.LifecycleStatus{state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusStopped}}
 	store := &feedbackState{}
 	req := request(t, pipelineWithQA(t))
 	req.MaxIterations = 3
@@ -685,15 +937,15 @@ func TestExecuteQACancellationDoesNotStartFixDevelopment(t *testing.T) {
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("err=%v, want cancellation", err)
 	}
-	if len(outcomes) != 5 || runner.calls != 5 {
-		t.Fatalf("outcomes=%d dispatches=%d, want 5", len(outcomes), runner.calls)
+	if len(outcomes) != 6 || runner.calls != 6 {
+		t.Fatalf("outcomes=%d dispatches=%d, want 6", len(outcomes), runner.calls)
 	}
 }
 
 func TestExecuteQABlockedDispositionIsTerminalWithoutFixDispatch(t *testing.T) {
 	runner := &feedbackRunner{
-		statuses:     []state.LifecycleStatus{state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFailed},
-		dispositions: []agent.Disposition{"", "", "", "", agent.DispositionBlocked},
+		statuses:     []state.LifecycleStatus{state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFailed},
+		dispositions: []agent.Disposition{"", "", "", "", "", agent.DispositionBlocked},
 		artifacts:    []string{"qa-report.md"},
 	}
 	store := &feedbackState{}
@@ -703,15 +955,15 @@ func TestExecuteQABlockedDispositionIsTerminalWithoutFixDispatch(t *testing.T) {
 	if err == nil {
 		t.Fatal("blocked QA unexpectedly entered the fix loop")
 	}
-	if len(outcomes) != 5 || runner.calls != 5 {
+	if len(outcomes) != 6 || runner.calls != 6 {
 		t.Fatalf("blocked QA outcomes=%d dispatches=%d, want exactly the initial QA boundary", len(outcomes), runner.calls)
 	}
 }
 
 func TestExecuteQATransportFailureIsTerminalWithoutFixDispatch(t *testing.T) {
 	runner := &feedbackRunner{
-		statuses:  []state.LifecycleStatus{state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFailed},
-		exitCodes: []int{0, 0, 0, 0, 9},
+		statuses:  []state.LifecycleStatus{state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFailed},
+		exitCodes: []int{0, 0, 0, 0, 0, 9},
 		artifacts: []string{"qa-report.md"},
 	}
 	store := &feedbackState{}
@@ -721,7 +973,7 @@ func TestExecuteQATransportFailureIsTerminalWithoutFixDispatch(t *testing.T) {
 	if err == nil {
 		t.Fatal("transport-failed QA unexpectedly entered the fix loop")
 	}
-	if len(outcomes) != 5 || runner.calls != 5 {
+	if len(outcomes) != 6 || runner.calls != 6 {
 		t.Fatalf("transport failure outcomes=%d dispatches=%d, want exactly the initial QA boundary", len(outcomes), runner.calls)
 	}
 }
@@ -739,7 +991,7 @@ func (r *conflictRouter) Route(_ context.Context, conflict orchestrator.Conflict
 
 func TestExecuteRebaseConflictPersistsFailureAndStopsTerminalRoute(t *testing.T) {
 	runner := &feedbackRunner{
-		statuses:  []state.LifecycleStatus{state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFailed},
+		statuses:  []state.LifecycleStatus{state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFailed},
 		artifacts: []string{"rebase-conflict.txt"},
 	}
 	store := &feedbackState{}
@@ -753,8 +1005,8 @@ func TestExecuteRebaseConflictPersistsFailureAndStopsTerminalRoute(t *testing.T)
 	if err == nil {
 		t.Fatal("expected unresolved conflict error")
 	}
-	if runner.calls != 6 {
-		t.Fatalf("dispatches=%d, want 6 (no dispatch after terminal conflict)", runner.calls)
+	if runner.calls != 5 {
+		t.Fatalf("dispatches=%d, want 5 (no dispatch after terminal conflict)", runner.calls)
 	}
 	last := store.calls[len(store.calls)-1]
 	if last.phase != string(pipeline.PhaseRebase) || last.status != state.StatusFailed {
@@ -768,7 +1020,7 @@ func TestExecuteRebaseConflictPersistsFailureAndStopsTerminalRoute(t *testing.T)
 func TestExecuteRebaseConflictRouterErrorPreservesFailureContext(t *testing.T) {
 	routerErr := errors.New("resolver unavailable")
 	runner := &feedbackRunner{
-		statuses:  []state.LifecycleStatus{state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFailed},
+		statuses:  []state.LifecycleStatus{state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFailed},
 		artifacts: []string{"rebase-conflict.txt"},
 	}
 	store := &feedbackState{}
@@ -792,7 +1044,7 @@ func TestExecuteRebaseConflictRouterErrorPreservesFailureContext(t *testing.T) {
 
 func TestExecuteDoesNotTreatRouterApprovalAsConflictResolutionInSameRun(t *testing.T) {
 	runner := &feedbackRunner{
-		statuses:  []state.LifecycleStatus{state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFailed, state.StatusFinished, state.StatusFinished},
+		statuses:  []state.LifecycleStatus{state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFailed, state.StatusFinished, state.StatusFinished},
 		artifacts: []string{"rebase-conflict.txt"},
 	}
 	store := &feedbackState{}
@@ -808,8 +1060,8 @@ func TestExecuteDoesNotTreatRouterApprovalAsConflictResolutionInSameRun(t *testi
 	if err == nil {
 		t.Fatal("failed Rebase unexpectedly continued in the same run")
 	}
-	if runner.calls != 6 || len(outcomes) != 6 {
-		t.Fatalf("dispatches=%d outcomes=%d, want 6", runner.calls, len(outcomes))
+	if runner.calls != 5 || len(outcomes) != 5 {
+		t.Fatalf("dispatches=%d outcomes=%d, want 5", runner.calls, len(outcomes))
 	}
 	if len(router.seen) != 1 || !reflect.DeepEqual(router.seen[0].ArtifactPaths, []string{"rebase-conflict.txt"}) {
 		t.Fatalf("router conflicts=%#v", router.seen)
@@ -836,7 +1088,7 @@ func TestExecuteDoesNotTreatRouterApprovalAsConflictResolutionInSameRun(t *testi
 }
 
 func TestExecuteRebaseCancellationDoesNotRouteConflict(t *testing.T) {
-	runner := &feedbackRunner{statuses: []state.LifecycleStatus{state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusStopped}}
+	runner := &feedbackRunner{statuses: []state.LifecycleStatus{state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusStopped}}
 	store := &feedbackState{}
 	events := &fakeEvents{}
 	router := &conflictRouter{route: orchestrator.ConflictRouteQA}
@@ -867,7 +1119,7 @@ func (r productionConflictReader) HasUnresolvedConflicts(context.Context, string
 }
 
 func TestProductionControllerTreatsCleanIndexRebaseFailureAsOrdinaryFailure(t *testing.T) {
-	runner := &feedbackRunner{statuses: []state.LifecycleStatus{state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFailed, state.StatusFinished, state.StatusFinished}, artifacts: []string{"rebase-conflict.txt"}}
+	runner := &feedbackRunner{statuses: []state.LifecycleStatus{state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFailed, state.StatusFinished, state.StatusFinished}, artifacts: []string{"rebase-conflict.txt"}}
 	store := &feedbackState{}
 	req := request(t, pipelineWithQA(t))
 	req.Project.WorktreePath = "/worktree"
@@ -875,13 +1127,13 @@ func TestProductionControllerTreatsCleanIndexRebaseFailureAsOrdinaryFailure(t *t
 	if err == nil {
 		t.Fatal("ordinary clean-index Rebase failure unexpectedly continued")
 	}
-	if runner.calls != 6 {
+	if runner.calls != 5 {
 		t.Fatalf("calls=%d requests=%#v", runner.calls, runner.requests)
 	}
 }
 
 func TestProductionControllerKeepsUnresolvedGitConflictTerminal(t *testing.T) {
-	runner := &feedbackRunner{statuses: []state.LifecycleStatus{state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFailed}, artifacts: []string{"rebase-conflict.txt"}}
+	runner := &feedbackRunner{statuses: []state.LifecycleStatus{state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFailed}, artifacts: []string{"rebase-conflict.txt"}}
 	store := &feedbackState{}
 	req := request(t, pipelineWithQA(t))
 	req.Project.WorktreePath = "/worktree"
@@ -889,8 +1141,8 @@ func TestProductionControllerKeepsUnresolvedGitConflictTerminal(t *testing.T) {
 	if err == nil {
 		t.Fatal("unresolved conflict unexpectedly succeeded")
 	}
-	if runner.calls != 6 {
-		t.Fatalf("calls=%d, want 6", runner.calls)
+	if runner.calls != 5 {
+		t.Fatalf("calls=%d, want 5", runner.calls)
 	}
 }
 
@@ -1142,6 +1394,106 @@ func planLoopRequest(t *testing.T, completed ...string) (orchestrator.Request, *
 		Plan: &state.PlanState{Phases: []string{"P1", "P2", "P3"}, Completed: completed},
 	}}
 	return request(t, resolvedPipeline(t)), store
+}
+
+type planningRetryRunner struct {
+	worktree  string
+	validFrom int
+	attempts  int
+	runIDs    []string
+	prompts   []string
+}
+
+func (r *planningRetryRunner) Run(_ context.Context, req agent.RunRequest) (agent.RunResult, error) {
+	if req.Phase == pipeline.PhasePlanning {
+		r.attempts++
+		r.runIDs = append(r.runIDs, req.RunID)
+		r.prompts = append(r.prompts, req.Prompt)
+		if err := os.MkdirAll(filepath.Join(r.worktree, ".gg"), 0o755); err != nil {
+			return agent.RunResult{Phase: req.Phase, Status: state.StatusFailed}, err
+		}
+		plan := planningTestArtifact(r.attempts >= r.validFrom)
+		if err := os.WriteFile(filepath.Join(r.worktree, ".gg", "plan.md"), []byte(plan), 0o644); err != nil {
+			return agent.RunResult{Phase: req.Phase, Status: state.StatusFailed}, err
+		}
+	}
+	return agent.RunResult{Phase: req.Phase, Status: state.StatusFinished, Disposition: agent.DispositionPassed}, nil
+}
+
+func planningTestArtifact(valid bool) string {
+	if !valid {
+		return "---\ngg_run_id: \"run\"\ngg_disposition: passed\ngg_plan_complexity: \"Trivial\"\ngg_plan_complexity_evidence: [\"one outcome\"]\ngg_plan_phases: [\"Phase 1: first\", \"Phase 2: second\"]\ngg_plan_phase_boundaries: [{\"phase\":\"Phase 1: first\",\"justification\":\"split\"}, {\"phase\":\"Phase 2: second\",\"justification\":\"split\"}]\n---\n## Complexity assessment\n\n- Complexity category: **Trivial**\n- Selected phase count: **2**\n\nSupporting evidence:\n\n1. one outcome\n\n## Phase 1: first\n\nBoundary justification: split\n\n## Phase 2: second\n\nBoundary justification: split\n"
+	}
+	return "---\ngg_run_id: \"run\"\ngg_disposition: passed\ngg_plan_complexity: \"Trivial\"\ngg_plan_complexity_evidence: [\"one outcome\"]\ngg_plan_phases: [\"Phase 1: first\"]\ngg_plan_phase_boundaries: [{\"phase\":\"Phase 1: first\",\"justification\":\"one cohesive outcome\"}]\n---\n## Complexity assessment\n\n- Complexity category: **Trivial**\n- Selected phase count: **1**\n\nSupporting evidence:\n\n1. one outcome\n\n## Phase 1: first\n\nBoundary justification: one cohesive outcome\n"
+}
+
+func TestPlanningRetriesInvalidArtifactWithFreshInvocationAndExactEvidence(t *testing.T) {
+	worktree := t.TempDir()
+	retryRunner := &planningRetryRunner{worktree: worktree, validFrom: 2}
+	prompts := &scopeCapturePrompt{}
+	req := request(t, resolvedPipeline(t, config.PhasePlanning))
+	req.Project.WorktreePath = worktree
+	req.Project.PipelineConfig = state.PipelineConfigSnapshot{SchemaVersion: 1, Data: []byte(`{"planningContractVersion":1}`)}
+	_, err := orchestrator.NewController(
+		orchestrator.WithRunner(retryRunner),
+		orchestrator.WithPhaseState(&fakeState{}),
+		orchestrator.WithPromptBuilder(prompts),
+	).Execute(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retryRunner.attempts != 2 || len(retryRunner.runIDs) != 2 || retryRunner.runIDs[0] == retryRunner.runIDs[1] {
+		t.Fatalf("planning attempts=%d run IDs=%v, want two fresh invocations", retryRunner.attempts, retryRunner.runIDs)
+	}
+	var planningInputs []agent.PromptInput
+	for _, input := range prompts.inputs {
+		if input.Phase == pipeline.PhasePlanning {
+			planningInputs = append(planningInputs, input)
+		}
+	}
+	if len(planningInputs) != 2 || planningInputs[1].PlanningAttempt != 2 {
+		t.Fatalf("planning prompt inputs=%#v, want corrective attempt 2", planningInputs)
+	}
+	if !strings.Contains(planningInputs[1].RejectedPlanningArtifact, "Phase 2: second") || len(planningInputs[1].PlanningValidationErrors) == 0 {
+		t.Fatalf("retry evidence=%#v", planningInputs[1])
+	}
+}
+
+func TestPlanningStopsAfterThreeInvalidAttemptsWithoutFourthDispatch(t *testing.T) {
+	worktree := t.TempDir()
+	retryRunner := &planningRetryRunner{worktree: worktree, validFrom: 4}
+	req := request(t, resolvedPipeline(t, config.PhasePlanning))
+	req.Project.WorktreePath = worktree
+	req.Project.PipelineConfig = state.PipelineConfigSnapshot{SchemaVersion: 1, Data: []byte(`{"planningContractVersion":1}`)}
+	_, err := orchestrator.NewController(
+		orchestrator.WithRunner(retryRunner),
+		orchestrator.WithPhaseState(&fakeState{}),
+		orchestrator.WithPromptBuilder(&scopeCapturePrompt{}),
+	).Execute(context.Background(), req)
+	if err == nil || !strings.Contains(err.Error(), "phase-limit-exceeded") {
+		t.Fatalf("error=%v, want clear phase-limit-exceeded failure", err)
+	}
+	if retryRunner.attempts != agent.MaxPlanningAttempts {
+		t.Fatalf("planning attempts=%d, want exactly %d", retryRunner.attempts, agent.MaxPlanningAttempts)
+	}
+}
+
+func TestLegacyPlanningSnapshotBypassesNewContractGate(t *testing.T) {
+	worktree := t.TempDir()
+	retryRunner := &planningRetryRunner{worktree: worktree, validFrom: 4}
+	req := request(t, resolvedPipeline(t, config.PhasePlanning))
+	req.Project.WorktreePath = worktree
+	req.Project.PipelineConfig = state.PipelineConfigSnapshot{SchemaVersion: 1, Data: []byte(`{"schemaVersion":1}`)}
+	if _, err := orchestrator.NewController(
+		orchestrator.WithRunner(retryRunner),
+		orchestrator.WithPhaseState(&fakeState{}),
+		orchestrator.WithPromptBuilder(&scopeCapturePrompt{}),
+	).Execute(context.Background(), req); err != nil {
+		t.Fatalf("legacy plan was revalidated: %v", err)
+	}
+	if retryRunner.attempts != 1 {
+		t.Fatalf("legacy planning attempts=%d, want one tolerant execution", retryRunner.attempts)
+	}
 }
 
 func TestDevelopmentRunsFreshScopedSequencePerPendingPlanPhase(t *testing.T) {

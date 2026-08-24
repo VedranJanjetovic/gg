@@ -16,6 +16,7 @@ import (
 	"github.com/VedranJanjetovic/gg/internal/git"
 	"github.com/VedranJanjetovic/gg/internal/pipeline"
 	"github.com/VedranJanjetovic/gg/internal/pr"
+	"github.com/VedranJanjetovic/gg/internal/proof"
 	"github.com/VedranJanjetovic/gg/internal/state"
 )
 
@@ -150,6 +151,9 @@ func WithConflictStateReader(reader ConflictStateReader) ControllerOption {
 func WithGitOpsServices(rebaser GitOpsRebaser, pullRequests PullRequestService, checks CIService) ControllerOption {
 	return func(c *sequentialController) { c.rebaser, c.pullRequests, c.checks = rebaser, pullRequests, checks }
 }
+func WithRebaseAgent(rebaseAgent RebaseAgent) ControllerOption {
+	return func(c *sequentialController) { c.rebaseAgent = rebaseAgent }
+}
 func WithPRCILifecycleMonitor(monitor LifecycleMonitor) ControllerOption {
 	return func(c *sequentialController) { c.lifecycleMonitor = monitor }
 }
@@ -164,6 +168,7 @@ type sequentialController struct {
 	conflictState      ConflictStateReader
 	developmentCommits DevelopmentCommitVerifier
 	rebaser            GitOpsRebaser
+	rebaseAgent        RebaseAgent
 	pullRequests       PullRequestService
 	checks             CIService
 	lifecycleMonitor   LifecycleMonitor
@@ -275,7 +280,11 @@ func (c *sequentialController) execute(ctx context.Context, request Request, res
 		if err != nil {
 			return outcomes, err
 		}
-		resumePhase, resumeSubphase = nextResumePhase(request.Pipeline, string(pipeline.PhaseRebase))
+		continuationTarget := pipeline.PhaseRebase
+		if _, rebaseBeforeQA := rebaseBeforeQAExecutable(request.Pipeline); rebaseBeforeQA {
+			continuationTarget = pipeline.PhaseQA
+		}
+		resumePhase, resumeSubphase = nextResumePhase(request.Pipeline, string(continuationTarget))
 		if resumePhase == "" {
 			return outcomes, errors.New("resolved rebase conflict has no phase after Rebase")
 		}
@@ -295,6 +304,15 @@ func (c *sequentialController) execute(ctx context.Context, request Request, res
 				continue
 			}
 			resuming = true
+		}
+		if phase == pipeline.PhasePlanning {
+			planningOutcomes, err := c.executePlanningLoop(ctx, &request, executable)
+			outcomes = append(outcomes, planningOutcomes...)
+			request.PlanningRetry = nil
+			if err != nil {
+				return outcomes, err
+			}
+			continue
 		}
 		if phase == pipeline.PhaseQA {
 			if err := ctx.Err(); err != nil {
@@ -350,26 +368,11 @@ func (c *sequentialController) execute(ctx context.Context, request Request, res
 				}
 			}
 			if err != nil {
-				if phase == pipeline.PhaseRebase && outcome.Result.Status == state.StatusFailed {
-					bookkeepingCtx := context.WithoutCancel(ctx)
-					conflict, inspectErr := c.isRebaseConflict(bookkeepingCtx, request.Project.WorktreePath)
-					if inspectErr != nil {
-						return outcomes, errors.Join(err, inspectErr)
+				if phase == pipeline.PhaseRebase {
+					if conflictErr := c.recordRebaseConflict(context.WithoutCancel(ctx), &request, &outcome, err); conflictErr != nil {
+						return outcomes, errors.Join(err, conflictErr)
 					}
-					if conflict {
-						outcomes[len(outcomes)-1].ConflictResolutionNeeded = true
-						outcome.ConflictResolutionNeeded = true
-						if durable, ok := c.state.(durableOrchestrationState); ok {
-							project, persistErr := durable.SetRebaseConflict(context.WithoutCancel(ctx), request.Project.Slug, true, outcome.Result.ArtifactPaths)
-							if persistErr != nil {
-								return outcomes, errors.Join(err, persistErr)
-							}
-							request.Project = project
-						}
-						if _, routeErr := c.routeConflict(bookkeepingCtx, request, outcome, err); routeErr != nil {
-							return outcomes, routeErr
-						}
-					}
+					outcomes[len(outcomes)-1].ConflictResolutionNeeded = outcome.ConflictResolutionNeeded
 				}
 				return outcomes, err
 			}
@@ -555,6 +558,22 @@ func (c *sequentialController) executeQAFeedbackLoop(ctx context.Context, reques
 		if resuming {
 			return fmt.Errorf("resume Development fix subphase %q is not configured", cursor)
 		}
+		rebaseOutcome, rebaseErr := c.executeRebaseBeforeQA(ctx, request, iteration, feedback)
+		if rebaseOutcome.Result.Phase != "" {
+			outcomes = append(outcomes, rebaseOutcome)
+		}
+		if rebaseErr != nil {
+			if conflictErr := c.recordRebaseConflict(context.WithoutCancel(ctx), request, &rebaseOutcome, rebaseErr); conflictErr != nil {
+				if rebaseOutcome.Result.Phase != "" {
+					outcomes[len(outcomes)-1] = rebaseOutcome
+				}
+				return errors.Join(rebaseErr, conflictErr)
+			}
+			if rebaseOutcome.Result.Phase != "" {
+				outcomes[len(outcomes)-1] = rebaseOutcome
+			}
+			return rebaseErr
+		}
 		stage = "qa"
 		return c.persistQALoop(context.WithoutCancel(ctx), request, completed, stage, "", feedback)
 	}
@@ -672,6 +691,55 @@ func qaExecutable(plan pipeline.ExecutablePipeline) (pipeline.ExecutablePhase, b
 	return pipeline.ExecutablePhase{}, false
 }
 
+// executeRebaseBeforeQA preserves the new pipeline invariant for feedback
+// loops while leaving legacy snapshots with QA-before-Rebase semantics alone.
+func (c *sequentialController) executeRebaseBeforeQA(ctx context.Context, request *Request, iteration int, feedback []string) (PhaseOutcome, error) {
+	rebase, ok := rebaseBeforeQAExecutable(request.Pipeline)
+	if !ok {
+		return PhaseOutcome{}, nil
+	}
+	outcome, err := c.executePhase(ctx, *request, rebase, "", iteration, feedback)
+	request.Project.ArtifactPaths = appendUnique(request.Project.ArtifactPaths, outcome.Result.ArtifactPaths...)
+	return outcome, err
+}
+
+func (c *sequentialController) recordRebaseConflict(ctx context.Context, request *Request, outcome *PhaseOutcome, phaseErr error) error {
+	if outcome == nil || outcome.Result.Status != state.StatusFailed {
+		return nil
+	}
+	conflict, err := c.isRebaseConflict(ctx, request.Project.WorktreePath)
+	if err != nil {
+		return err
+	}
+	if !conflict {
+		return nil
+	}
+	outcome.ConflictResolutionNeeded = true
+	if durable, ok := c.state.(durableOrchestrationState); ok {
+		project, persistErr := durable.SetRebaseConflict(ctx, request.Project.Slug, true, outcome.Result.ArtifactPaths)
+		if persistErr != nil {
+			return persistErr
+		}
+		request.Project = project
+	}
+	_, err = c.routeConflict(ctx, *request, *outcome, phaseErr)
+	return err
+}
+
+func rebaseBeforeQAExecutable(plan pipeline.ExecutablePipeline) (pipeline.ExecutablePhase, bool) {
+	phases := plan.Phases()
+	for index, executable := range phases {
+		if executable.Phase().ID() != pipeline.PhaseQA || index == 0 {
+			continue
+		}
+		previous := phases[index-1]
+		if previous.Phase().ID() == pipeline.PhaseRebase {
+			return previous, true
+		}
+	}
+	return pipeline.ExecutablePhase{}, false
+}
+
 func (c *sequentialController) routeConflict(ctx context.Context, request Request, outcome PhaseOutcome, phaseErr error) (bool, error) {
 	conflict := Conflict{
 		Phase:         pipeline.PhaseRebase,
@@ -729,6 +797,13 @@ func (c *sequentialController) retryCIFailure(ctx context.Context, request *Requ
 			if fixErr != nil {
 				return outcomes, PhaseOutcome{}, fixErr
 			}
+		}
+		rebaseOutcome, rebaseErr := c.executeRebaseBeforeQA(ctx, request, attempt, feedback)
+		if rebaseOutcome.Result.Phase != "" {
+			outcomes = append(outcomes, rebaseOutcome)
+		}
+		if rebaseErr != nil {
+			return outcomes, PhaseOutcome{}, rebaseErr
 		}
 		qaOutcome, qaErr := c.executePhase(ctx, *request, qa, "", attempt, feedback)
 		outcomes = append(outcomes, qaOutcome)
@@ -813,6 +888,37 @@ func (c *sequentialController) executeDevelopmentLoop(ctx context.Context, reque
 	return outcomes, nil
 }
 
+// executePlanningLoop validates only Planning artifacts from snapshots that
+// carry the new contract marker. Each invalid artifact gets a fresh agent
+// invocation and the same complete scope plus exact rejection evidence.
+func (c *sequentialController) executePlanningLoop(ctx context.Context, request *Request, executable pipeline.ExecutablePhase) ([]PhaseOutcome, error) {
+	if !pipeline.PlanningContractEnforced(request.Project.PipelineConfig) {
+		outcome, err := c.executePhase(ctx, *request, executable, "", 0, nil)
+		return []PhaseOutcome{outcome}, err
+	}
+
+	var outcomes []PhaseOutcome
+	validationSummaries := make([]string, 0, agent.MaxPlanningAttempts)
+	for attempt := 1; attempt <= agent.MaxPlanningAttempts; attempt++ {
+		outcome, err := c.executePhase(ctx, *request, executable, "", attempt-1, nil)
+		outcomes = append(outcomes, outcome)
+		request.Project.ArtifactPaths = appendUnique(request.Project.ArtifactPaths, outcome.Result.ArtifactPaths...)
+		if err == nil {
+			return outcomes, nil
+		}
+		var contractErr *agent.PlanningContractError
+		if !errors.As(err, &contractErr) {
+			return outcomes, err
+		}
+		validationSummaries = append(validationSummaries, fmt.Sprintf("attempt %d: %s", attempt, strings.Join(contractErr.Violations, "; ")))
+		if attempt == agent.MaxPlanningAttempts {
+			return outcomes, fmt.Errorf("phase-limit-exceeded: Planning artifact remained invalid after %d attempts: %s: %w", agent.MaxPlanningAttempts, strings.Join(validationSummaries, " | "), err)
+		}
+		request.PlanningRetry = &PlanningRetry{Attempt: attempt + 1, Artifact: contractErr.Artifact, Violations: append([]string(nil), contractErr.Violations...)}
+	}
+	return outcomes, errors.New("phase-limit-exceeded: Planning attempts exhausted")
+}
+
 // pendingPlanPhases returns the plan phases not yet completed, freshly loaded
 // from durable state (planning records the plan earlier in the same run).
 func (c *sequentialController) pendingPlanPhases(ctx context.Context, slug string) (pending []string, total int) {
@@ -847,6 +953,14 @@ func (c *sequentialController) executePhase(ctx context.Context, request Request
 	artifacts := appendUnique(request.Project.ArtifactPaths, feedback...)
 	invocationID := phaseInvocationID(request.RunID, phase, subphase, iteration)
 	promptInput := agent.PromptInput{Project: request.Project, Phase: phase, Subphase: subphase, PhaseContract: request.PhaseContracts[phase], ArtifactPaths: artifacts, WorkingDirectory: request.Project.WorktreePath, RunID: invocationID, Development: phase == pipeline.PhaseDevelopment}
+	if phase == pipeline.PhaseDevelopment && subphase == string(pipeline.DevelopmentSubphaseReview) {
+		promptInput.SkippedTestingEvidence = skippedTestingEvidence(request.Project)
+	}
+	if request.PlanningRetry != nil && phase == pipeline.PhasePlanning {
+		promptInput.PlanningAttempt = request.PlanningRetry.Attempt
+		promptInput.RejectedPlanningArtifact = request.PlanningRetry.Artifact
+		promptInput.PlanningValidationErrors = append([]string(nil), request.PlanningRetry.Violations...)
+	}
 	if request.PlanScope != nil {
 		promptInput.PlanPhase = request.PlanScope.Name
 		promptInput.PlanPhaseIndex = request.PlanScope.Index
@@ -886,7 +1000,7 @@ func (c *sequentialController) executePhase(ctx context.Context, request Request
 			runResult.ArtifactPaths = append(runResult.ArtifactPaths, path)
 		}
 	} else if phase == pipeline.PhaseRebase && c.rebaser != nil && strings.TrimSpace(request.GitOps.ParentBranch) != "" {
-		result, rebaseErr := c.runRebase(ctx, request)
+		result, rebaseErr := c.runRebase(ctx, request, settings)
 		runResult, runErr = result, rebaseErr
 	} else if phase == pipeline.PhasePR && c.pullRequests != nil && request.GitOps.EnablePR {
 		result, prErr := c.runPullRequest(ctx, request)
@@ -960,13 +1074,6 @@ func (c *sequentialController) executePhase(ctx context.Context, request Request
 			runResult.Status = state.StatusFailed
 		}
 	}
-	if dispatched && (phase == pipeline.PhasePlanning || (phase == pipeline.PhaseDevelopment && request.PlanScope == nil)) {
-		// Scoped development runs are excluded: their plan-phase completion is
-		// orchestrator-owned (recorded after the phase's review passes), and an
-		// agent-reported early completion must not skip that phase's testing or
-		// review on resume.
-		c.recordPlanProgress(context.WithoutCancel(ctx), request, phase)
-	}
 	outcome := PhaseOutcome{Result: runResult, Iteration: iteration, FeedbackArtifactPaths: append([]string(nil), feedback...)}
 	if runErr == nil && runResult.Status != state.StatusFailed && runResult.Status != state.StatusStopped {
 		if cancellation := ctx.Err(); cancellation != nil {
@@ -986,6 +1093,19 @@ func (c *sequentialController) executePhase(ctx context.Context, request Request
 		}
 		return c.finishFailedPhase(ctx, request, phase, subphase, runResult, runErr, iteration, feedback, previousHead)
 	}
+	if phase == pipeline.PhasePlanning && pipeline.PlanningContractEnforced(request.Project.PipelineConfig) {
+		if _, validationErr := agent.ValidatePlanningArtifact(request.Project.WorktreePath); validationErr != nil {
+			return c.finishFailedPhase(ctx, request, phase, subphase, runResult, validationErr, iteration, feedback, previousHead)
+		}
+	}
+	if dispatched && (phase == pipeline.PhasePlanning || (phase == pipeline.PhaseDevelopment && request.PlanScope == nil)) {
+		// Scoped development runs are excluded: their plan-phase completion is
+		// orchestrator-owned (recorded after the phase's review passes), and an
+		// agent-reported early completion must not skip that phase's testing or
+		// review on resume. Planning reaches this point only after strict
+		// validation succeeds; legacy plans retain tolerant display parsing.
+		c.recordPlanProgress(context.WithoutCancel(ctx), request, phase)
+	}
 
 	if err := c.recordResult(ctx, request.Project.Slug, phase, subphase, runResult, state.StatusFinished, previousHead); err != nil {
 		if isCancellation(err) || ctx.Err() != nil {
@@ -1004,36 +1124,213 @@ func (c *sequentialController) executePhase(ctx context.Context, request Request
 	return outcome, nil
 }
 
-func (c *sequentialController) runRebase(ctx context.Context, request Request) (agent.RunResult, error) {
+// MaxRebaseAttempts is the fixed retry budget for one Rebase execution.
+const MaxRebaseAttempts = 3
+
+const maxRebaseAttempts = MaxRebaseAttempts
+
+func (c *sequentialController) runRebase(ctx context.Context, request Request, settings config.AgentSettings) (agent.RunResult, error) {
 	result := agent.RunResult{ProjectSlug: request.Project.Slug, Phase: pipeline.PhaseRebase, Subphase: ""}
-	if strings.TrimSpace(request.GitOps.ParentBranch) == "" || strings.TrimSpace(request.GitOps.BaseRef) == "" {
+	parent := strings.TrimSpace(request.GitOps.ParentBranch)
+	if parent == "" {
 		result.Status = state.StatusFailed
-		return result, errors.New("Rebase GitOps configuration requires parent branch and base ref")
+		return result, errors.New("Rebase GitOps configuration requires parent branch")
 	}
-	if _, err := c.rebaser.FetchParent(ctx, request.GitOps.ParentBranch); err != nil {
-		result.Status = state.StatusFailed
-		return result, err
-	}
-	rebase, err := c.rebaser.RebaseProject(ctx, git.RebaseRequest{WorktreePath: request.Project.WorktreePath, Branch: request.Project.BranchName, ParentBranch: request.GitOps.ParentBranch, BaseRef: request.GitOps.BaseRef})
-	if rebase.Conflict != nil {
-		path, writeErr := writeGitOpsArtifact(request, "rebase-conflict.md", fmt.Sprintf("# Rebase Conflict\n\n- Branch: `%s`\n- Base: `%s`\n- Parent: `%s`\n- Paths: `%s`\n\n## Git output\n\n```text\n%s\n```\n", rebase.Branch, rebase.BaseRef, request.GitOps.ParentBranch, strings.Join(rebase.Conflict.Paths, ", "), strings.TrimSpace(rebase.Conflict.Output)))
-		result.Status = state.StatusFailed
-		result.ArtifactPaths = append(result.ArtifactPaths, path)
-		if writeErr != nil {
-			return result, errors.Join(err, writeErr)
+
+	manager, hasCheckpoint := c.rebaser.(RebaseCheckpointManager)
+	var checkpoint git.RebaseCheckpoint
+	if hasCheckpoint {
+		var err error
+		checkpoint, err = manager.CaptureRebaseCheckpoint(ctx, request.Project.WorktreePath)
+		if err != nil {
+			result.Status = state.StatusFailed
+			return result, fmt.Errorf("capture Rebase checkpoint: %w", err)
 		}
-		return result, err
 	}
+
+	evidence := make([]string, 0, maxRebaseAttempts)
+	var lastResult git.RebaseResult
+	var lastErr error
+	restoreCheckpoint := func() error {
+		if !hasCheckpoint {
+			return nil
+		}
+		restoreContext := ctx
+		if ctx.Err() != nil {
+			// A canceled run still needs to leave Git safe for a later resume or
+			// confirmed skip. Do not let the canceled phase context prevent abort
+			// and checkpoint restoration.
+			restoreContext = context.WithoutCancel(ctx)
+		}
+		return manager.RestoreRebaseCheckpoint(restoreContext, checkpoint)
+	}
+	for attempt := 1; attempt <= maxRebaseAttempts; attempt++ {
+		if err := ctx.Err(); err != nil {
+			result.Status = state.StatusStopped
+			if restoreErr := restoreCheckpoint(); restoreErr != nil {
+				return result, errors.Join(err, fmt.Errorf("restore Rebase checkpoint after cancellation: %w", restoreErr))
+			}
+			return result, err
+		}
+		if hasCheckpoint {
+			if err := restoreCheckpoint(); err != nil {
+				result.Status = state.StatusFailed
+				return result, fmt.Errorf("restore Rebase checkpoint before attempt %d: %w", attempt, err)
+			}
+		}
+
+		lastResult = git.RebaseResult{}
+		if _, err := c.rebaser.FetchParent(ctx, parent); err != nil {
+			lastErr = fmt.Errorf("Rebase attempt %d fetch parent %q: %w", attempt, parent, err)
+			evidence = append(evidence, lastErr.Error())
+		} else {
+			// RebaseProject derives origin/<parent> from ParentBranch. BaseRef is
+			// deliberately not an authority so a stale explicit ref cannot
+			// override the freshly fetched parent.
+			lastResult, lastErr = c.rebaser.RebaseProject(ctx, git.RebaseRequest{
+				WorktreePath: request.Project.WorktreePath,
+				Branch:       request.Project.BranchName,
+				ParentBranch: parent,
+				BaseRef:      "origin/" + parent,
+			})
+			if lastErr != nil {
+				evidence = appendRebaseEvidence(evidence, attempt, lastResult, lastErr)
+				if c.rebaseAgent != nil {
+					agentResult, agentErr := c.runRebaseAgent(ctx, request, settings, attempt, evidence)
+					result.ArtifactPaths = appendUnique(result.ArtifactPaths, agentResult.ArtifactPaths...)
+					if agentErr == nil {
+						lastErr = c.verifyRebaseWorktree(ctx, request.Project.WorktreePath)
+						if lastErr == nil {
+							lastResult.Conflict = nil
+						} else {
+							evidence = appendRebaseEvidence(evidence, attempt, lastResult, lastErr)
+						}
+					} else {
+						lastErr = agentErr
+						evidence = appendRebaseEvidence(evidence, attempt, lastResult, fmt.Errorf("Rebase agent: %w", agentErr))
+					}
+				}
+			} else {
+				lastErr = c.verifyRebaseWorktree(ctx, request.Project.WorktreePath)
+				if lastErr != nil {
+					evidence = appendRebaseEvidence(evidence, attempt, lastResult, lastErr)
+				}
+				if lastErr == nil && c.rebaseAgent != nil {
+					agentResult, agentErr := c.runRebaseAgent(ctx, request, settings, attempt, evidence)
+					result.ArtifactPaths = appendUnique(result.ArtifactPaths, agentResult.ArtifactPaths...)
+					lastErr = agentErr
+					if lastErr != nil {
+						evidence = appendRebaseEvidence(evidence, attempt, lastResult, fmt.Errorf("Rebase agent: %w", lastErr))
+					}
+					if lastErr == nil {
+						lastErr = c.verifyRebaseWorktree(ctx, request.Project.WorktreePath)
+						if lastErr != nil {
+							evidence = appendRebaseEvidence(evidence, attempt, lastResult, lastErr)
+						}
+					}
+				}
+			}
+		}
+		if err := ctx.Err(); err != nil {
+			result.Status = state.StatusStopped
+			if restoreErr := restoreCheckpoint(); restoreErr != nil {
+				return result, errors.Join(err, fmt.Errorf("restore Rebase checkpoint after cancellation: %w", restoreErr))
+			}
+			return result, err
+		}
+
+		if lastErr == nil {
+			result.Status = state.StatusFinished
+			result.Disposition = agent.DispositionPassed
+			path, writeErr := writeGitOpsArtifact(request, "rebase-report.md", fmt.Sprintf("# Rebase Report\n\n- Branch: `%s`\n- Base: `origin/%s`\n- Attempts: `%d`\n- Result: passed\n\n## Git output\n\n```text\n%s\n```\n", lastResult.Branch, parent, attempt, strings.TrimSpace(lastResult.Output)))
+			if writeErr == nil {
+				result.ArtifactPaths = appendUnique(result.ArtifactPaths, path)
+			}
+			return result, nil
+		}
+
+		if attempt == maxRebaseAttempts && hasCheckpoint {
+			if restoreErr := restoreCheckpoint(); restoreErr != nil {
+				result.Status = state.StatusFailed
+				return result, errors.Join(lastErr, fmt.Errorf("restore Rebase checkpoint after attempt %d: %w", attempt, restoreErr))
+			}
+		}
+	}
+
+	result.Status = state.StatusFailed
+	if lastResult.Conflict != nil {
+		path, writeErr := writeGitOpsArtifact(request, "rebase-conflict.md", fmt.Sprintf("# Rebase Conflict\n\n- Branch: `%s`\n- Base: `origin/%s`\n- Attempts: `%d`\n- Paths: `%s`\n\n## Evidence\n\n%s\n\n## Git output\n\n```text\n%s\n```\n", lastResult.Branch, parent, maxRebaseAttempts, strings.Join(lastResult.Conflict.Paths, ", "), strings.Join(evidence, "\n"), strings.TrimSpace(lastResult.Conflict.Output)))
+		if writeErr == nil {
+			result.ArtifactPaths = appendUnique(result.ArtifactPaths, path)
+		} else {
+			lastErr = errors.Join(lastErr, writeErr)
+		}
+	}
+	return result, fmt.Errorf("Rebase failed after %d attempts: %w", maxRebaseAttempts, lastErr)
+}
+
+func (c *sequentialController) verifyRebaseWorktree(ctx context.Context, worktree string) error {
+	if verifier, ok := c.rebaser.(RebaseWorktreeVerifier); ok {
+		if err := verifier.VerifyRebaseWorktree(ctx, worktree); err != nil {
+			return err
+		}
+	}
+	if c.conflictState != nil {
+		unresolved, err := c.conflictState.HasUnresolvedConflicts(ctx, worktree)
+		if err != nil {
+			return fmt.Errorf("inspect Rebase Git index: %w", err)
+		}
+		if unresolved {
+			return errRebaseHasUnmergedPaths
+		}
+	}
+	return nil
+}
+
+func (c *sequentialController) runRebaseAgent(ctx context.Context, request Request, settings config.AgentSettings, attempt int, evidence []string) (agent.RunResult, error) {
+	input := agent.PromptInput{
+		Project:            request.Project,
+		AcceptanceCriteria: append([]string(nil), request.Project.AcceptanceCriteria...),
+		Phase:              pipeline.PhaseRebase,
+		PhaseContract:      request.PhaseContracts[pipeline.PhaseRebase],
+		ArtifactPaths:      append([]string(nil), request.Project.ArtifactPaths...),
+		WorkingDirectory:   request.Project.WorktreePath,
+		RunID:              phaseInvocationID(request.RunID, pipeline.PhaseRebase, "agent", attempt-1),
+	}
+	prompt, err := c.prompts.BuildPrompt(input)
 	if err != nil {
-		result.Status = state.StatusFailed
-		return result, err
+		return agent.RunResult{Phase: pipeline.PhaseRebase}, fmt.Errorf("build Rebase attempt %d prompt: %w", attempt, err)
 	}
-	result.Status = state.StatusFinished
-	result.Disposition = agent.DispositionPassed
-	if path, writeErr := writeGitOpsArtifact(request, "rebase-report.md", fmt.Sprintf("# Rebase Report\n\n- Branch: `%s`\n- Base: `%s`\n- Parent fetched: `%s`\n- Result: passed\n\n## Git output\n\n```text\n%s\n```\n", rebase.Branch, rebase.BaseRef, request.GitOps.ParentBranch, strings.TrimSpace(rebase.Output))); writeErr == nil {
-		result.ArtifactPaths = append(result.ArtifactPaths, path)
+	if len(evidence) > 0 {
+		prompt += "\n\nPrior Rebase attempt evidence (use it to improve this fresh attempt):\n- " + strings.Join(evidence, "\n- ")
 	}
-	return result, nil
+	runResult, runErr := c.rebaseAgent.Run(ctx, agent.RunRequest{
+		Project:          request.Project,
+		Phase:            pipeline.PhaseRebase,
+		Settings:         settings,
+		Prompt:           prompt,
+		WorkingDirectory: request.Project.WorktreePath,
+		ArtifactPaths:    input.ArtifactPaths,
+		RunID:            input.RunID,
+	})
+	if runErr != nil {
+		return runResult, runErr
+	}
+	if runResult.Status == state.StatusFailed || runResult.Status == state.StatusStopped {
+		return runResult, fmt.Errorf("Rebase agent attempt %d returned status %s", attempt, runResult.Status)
+	}
+	if runResult.Disposition != "" && runResult.Disposition != agent.DispositionPassed {
+		return runResult, fmt.Errorf("Rebase agent attempt %d returned disposition %q", attempt, runResult.Disposition)
+	}
+	return runResult, nil
+}
+
+func appendRebaseEvidence(evidence []string, attempt int, result git.RebaseResult, err error) []string {
+	entry := fmt.Sprintf("attempt %d: %v", attempt, err)
+	if result.Conflict != nil {
+		entry += fmt.Sprintf("; paths=%s; output=%s", strings.Join(result.Conflict.Paths, ","), strings.TrimSpace(result.Conflict.Output))
+	}
+	return append(evidence, entry)
 }
 
 func (c *sequentialController) runPullRequest(ctx context.Context, request Request) (agent.RunResult, error) {
@@ -1047,7 +1344,21 @@ func (c *sequentialController) runPullRequest(ctx context.Context, request Reque
 			break
 		}
 	}
-	created, err := c.pullRequests.Create(ctx, pr.Request{GitOps: request.GitOps, Worktree: request.Project.WorktreePath, Remote: "origin", Branch: request.Project.BranchName, Title: "chore: update project", Why: request.Project.OriginalGoal, What: "Execute the configured gg pipeline", Push: true, ProofRequired: proofRequired})
+	qaProofWaived := proofRequired && qaWasExplicitlySkipped(request.Project)
+	created, err := c.pullRequests.Create(ctx, pr.Request{
+		GitOps:            request.GitOps,
+		Worktree:          request.Project.WorktreePath,
+		Remote:            "origin",
+		Branch:            request.Project.BranchName,
+		Title:             "chore: update project",
+		Why:               request.Project.OriginalGoal,
+		What:              "Execute the configured gg pipeline",
+		Push:              true,
+		ProofRequired:     proofRequired && !qaProofWaived,
+		ProofWaived:       qaProofWaived,
+		SkippedExecutions: skippedExecutionHandoff(request.Project),
+		DeferredChecks:    deferredChecksHandoff(request.Project),
+	})
 	if err != nil {
 		result.Status = state.StatusFailed
 		return result, err
@@ -1066,6 +1377,7 @@ func (c *sequentialController) runCI(ctx context.Context, request Request) (agen
 	if identity == "" {
 		identity = request.Project.BranchName
 	}
+	result.ExternalIdentity = identity
 	ciResult, err := c.checks.Monitor(ctx, ci.Config{Enabled: request.GitOps.EnableCI, Identity: identity, Worktree: request.Project.WorktreePath, ArtifactRoot: request.ArtifactRoot, ProjectSlug: request.Project.Slug, RunID: request.RunID, MaxPolls: 3})
 	result.ArtifactPaths = append(result.ArtifactPaths, ciResult.ReportPath, ciResult.FeedbackPath)
 	if err != nil {
@@ -1237,8 +1549,105 @@ func executionOutcome(result agent.RunResult, developmentBaseCommit string) *sta
 		DevelopmentBaseCommit: developmentBaseCommit,
 		TokensUsed:            result.TokensUsed,
 		CostUSD:               result.CostUSD,
+		ExternalIdentity:      result.ExternalIdentity,
 		Error:                 result.Error,
+		DeferredChecks:        result.DeferredChecks,
 	}
+}
+
+func skippedTestingEvidence(project state.ProjectState) *state.PhaseRecord {
+	for index := len(project.PhaseHistory) - 1; index >= 0; index-- {
+		record := project.PhaseHistory[index]
+		if record.Phase != string(pipeline.PhaseDevelopment) || record.Subphase != string(pipeline.DevelopmentSubphaseTesting) {
+			continue
+		}
+		if record.Skip == nil || record.Status != state.StatusFailed {
+			return nil
+		}
+		copy := record
+		copy.ArtifactPaths = append([]string(nil), record.ArtifactPaths...)
+		if record.Outcome != nil {
+			outcome := *record.Outcome
+			outcome.DeferredChecks = append([]proof.DeferredCheck(nil), record.Outcome.DeferredChecks...)
+			copy.Outcome = &outcome
+		}
+		return &copy
+	}
+	return nil
+}
+
+func qaWasExplicitlySkipped(project state.ProjectState) bool {
+	for index := len(project.PhaseHistory) - 1; index >= 0; index-- {
+		record := project.PhaseHistory[index]
+		if record.Phase != string(pipeline.PhaseQA) || record.Subphase != "" {
+			continue
+		}
+		return record.Status == state.StatusFailed && record.Skip != nil
+	}
+	return false
+}
+
+func skippedExecutionHandoff(project state.ProjectState) []pr.SkippedExecution {
+	result := make([]pr.SkippedExecution, 0)
+	for _, record := range project.PhaseHistory {
+		if record.Skip == nil || !prePRSkippedPhase(record.Phase, record.Subphase) {
+			continue
+		}
+		failure := ""
+		externalIdentity := record.Skip.ExternalIdentity
+		if record.Outcome != nil {
+			failure = record.Outcome.Error
+			if externalIdentity == "" {
+				externalIdentity = record.Outcome.ExternalIdentity
+			}
+		}
+		result = append(result, pr.SkippedExecution{
+			Phase:            record.Phase,
+			Subphase:         record.Subphase,
+			OccurrenceID:     record.OccurrenceID,
+			Failure:          failure,
+			ExternalIdentity: externalIdentity,
+		})
+	}
+	return result
+}
+
+func prePRSkippedPhase(phase, subphase string) bool {
+	return state.IsSkipEligible(phase, subphase) && phase != string(pipeline.PhasePR) && phase != string(pipeline.PhaseCI)
+}
+
+func deferredChecksHandoff(project state.ProjectState) []proof.DeferredCheck {
+	if len(project.DeferredChecks) > 0 {
+		return append([]proof.DeferredCheck(nil), project.DeferredChecks...)
+	}
+	result := make([]proof.DeferredCheck, 0)
+	for _, record := range project.PhaseHistory {
+		result = appendUniqueDeferredChecks(result, record.DeferredChecks...)
+		if record.Outcome != nil {
+			result = appendUniqueDeferredChecks(result, record.Outcome.DeferredChecks...)
+		}
+	}
+	return result
+}
+
+func appendUniqueDeferredChecks(existing []proof.DeferredCheck, additions ...proof.DeferredCheck) []proof.DeferredCheck {
+	result := append([]proof.DeferredCheck(nil), existing...)
+	for _, addition := range additions {
+		if err := addition.Validate(); err != nil {
+			continue
+		}
+		found := false
+		for _, current := range result {
+			if current == addition {
+				found = true
+				break
+			}
+		}
+		if !found {
+			result = append(result, addition)
+		}
+	}
+	return result
 }
 func isCancellation(err error) bool {
 	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
@@ -1633,6 +2042,19 @@ func resumeExecutionCursor(project state.ProjectState, plan pipeline.ExecutableP
 		return "", "", false, errors.New("project has no phase history for its resume cursor")
 	}
 	last := project.PhaseHistory[len(project.PhaseHistory)-1]
+	if last.Skip != nil {
+		// Skip advances the durable cursor before the continuation is
+		// dispatched. On restart the skipped record is still the latest history
+		// entry, so resume must trust its exact persisted next unit rather than
+		// treating the old failed phase as replayable.
+		if last.Skip.NextPhase == "" {
+			return "", "", true, nil
+		}
+		if project.CurrentPhase != last.Skip.NextPhase || project.CurrentSubphase != last.Skip.NextSubphase {
+			return "", "", false, fmt.Errorf("skip cursor %q/%q does not match current phase %q/%q", last.Skip.NextPhase, last.Skip.NextSubphase, project.CurrentPhase, project.CurrentSubphase)
+		}
+		return project.CurrentPhase, project.CurrentSubphase, false, nil
+	}
 	if last.Phase != project.CurrentPhase || last.Subphase != project.CurrentSubphase {
 		return "", "", false, fmt.Errorf("phase history cursor %q/%q does not match current phase %q/%q", last.Phase, last.Subphase, project.CurrentPhase, project.CurrentSubphase)
 	}

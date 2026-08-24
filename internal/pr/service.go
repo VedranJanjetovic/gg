@@ -37,6 +37,22 @@ type Request struct {
 	// disabled no proof is ever produced, so the PR body omits the
 	// validation summary instead of failing.
 	ProofRequired bool
+	// ProofWaived records that the exact latest QA execution was explicitly
+	// skipped. It is distinct from a disabled QA phase.
+	ProofWaived bool
+	// SkippedExecutions are pre-PR waivers disclosed in execution order.
+	SkippedExecutions []SkippedExecution
+	// DeferredChecks are remote validations left for CI or a provisioned
+	// environment after all locally runnable checks passed.
+	DeferredChecks []proof.DeferredCheck
+}
+
+type SkippedExecution struct {
+	Phase            string
+	Subphase         string
+	OccurrenceID     string
+	Failure          string
+	ExternalIdentity string
 }
 
 type Result struct {
@@ -88,25 +104,25 @@ func (s *Service) Create(ctx context.Context, request Request) (Result, error) {
 	}
 	proofPath := filepath.Join(worktree, proof.ArtifactName)
 	var parsed *proof.Proof
-	data, err := os.ReadFile(proofPath)
-	switch {
-	case err == nil:
-		if ok, checkErr := s.git.IsUncommittedNewFile(ctx, worktree, proof.ArtifactName); checkErr != nil {
-			return Result{}, fmt.Errorf("verify proof artifact: %w", checkErr)
-		} else if !ok {
-			return Result{}, errors.New("proof artifact must be an existing uncommitted PROOF.md file")
+	if !request.ProofWaived {
+		data, err := os.ReadFile(proofPath)
+		switch {
+		case err == nil:
+			if ok, checkErr := s.git.IsUncommittedNewFile(ctx, worktree, proof.ArtifactName); checkErr != nil {
+				return Result{}, fmt.Errorf("verify proof artifact: %w", checkErr)
+			} else if !ok {
+				return Result{}, errors.New("proof artifact must be an existing uncommitted PROOF.md file")
+			}
+			p, parseErr := proof.Parse(data)
+			if parseErr != nil {
+				return Result{}, fmt.Errorf("validate proof artifact: %w", parseErr)
+			}
+			parsed = &p
+		case request.ProofRequired:
+			return Result{}, fmt.Errorf("read proof artifact: %w", err)
 		}
-		p, parseErr := proof.Parse(data)
-		if parseErr != nil {
-			return Result{}, fmt.Errorf("validate proof artifact: %w", parseErr)
-		}
-		parsed = &p
-	case request.ProofRequired:
-		return Result{}, fmt.Errorf("read proof artifact: %w", err)
-	default:
-		// The QA phase is disabled: no proof exists and none is expected.
 	}
-	body := formatBody(request.Why, request.What, parsed)
+	body := formatBody(request, parsed)
 	if request.Push {
 		if err := s.git.PushBranchToRemote(ctx, worktree, request.Remote, request.Branch); err != nil {
 			return Result{}, err
@@ -119,18 +135,56 @@ func (s *Service) Create(ctx context.Context, request Request) (Result, error) {
 	return Result{Created: true, URL: url, Body: body}, nil
 }
 
-func formatBody(why, what string, p *proof.Proof) string {
+func formatBody(request Request, p *proof.Proof) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "# Why\n%s\n\n# What\n%s\n\n# Validation\n", strings.TrimSpace(why), strings.TrimSpace(what))
-	if p == nil {
-		b.WriteString("- PROOF.md: not produced (QA phase disabled)\n")
-		return b.String()
+	fmt.Fprintf(&b, "# Why\n%s\n\n# What\n%s\n\n# Validation\n", strings.TrimSpace(request.Why), strings.TrimSpace(request.What))
+	if request.ProofWaived {
+		b.WriteString("- QA: skipped for the exact confirmed occurrence\n")
 	}
-	fmt.Fprintf(&b, "- PROOF.md: %s\n- Validations: %d\n", p.Classify(), len(p.Validations))
-	for _, validation := range p.Validations {
-		fmt.Fprintf(&b, "- %s: %s\n", validation.TestName, validation.Status)
+	if p == nil {
+		if request.ProofWaived {
+			b.WriteString("- PROOF.md: waived for the exact confirmed QA skip\n")
+		} else {
+			b.WriteString("- PROOF.md: not produced (QA phase disabled)\n")
+		}
+	} else {
+		fmt.Fprintf(&b, "- PROOF.md: %s\n- Validations: %d\n", p.Classify(), len(p.Validations))
+		for _, validation := range p.Validations {
+			fmt.Fprintf(&b, "- %s: %s\n", validation.TestName, validation.Status)
+		}
+	}
+	if len(request.SkippedExecutions) > 0 {
+		b.WriteString("\n# Accepted skipped executions\n")
+		for _, skipped := range request.SkippedExecutions {
+			name := skipped.Phase
+			if skipped.Subphase != "" {
+				name += "/" + skipped.Subphase
+			}
+			failure := strings.TrimSpace(skipped.Failure)
+			if failure == "" {
+				failure = "failure evidence retained in durable history"
+			}
+			fmt.Fprintf(&b, "- %s (occurrence %s): %s", name, displayValue(skipped.OccurrenceID), failure)
+			if strings.TrimSpace(skipped.ExternalIdentity) != "" {
+				fmt.Fprintf(&b, "; external identity retained: %s", strings.TrimSpace(skipped.ExternalIdentity))
+			}
+			b.WriteByte('\n')
+		}
+	}
+	if len(request.DeferredChecks) > 0 {
+		b.WriteString("\n# Deferred remote validations\n")
+		for _, check := range request.DeferredChecks {
+			fmt.Fprintf(&b, "- %s (%s): deferred because %s; evidence: %s; run: %s\n", check.CheckName, check.TestLocation, check.RemoteOnlyReason, check.RepositoryEvidence, check.RunInstructions)
+		}
 	}
 	return b.String()
+}
+
+func displayValue(value string) string {
+	if strings.TrimSpace(value) == "" {
+		return "unknown"
+	}
+	return strings.TrimSpace(value)
 }
 
 // MergeState is the minimal pull-request lifecycle needed by project

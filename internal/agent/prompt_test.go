@@ -3,6 +3,7 @@ package agent
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/VedranJanjetovic/gg/internal/pipeline"
 	"github.com/VedranJanjetovic/gg/internal/state"
@@ -125,6 +126,47 @@ func TestQAPromptRequiresProofRunIDFrontmatter(t *testing.T) {
 	}
 }
 
+func TestPrePRPromptsShareLocalOnlyVerificationBoundary(t *testing.T) {
+	ownership := map[pipeline.PhaseID]string{
+		pipeline.PhaseDevelopment:  "Development Testing owns focused tests for this plan phase",
+		pipeline.PhaseQA:           "QA independently validates the acceptance criteria",
+		pipeline.PhaseTestDocument: "Test/Document owns final test and documentation gaps",
+		pipeline.PhaseBuildChecker: "Build checker owns the declared build, lint, format, static-analysis, and packaging gates",
+	}
+	for _, phase := range []pipeline.PhaseID{pipeline.PhaseDevelopment, pipeline.PhaseQA, pipeline.PhaseTestDocument, pipeline.PhaseBuildChecker} {
+		got, err := BuildPrompt(PromptInput{
+			ProjectGoal: "ship it", AcceptanceCriteria: []string{"tests pass"}, Phase: phase,
+			Subphase: "testing", PhaseContract: "verify", WorkingDirectory: "/worktree", RunID: "run",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, want := range []string{
+			"## Pre-PR verification boundary", "local dependencies, services, and containers",
+			"every applicable check that is locally runnable", "Do not connect to AWS or any other remote environment",
+			"ordinary local setup or test failure is a failure", "repository evidence",
+			"PR or CI is disabled",
+		} {
+			if !strings.Contains(got, want) {
+				t.Errorf("%s prompt missing %q", phase, want)
+			}
+		}
+		if !strings.Contains(got, ownership[phase]) {
+			t.Errorf("%s prompt missing ownership statement %q", phase, ownership[phase])
+		}
+	}
+	got, err := BuildPrompt(PromptInput{
+		ProjectGoal: "ship it", AcceptanceCriteria: []string{"tests pass"}, Phase: pipeline.PhasePlanning,
+		PhaseContract: "plan", WorkingDirectory: "/worktree", RunID: "run",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(got, "## Pre-PR verification boundary") {
+		t.Fatal("planning prompt unexpectedly carries pre-PR verification boundary")
+	}
+}
+
 func TestBuildPromptScopesDevelopmentToOnePlanPhase(t *testing.T) {
 	base := PromptInput{
 		Project: state.ProjectState{OriginalGoal: "ship it", AcceptanceCriteria: []string{"tests pass"}},
@@ -157,6 +199,38 @@ func TestBuildPromptScopesDevelopmentToOnePlanPhase(t *testing.T) {
 				t.Fatal("scoped runs must not carry the agent-reported completion instruction (completion is orchestrator-owned)")
 			}
 		})
+	}
+}
+
+func TestReviewPromptCarriesExplicitlySkippedTestingEvidence(t *testing.T) {
+	when := time.Date(2026, time.August, 24, 12, 0, 0, 0, time.UTC)
+	record := state.PhaseRecord{
+		Phase: "development", Subphase: "testing", Status: state.StatusFailed,
+		OccurrenceID: "testing-occurrence", ArtifactPaths: []string{".gg/testing.md"},
+		CompletedAt: &when,
+		Outcome:     &state.ExecutionOutcome{Error: "focused test failed: expected 2, got 1"},
+		Skip:        &state.SkipResolution{ConfirmedAt: when, Cleanup: state.SkipCleanup{Status: state.SkipCleanupSucceeded}},
+	}
+	got, err := BuildPrompt(PromptInput{
+		Project: state.ProjectState{OriginalGoal: "ship it", AcceptanceCriteria: []string{"review the change"}},
+		Phase:   pipeline.PhaseDevelopment, Subphase: string(pipeline.DevelopmentSubphaseReview),
+		PhaseContract: "review", WorkingDirectory: "/worktree", RunID: "run/development/review/iteration-0",
+		SkippedTestingEvidence: &record,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"## Explicitly waived Development Testing evidence",
+		`"testing-occurrence"`,
+		`"focused test failed: expected 2, got 1"`,
+		`".gg/testing.md"`,
+		"fix any concrete defect it reveals",
+		"do not fail Review solely",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("review prompt missing %q:\n%s", want, got)
+		}
 	}
 }
 
@@ -277,5 +351,34 @@ func TestPlanningPromptUpdatesExistingPlanWithoutDiscardingCompletedWork(t *test
 	})
 	if err != nil || strings.Contains(fresh, "Plan update instruction") {
 		t.Fatalf("fresh project must not carry the update instruction: err=%v", err)
+	}
+}
+
+func TestPlanningPromptIncludesRubricAndExactCorrectionEvidence(t *testing.T) {
+	got, err := BuildPrompt(PromptInput{
+		Project: state.ProjectState{OriginalGoal: "update README wording", AcceptanceCriteria: []string{"the README explains the new wording"}},
+		Phase:   pipeline.PhasePlanning, PhaseContract: "contract", WorkingDirectory: "/tmp/worktree",
+		RunID: "run/planning/iteration-1", PlanningAttempt: 2,
+		RejectedPlanningArtifact: "bad plan with eleven phases",
+		PlanningValidationErrors: []string{"phase-limit-exceeded: plan contains 11 phases, maximum is 10", "body phase names do not match frontmatter"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"Trivial is one cohesive localized outcome",
+		"Simple is one localized component",
+		"Moderate means multiple components",
+		"Complex means cross-service work",
+		"README-only wording update is Trivial with exactly one phase",
+		"This is Planning attempt 2 of 3",
+		`Rejected artifact path: ".gg/plan.md"`,
+		`"bad plan with eleven phases"`,
+		`"phase-limit-exceeded: plan contains 11 phases, maximum is 10"`,
+		"complete original goal and acceptance criteria",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("planning prompt missing %q:\n%s", want, got)
+		}
 	}
 }

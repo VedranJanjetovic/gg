@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/VedranJanjetovic/gg/internal/git"
 	"github.com/VedranJanjetovic/gg/internal/orchestrator"
@@ -45,7 +46,7 @@ func TestBareGGCreatesStartsAndAttachesProject(t *testing.T) {
 	attachCalls := 0
 	app := New(
 		WithRootResolver(fixedRoot{root: stateRoot}),
-		WithConfigStore(configuredMemoryStore()),
+		WithConfigStore(completeConfiguredMemoryStore()),
 		WithGitClient(git.NewClient(repo, nil)),
 		WithProjectPrompter(projectPromptStub{input: orchestrator.ProjectInput{
 			Goal:               "Build an attachable project UI.",
@@ -214,6 +215,19 @@ func TestAttachmentLoadReadsLatestDurableState(t *testing.T) {
 	}
 }
 
+func TestSkipProjectionNamesCurrentDevelopmentPlanPhase(t *testing.T) {
+	now := time.Now()
+	project := state.ProjectState{
+		Status:       state.StatusFailed,
+		Plan:         &state.PlanState{Phases: []string{"Phase 1: done", "Phase 2: docs"}, Completed: []string{"Phase 1: done"}},
+		PhaseHistory: []state.PhaseRecord{{Phase: "development", Subphase: "testing", Status: state.StatusFailed, OccurrenceID: "testing-1", StartedAt: now, CompletedAt: &now}},
+	}
+	available, label := skipProjection(project)
+	if !available || label != "Development / Phase 2: docs / Testing" {
+		t.Fatalf("skip projection = %t/%q, want true/current plan phase", available, label)
+	}
+}
+
 func TestAttachmentStopAndResumeCallbacksHonorContextAndCanonicalSelector(t *testing.T) {
 	root := t.TempDir()
 	initTestRepository(t, root)
@@ -292,7 +306,7 @@ func TestBareGGStartFailureIsReturnedAndReservationIsRolledBack(t *testing.T) {
 	attachCalls := 0
 	app := New(
 		WithRootResolver(fixedRoot{root: stateRoot}),
-		WithConfigStore(configuredMemoryStore()),
+		WithConfigStore(completeConfiguredMemoryStore()),
 		WithGitClient(git.NewClient(repo, nil)),
 		WithProjectPrompter(projectPromptStub{input: orchestrator.ProjectInput{
 			Goal:               "Build a failure-safe session.",

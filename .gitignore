@@ -2,3 +2,5 @@
 /gg
 /dist/
 .DS_Store
+
+.gg/**

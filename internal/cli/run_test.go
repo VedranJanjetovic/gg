@@ -25,6 +25,7 @@ func (*capturePipeline) Stop(context.Context, pipeline.StopRequest) error { retu
 func (*capturePipeline) Prune(context.Context) error                      { return nil }
 
 func TestRunOverridesResolveAndDispatchEffectiveConfiguration(t *testing.T) {
+	t.Skip("transient configuration flags were removed in Phase 9")
 	root := t.TempDir()
 	initTestRepository(t, root)
 	t.Chdir(root)
@@ -86,6 +87,7 @@ func TestRunOverridesResolveAndDispatchEffectiveConfiguration(t *testing.T) {
 }
 
 func TestRunRejectsInvalidOverridesBeforeDispatch(t *testing.T) {
+	t.Skip("superseded by removed-flag coverage")
 	root := t.TempDir()
 	initTestRepository(t, root)
 	t.Chdir(root)
@@ -125,6 +127,7 @@ func TestRunRejectsInvalidOverridesBeforeDispatch(t *testing.T) {
 }
 
 func TestRunRejectsCIWhenPRIsDisabledBeforeDispatch(t *testing.T) {
+	t.Skip("phase toggles are no longer run flags")
 	root := t.TempDir()
 	initTestRepository(t, root)
 	t.Chdir(root)
@@ -143,6 +146,7 @@ func TestRunRejectsCIWhenPRIsDisabledBeforeDispatch(t *testing.T) {
 }
 
 func TestRunDuplicateAndConflictingPhaseFlagsUseLastValue(t *testing.T) {
+	t.Skip("phase toggles are no longer run flags")
 	root := t.TempDir()
 	initTestRepository(t, root)
 	t.Chdir(root)
@@ -172,6 +176,7 @@ func TestRunDuplicateAndConflictingPhaseFlagsUseLastValue(t *testing.T) {
 }
 
 func TestRunDelimiterStopsOverrideParsingAndIsNotDispatched(t *testing.T) {
+	t.Skip("phase toggles are no longer run flags")
 	root := t.TempDir()
 	initTestRepository(t, root)
 	t.Chdir(root)
@@ -250,18 +255,32 @@ func TestRunHelpDocumentsTransientFlags(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("code = %d, stderr = %q", code, stderr.String())
 	}
-	for _, want := range []string{
-		"apply to this invocation only", "--agent", "--model", "--effort", "--phase-agent",
-		"--phase-model", "--phase-effort", "--enable-phase", "--disable-phase", "linting",
-		"pass every following token to the pipeline unchanged",
-	} {
+	for _, want := range []string{"--parent-branch", "--base-ref", "--max-iterations", "Inherit or Pick", "pass every following token to the pipeline unchanged"} {
 		if !strings.Contains(stdout.String(), want) {
 			t.Errorf("help missing %q:\n%s", want, stdout.String())
 		}
 	}
+	for _, removed := range []string{"--agent", "--model", "--effort", "--phase-agent", "--phase-model", "--phase-effort", "--enable-phase", "--disable-phase"} {
+		if strings.Contains(stdout.String(), removed) {
+			t.Errorf("help contains removed flag %q:\n%s", removed, stdout.String())
+		}
+	}
+}
+
+func TestRunRejectsRemovedConfigurationFlags(t *testing.T) {
+	for _, flagName := range []string{"--agent", "--model", "--effort", "--phase-agent", "--phase-model", "--phase-effort", "--enable-phase", "--disable-phase"} {
+		t.Run(flagName, func(t *testing.T) {
+			app := New(WithConfigStore(configuredMemoryStore()), WithPipelineService(&capturePipeline{}))
+			var stdout, stderr bytes.Buffer
+			if code := app.Run(context.Background(), []string{"run", flagName, "value"}, &stdout, &stderr); code == 0 || !strings.Contains(stderr.String(), "flag provided but not defined") {
+				t.Fatalf("code = %d, stderr = %q", code, stderr.String())
+			}
+		})
+	}
 }
 
 func TestRunOverridesDoNotRewriteConfigurationFiles(t *testing.T) {
+	t.Skip("transient configuration flags were removed in Phase 9")
 	root := t.TempDir()
 	configHome := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", configHome)

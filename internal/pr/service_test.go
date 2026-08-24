@@ -11,6 +11,7 @@ import (
 
 	"github.com/VedranJanjetovic/gg/internal/config"
 	"github.com/VedranJanjetovic/gg/internal/pr"
+	"github.com/VedranJanjetovic/gg/internal/proof"
 )
 
 type fakeGit struct {
@@ -142,5 +143,92 @@ func TestCreateWithoutQAPhaseSkipsProofRequirement(t *testing.T) {
 	}
 	if !strings.Contains(result.Body, "- TestCreate: pass") {
 		t.Fatalf("body = %q, want existing proof summarized", result.Body)
+	}
+}
+
+func TestCreateDisclosesSkippedExecutionsDeferredChecksAndQASkip(t *testing.T) {
+	dir := t.TempDir()
+	gh := &fakeGH{url: "https://github.com/o/r/pull/10"}
+	req := request(dir)
+	req.ProofRequired = false
+	req.ProofWaived = true
+	req.SkippedExecutions = []pr.SkippedExecution{
+		{Phase: "development", Subphase: "testing", OccurrenceID: "testing-1", Failure: "focused test failed", ExternalIdentity: "ci-run-1"},
+		{Phase: "qa", OccurrenceID: "qa-1", Failure: "AWS endpoint unavailable"},
+	}
+	req.DeferredChecks = []proof.DeferredCheck{{
+		TestLocation: "internal/aws_test.go", CheckName: "TestRemoteFlow",
+		RemoteOnlyReason: "requires AWS credentials", RepositoryEvidence: "config/aws.go uses AWS_ENDPOINT",
+		RunInstructions: "run in CI with AWS secrets", FlowScenario: "call deployed API", ExpectedBehavior: "request persists",
+	}}
+	result, err := pr.NewService(&fakeGit{uncommitted: true}, gh).Create(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"PROOF.md: waived for the exact confirmed QA skip",
+		"# Accepted skipped executions",
+		"development/testing (occurrence testing-1): focused test failed",
+		"external identity retained: ci-run-1",
+		"qa (occurrence qa-1): AWS endpoint unavailable",
+		"# Deferred remote validations",
+		"TestRemoteFlow (internal/aws_test.go): deferred because requires AWS credentials",
+		"config/aws.go uses AWS_ENDPOINT",
+	} {
+		if !strings.Contains(result.Body, want) || !strings.Contains(gh.request[2], want) {
+			t.Errorf("PR body missing %q:\n%s", want, result.Body)
+		}
+	}
+}
+
+func TestCreateAllowsMissingProofForExplicitQAWaiver(t *testing.T) {
+	req := request(t.TempDir())
+	req.ProofWaived = true
+	gh := &fakeGH{url: "https://github.com/o/r/pull/11"}
+
+	result, err := pr.NewService(&fakeGit{uncommitted: true}, gh).Create(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Created || !strings.Contains(result.Body, "PROOF.md: waived for the exact confirmed QA skip") {
+		t.Fatalf("result = %#v", result)
+	}
+}
+
+func TestCreateDisclosesQASkipWhenProofArtifactExists(t *testing.T) {
+	req := request(proofWorktree(t))
+	req.ProofWaived = true
+	gh := &fakeGH{url: "https://github.com/o/r/pull/12"}
+
+	result, err := pr.NewService(&fakeGit{uncommitted: true}, gh).Create(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(result.Body, "QA: skipped for the exact confirmed occurrence") {
+		t.Fatalf("body omitted explicit QA skip: %q", result.Body)
+	}
+	if strings.Contains(result.Body, "PROOF.md: passed") {
+		t.Fatalf("body reused proof from the waived occurrence: %q", result.Body)
+	}
+}
+
+func TestCreateIgnoresMalformedProofForExplicitQAWaiver(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".gg"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".gg", "PROOF.md"), []byte("not a proof artifact"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	req := request(dir)
+	req.ProofWaived = true
+	gh := &fakeGH{url: "https://github.com/o/r/pull/13"}
+
+	result, err := pr.NewService(&fakeGit{}, gh).Create(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Created || !strings.Contains(result.Body, "PROOF.md: waived for the exact confirmed QA skip") {
+		t.Fatalf("result = %#v", result)
 	}
 }

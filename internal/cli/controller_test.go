@@ -301,6 +301,11 @@ type cliConflictRunner struct {
 
 func (r *cliConflictRunner) Run(_ context.Context, req agent.RunRequest) (agent.RunResult, error) {
 	r.calls = append(r.calls, req)
+	if req.Phase == pipeline.PhasePlanning {
+		if err := writeMinimalValidPlanningArtifact(req.WorkingDirectory); err != nil {
+			return agent.RunResult{ProjectSlug: req.Project.Slug, Phase: req.Phase, Subphase: req.Subphase, Status: state.StatusFailed}, err
+		}
+	}
 	result := agent.RunResult{ProjectSlug: req.Project.Slug, Phase: req.Phase, Subphase: req.Subphase, Status: state.StatusFinished}
 	if req.Phase == pipeline.PhaseRebase {
 		result.Status = state.StatusFailed
@@ -332,7 +337,7 @@ func TestProductionControllerThroughCLIStopsOnOrdinaryRebaseFailure(t *testing.T
 			qaCount++
 		}
 	}
-	if qaCount != 1 || phases[len(phases)-1] != pipeline.PhaseRebase {
-		t.Fatalf("phases=%v, want one QA and terminal Rebase", phases)
+	if qaCount != 0 || phases[len(phases)-1] != pipeline.PhaseRebase {
+		t.Fatalf("phases=%v, want Rebase to fail before QA", phases)
 	}
 }

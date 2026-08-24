@@ -18,6 +18,7 @@ type Artifact struct {
 	Path           string
 	Classification Classification
 	Proof          Proof
+	DeferredChecks []DeferredCheck
 }
 
 type WorktreeChecker interface {
@@ -151,7 +152,7 @@ func (s *ArtifactService) DiscoverAndCopy(ctx context.Context, worktree, slug st
 	if err = os.Rename(tmpName, dst); err != nil {
 		return Artifact{}, err
 	}
-	return Artifact{Path: dst, Classification: parsed.Classify(), Proof: parsed}, nil
+	return Artifact{Path: dst, Classification: parsed.Classify(), Proof: parsed, DeferredChecks: parsed.DeferredChecks()}, nil
 }
 
 func existingDirectory(path string) (string, error) {

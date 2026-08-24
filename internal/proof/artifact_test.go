@@ -199,6 +199,24 @@ func TestDiscoverAndCopyAcceptsNewlyCreatedProof(t *testing.T) {
 	}
 }
 
+func TestDiscoverAndCopyCarriesDeferredChecks(t *testing.T) {
+	root, worktree := t.TempDir(), t.TempDir()
+	data := []byte("---\ngg_run_id: run-deferred\n---\n\n" + deferredProof)
+	if err := os.WriteFile(proofPath(t, worktree), data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	artifact, err := NewArtifactService(root, alwaysUncommittedChecker{}).DiscoverAndCopy(context.Background(), worktree, "demo", ArtifactBaseline{}, "run-deferred", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if artifact.Classification != ClassificationPass || len(artifact.DeferredChecks) != 1 {
+		t.Fatalf("artifact = %#v, want one deferred check and passed classification", artifact)
+	}
+	if artifact.DeferredChecks[0].RepositoryEvidence == "" {
+		t.Fatal("deferred check lost repository evidence")
+	}
+}
+
 func TestDiscoverAndCopyRejectsEmptyAndWrongRunProof(t *testing.T) {
 	for _, test := range []struct {
 		name, data, runID, wantError string

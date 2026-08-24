@@ -8,6 +8,7 @@ import (
 
 	"github.com/VedranJanjetovic/gg/internal/config"
 	"github.com/VedranJanjetovic/gg/internal/pipeline"
+	"github.com/VedranJanjetovic/gg/internal/state"
 )
 
 func TestResolveBuildsExecutablePipeline(t *testing.T) {
@@ -27,7 +28,7 @@ func TestResolveBuildsExecutablePipeline(t *testing.T) {
 			resolved: resolvedConfig(),
 			wantIDs: []pipeline.PhaseID{
 				pipeline.PhaseAcceptanceCriteria, pipeline.PhaseGrooming, pipeline.PhasePlanning,
-				pipeline.PhaseDevelopment, pipeline.PhaseQA, pipeline.PhaseRebase,
+				pipeline.PhaseDevelopment, pipeline.PhaseRebase, pipeline.PhaseQA,
 				pipeline.PhaseTestDocument, pipeline.PhaseBuildChecker, pipeline.PhasePR, pipeline.PhaseCI,
 			},
 			wantQA: config.AgentSettings{Agent: config.AgentClaude, Model: "default-model", Effort: config.EffortMedium},
@@ -69,7 +70,7 @@ func TestResolveBuildsExecutablePipeline(t *testing.T) {
 				}}),
 			wantIDs: []pipeline.PhaseID{
 				pipeline.PhaseAcceptanceCriteria, pipeline.PhaseGrooming, pipeline.PhasePlanning,
-				pipeline.PhaseDevelopment, pipeline.PhaseQA, pipeline.PhaseRebase,
+				pipeline.PhaseDevelopment, pipeline.PhaseRebase, pipeline.PhaseQA,
 				pipeline.PhaseTestDocument, pipeline.PhaseBuildChecker, pipeline.PhasePR, pipeline.PhaseCI,
 			},
 			wantQA: config.AgentSettings{Agent: config.AgentCodex, Model: "qa-model", Effort: config.EffortHigh},
@@ -386,6 +387,143 @@ func TestSnapshotExecutionPersistsGitOpsSettings(t *testing.T) {
 	}
 	if legacyGitOps.Configured {
 		t.Fatal("legacy snapshot without configured marker was treated as configured")
+	}
+}
+
+func TestSnapshotExecutionVersionsPipelineOrderAndRestoresLegacyOrder(t *testing.T) {
+	resolved := resolvedConfig()
+	resolved.Defaults = config.AgentSettings{Agent: config.AgentClaude, Model: "default-model", Effort: config.EffortMedium}
+	plan, err := pipeline.Resolve(pipeline.DefaultPipeline(), resolved)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := pipeline.SnapshotExecution(plan, pipeline.DevelopmentSubphaseGeneration{}, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.SchemaVersion != 1 {
+		t.Fatalf("snapshot wrapper version = %d, want 1", snapshot.SchemaVersion)
+	}
+
+	var encoded executionSnapshotFixture
+	if err := json.Unmarshal(snapshot.Data, &encoded); err != nil {
+		t.Fatal(err)
+	}
+	if encoded.SchemaVersion != 2 {
+		t.Fatalf("new execution snapshot version = %d, want 2", encoded.SchemaVersion)
+	}
+	if got := fixturePhaseIDs(encoded.Phases); !reflect.DeepEqual(got[3:6], []pipeline.PhaseID{pipeline.PhaseDevelopment, pipeline.PhaseRebase, pipeline.PhaseQA}) {
+		t.Fatalf("new snapshot phase order = %v", got)
+	}
+
+	legacy := encoded
+	legacy.SchemaVersion = 1
+	legacy.Phases[4], legacy.Phases[5] = legacy.Phases[5], legacy.Phases[4]
+	legacyData, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacySnapshot := snapshot
+	legacySnapshot.Data = legacyData
+	restored, _, _, err := pipeline.RestoreExecution(legacySnapshot)
+	if err != nil {
+		t.Fatalf("RestoreExecution(legacy) error = %v", err)
+	}
+	if got := executableIDs(restored); !reflect.DeepEqual(got[3:6], []pipeline.PhaseID{pipeline.PhaseDevelopment, pipeline.PhaseQA, pipeline.PhaseRebase}) {
+		t.Fatalf("restored legacy phase order = %v", got)
+	}
+}
+
+func TestRestoreExecutionRejectsOrderFromAnotherSnapshotGeneration(t *testing.T) {
+	resolved := resolvedConfig()
+	resolved.Defaults = config.AgentSettings{Agent: config.AgentClaude, Model: "default-model", Effort: config.EffortMedium}
+	plan, err := pipeline.Resolve(pipeline.DefaultPipeline(), resolved)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := pipeline.SnapshotExecution(plan, pipeline.DevelopmentSubphaseGeneration{}, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var encoded executionSnapshotFixture
+	if err := json.Unmarshal(snapshot.Data, &encoded); err != nil {
+		t.Fatal(err)
+	}
+
+	encoded.SchemaVersion = 1
+	if err := restoreFixture(t, snapshot, encoded); err == nil || !strings.Contains(err.Error(), "schema-1 order") {
+		t.Fatalf("legacy snapshot with new order error = %v", err)
+	}
+	encoded.SchemaVersion = 2
+	encoded.Phases[4], encoded.Phases[5] = encoded.Phases[5], encoded.Phases[4]
+	if err := restoreFixture(t, snapshot, encoded); err == nil || !strings.Contains(err.Error(), "schema-2 order") {
+		t.Fatalf("new snapshot with legacy order error = %v", err)
+	}
+}
+
+type executionSnapshotFixture struct {
+	SchemaVersion    int                                    `json:"schemaVersion"`
+	PlanningContract int                                    `json:"planningContractVersion,omitempty"`
+	Phases           []executionSnapshotPhaseFixture        `json:"phases"`
+	Subphases        pipeline.DevelopmentSubphaseGeneration `json:"developmentSubphases"`
+	MaxQAAttempts    int                                    `json:"maxQaAttempts"`
+	GitOps           config.GitOpsConfig                    `json:"gitOps"`
+	GitOpsConfigured bool                                   `json:"gitOpsConfigured"`
+}
+
+type executionSnapshotPhaseFixture struct {
+	ID       pipeline.PhaseID     `json:"id"`
+	Settings config.AgentSettings `json:"settings"`
+}
+
+func fixturePhaseIDs(phases []executionSnapshotPhaseFixture) []pipeline.PhaseID {
+	ids := make([]pipeline.PhaseID, len(phases))
+	for index, phase := range phases {
+		ids[index] = phase.ID
+	}
+	return ids
+}
+
+func restoreFixture(t *testing.T, snapshot state.PipelineConfigSnapshot, fixture executionSnapshotFixture) error {
+	t.Helper()
+	data, err := json.Marshal(fixture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot.Data = data
+	_, _, _, err = pipeline.RestoreExecution(snapshot)
+	return err
+}
+
+func TestPlanningContractMarkerGrandfathersSnapshotsWithoutIt(t *testing.T) {
+	resolved := resolvedConfig()
+	resolved.Defaults = config.AgentSettings{Agent: config.AgentClaude, Model: "default-model", Effort: config.EffortMedium}
+	plan, err := pipeline.Resolve(pipeline.DefaultPipeline(), resolved)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := pipeline.SnapshotExecution(plan, pipeline.DevelopmentSubphaseGeneration{}, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !pipeline.PlanningContractEnforced(snapshot) {
+		t.Fatal("new execution snapshot did not carry the Planning contract marker")
+	}
+	var legacy map[string]json.RawMessage
+	if err := json.Unmarshal(snapshot.Data, &legacy); err != nil {
+		t.Fatal(err)
+	}
+	delete(legacy, "planningContractVersion")
+	legacyData, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot.Data = legacyData
+	if pipeline.PlanningContractEnforced(snapshot) {
+		t.Fatal("snapshot without the marker was not grandfathered")
+	}
+	if pipeline.PlanningContractEnforced(state.PipelineConfigSnapshot{SchemaVersion: 1, Data: []byte(`{}`)}) {
+		t.Fatal("empty legacy snapshot was treated as a new contract snapshot")
 	}
 }
 

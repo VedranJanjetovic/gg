@@ -34,6 +34,16 @@ type PromptInput struct {
 	PlanPhase      string
 	PlanPhaseIndex int
 	PlanPhaseTotal int
+	// PlanningAttempt and the rejected artifact are populated only for a
+	// corrective Planning invocation. They are explicit data, not conversation
+	// history, so every retry remains standalone.
+	PlanningAttempt          int
+	RejectedPlanningArtifact string
+	PlanningValidationErrors []string
+	// SkippedTestingEvidence carries the exact failed Testing occurrence into
+	// the Review subphase. Review must inspect the evidence, but an explicit
+	// user waiver is not itself a review failure.
+	SkippedTestingEvidence *state.PhaseRecord
 	// CodingPatternsPath is the absolute path of the installed
 	// gg-coding-patterns reference; code-touching phases are told to follow
 	// it. Empty omits the instruction.
@@ -159,6 +169,41 @@ func BuildPrompt(input PromptInput) (string, error) {
 		writeQuotedValue(&b, input.RunID)
 		b.WriteString("\n---\n")
 	}
+	if prePRVerificationPhase(input.Phase) {
+		b.WriteString("\n## Pre-PR verification boundary\n")
+		b.WriteString("This is a pre-PR verification phase. Perform ordinary local setup, including local dependencies, services, and containers, and run every applicable check that is locally runnable. Do not connect to AWS or any other remote environment, and do not use remote credentials or endpoints.\n")
+		b.WriteString("A check may be deferred only when repository evidence shows that it requires remote credentials or an external endpoint; an ordinary local setup or test failure is a failure and must not be reclassified as deferred. If a check is deferred, record its location, name, flow and expected behavior, exact remote-only reason, repository evidence, and CI/manual run instructions without claiming that it passed. A valid deferral does not block the phase, even when PR or CI is disabled.\n")
+		switch input.Phase {
+		case pipeline.PhaseDevelopment:
+			b.WriteString("Development Testing owns focused tests for this plan phase: add and run them, plus every other locally runnable check relevant to the implementation.\n")
+		case pipeline.PhaseQA:
+			b.WriteString("QA independently validates the acceptance criteria and records every exercised validation in PROOF.md.\n")
+		case pipeline.PhaseTestDocument:
+			b.WriteString("Test/Document owns final test and documentation gaps. Follow repository conventions, including adding established end-to-end coverage even when its execution is deferred to CI.\n")
+		case pipeline.PhaseBuildChecker:
+			b.WriteString("Build checker owns the declared build, lint, format, static-analysis, and packaging gates.\n")
+		}
+	}
+	if input.Phase == pipeline.PhaseDevelopment && input.Subphase == string(pipeline.DevelopmentSubphaseReview) && input.SkippedTestingEvidence != nil {
+		evidence := input.SkippedTestingEvidence
+		b.WriteString("\n## Explicitly waived Development Testing evidence\n")
+		b.WriteString("The user explicitly confirmed skipping this exact failed Testing occurrence. Inspect the retained failure and fix any concrete defect it reveals, but do not fail Review solely because the waived check remains failed or was unavailable.\n")
+		fmt.Fprintf(&b, "- Occurrence: %s\n", strconv.Quote(evidence.OccurrenceID))
+		if evidence.Outcome != nil {
+			fmt.Fprintf(&b, "- Original failure: %s\n", strconv.Quote(evidence.Outcome.Error))
+		}
+		if len(evidence.ArtifactPaths) > 0 {
+			b.WriteString("- Evidence artifacts:\n")
+			for _, path := range evidence.ArtifactPaths {
+				if strings.TrimSpace(path) == "" {
+					continue
+				}
+				b.WriteString("  - ")
+				writeQuotedValue(&b, path)
+				b.WriteByte('\n')
+			}
+		}
+	}
 
 	b.WriteString("\n\n## Acceptance criteria\n")
 	for _, criterion := range criteria {
@@ -191,7 +236,33 @@ func BuildPrompt(input PromptInput) (string, error) {
 
 	if input.Phase == pipeline.PhasePlanning {
 		b.WriteString("\n## Plan tracking instruction\n")
-		b.WriteString("In the plan artifact's frontmatter (between the `---` markers, alongside gg_run_id) add `gg_plan_phases: [\"<phase name>\", ...]` — a single-line JSON array naming every implementation phase of your plan in execution order, matching the phase names used in the plan body.\n")
+		b.WriteString("Classify the complete requested work before choosing phases. Use the highest applicable signal: Trivial is one cohesive localized outcome with no migration, public-contract change, or dependency ordering; Simple is one localized component with routine backward-compatible behavior and tests; Moderate means multiple components, meaningful ordering, new public behavior, or a contained data/config migration; Complex means cross-service work, breaking contracts, substantial migration or rollback concerns, security-critical changes, or several independently deliverable outcomes.\n")
+		b.WriteString("Use advisory phase bands of exactly 1 for Trivial, usually 1–2 for Simple, usually 2–4 for Moderate, and usually 5–10 for Complex. Only Trivial exactly one and the hard maximum of 10 phases are enforced; do not create artificial splits to satisfy an advisory band. Preserve the complete scope.\n")
+		b.WriteString("The plan artifact frontmatter (between the `---` markers, alongside gg_run_id) MUST contain these single-line JSON-compatible YAML fields: `gg_plan_complexity`, `gg_plan_complexity_evidence`, `gg_plan_phases`, and `gg_plan_phase_boundaries`. `gg_plan_phases` names every implementation phase in execution order. `gg_plan_phase_boundaries` is an ordered array of objects with `phase` and `justification`, one for every phase.\n")
+		b.WriteString("Mirror those fields in the fixed body structure: `## Complexity assessment`, `- Complexity category: **<category>**`, `- Selected phase count: **<count>**`, a `Supporting evidence:` numbered list, one heading exactly matching each phase name (for example `## Phase 1: <name>`), and a `Boundary justification: <justification>` line under each heading. The names, order, count, evidence, category, and justifications must match frontmatter exactly.\n")
+		b.WriteString("Representative benchmark: a README-only wording update is Trivial with exactly one phase; a localized backward-compatible bug fix is Simple and normally one to two phases; an ordered multi-component feature is Moderate and normally two to four phases; a cross-service or breaking migration is Complex and normally five to ten phases.\n")
+		b.WriteString("Never truncate, merge, rename, or drop requested scope to fit the limit. If a plan would exceed ten phases, consolidate cohesive work while preserving the complete outcome before writing the artifact.\n")
+		attempt := input.PlanningAttempt
+		if attempt <= 0 {
+			attempt = 1
+		}
+		if attempt > 1 {
+			b.WriteString("\n## Planning correction\n")
+			fmt.Fprintf(&b, "This is Planning attempt %d of %d. A fresh agent is correcting the rejected artifact below; preserve the complete original goal and acceptance criteria above. The ten-phase maximum remains a hard cap.\n", attempt, MaxPlanningAttempts)
+			b.WriteString("Rejected artifact path: ")
+			writeQuotedValue(&b, ".gg/plan.md")
+			b.WriteString("\nRejected artifact content:\n")
+			writeQuotedValue(&b, input.RejectedPlanningArtifact)
+			b.WriteString("\nExact contract validation errors:\n")
+			for _, validationError := range input.PlanningValidationErrors {
+				if strings.TrimSpace(validationError) == "" {
+					continue
+				}
+				b.WriteString("- ")
+				writeQuotedValue(&b, validationError)
+				b.WriteByte('\n')
+			}
+		}
 		if input.Project.Plan != nil && len(input.Project.Plan.Phases) > 0 {
 			b.WriteString("\n## Plan update instruction\n")
 			b.WriteString("A plan already exists (read the existing plan artifact) and part of it is implemented. UPDATE the plan — never recreate it or discard completed work:\n")
@@ -246,6 +317,15 @@ func phaseSkillName(phase pipeline.PhaseID) string {
 // codeTouchingPhase reports whether the phase writes, tests, or reviews code
 // and therefore must follow the coding patterns reference.
 func codeTouchingPhase(phase pipeline.PhaseID) bool {
+	switch phase {
+	case pipeline.PhaseDevelopment, pipeline.PhaseQA, pipeline.PhaseTestDocument, pipeline.PhaseBuildChecker:
+		return true
+	default:
+		return false
+	}
+}
+
+func prePRVerificationPhase(phase pipeline.PhaseID) bool {
 	switch phase {
 	case pipeline.PhaseDevelopment, pipeline.PhaseQA, pipeline.PhaseTestDocument, pipeline.PhaseBuildChecker:
 		return true

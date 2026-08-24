@@ -36,6 +36,10 @@ Generate subphases using the configured mode only:
 
 For each generated subphase, pass only its declared brief, inputs, allowed worktree/artifacts, and success criteria. Accept its result only after checking declared outputs; carry forward only explicit artifacts and worktree changes.
 
+## Pre-PR Verification Boundary
+
+Development Testing owns focused tests for its current plan phase. Perform ordinary local setup, including local dependencies, services, and containers, and run every applicable check that is locally runnable. Do not connect to AWS or any other remote environment, and do not use remote credentials or endpoints. A check may be deferred only when repository evidence shows that it requires a remote credential or external endpoint; an ordinary local setup or test failure is a failure and must not be reclassified as deferred. Record each valid deferral with its location, check name, flow and expected behavior, exact remote-only reason, repository evidence, and CI/manual run instructions without claiming that it passed. A valid deferral does not block the phase, even when PR or CI is disabled.
+
 ## Procedure
 
 1. Confirm the plan and artifact paths match the assigned worktree.

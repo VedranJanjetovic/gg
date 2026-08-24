@@ -22,6 +22,7 @@ const (
 	StatusPass     Status = "pass"
 	StatusFail     Status = "fail"
 	StatusFeedback Status = "feedback"
+	StatusDeferred Status = "deferred"
 )
 
 type Validation struct {
@@ -31,7 +32,37 @@ type Validation struct {
 	FlowScenario          string
 	WhatItVerifies        string
 	ProofItPassed         string
+	RemoteOnlyReason      string
+	RepositoryEvidence    string
 	ManualRunInstructions string
+}
+
+// DeferredCheck is the normalized evidence carried to later handoff phases.
+// It describes a check that is valid but cannot run without a remote
+// credential or endpoint. It never claims that the check passed.
+type DeferredCheck struct {
+	TestLocation       string `json:"testLocation"`
+	CheckName          string `json:"checkName"`
+	FlowScenario       string `json:"flowScenario"`
+	ExpectedBehavior   string `json:"expectedBehavior"`
+	RemoteOnlyReason   string `json:"remoteOnlyReason"`
+	RepositoryEvidence string `json:"repositoryEvidence"`
+	RunInstructions    string `json:"runInstructions"`
+}
+
+func (c DeferredCheck) Validate() error {
+	fields := []struct{ name, value string }{
+		{"test location", c.TestLocation}, {"check name", c.CheckName},
+		{"flow/scenario", c.FlowScenario}, {"expected behavior", c.ExpectedBehavior},
+		{"remote-only reason", c.RemoteOnlyReason}, {"repository evidence", c.RepositoryEvidence},
+		{"run instructions", c.RunInstructions},
+	}
+	for _, field := range fields {
+		if strings.TrimSpace(field.value) == "" {
+			return fmt.Errorf("%s is required", field.name)
+		}
+	}
+	return nil
 }
 
 type Proof struct {
@@ -54,9 +85,19 @@ func (p Proof) Validate() error {
 
 func (v Validation) validate() error {
 	switch v.Status {
-	case StatusPass, StatusFail, StatusFeedback:
+	case StatusPass, StatusFail, StatusFeedback, StatusDeferred:
 	default:
-		return fmt.Errorf("status must be one of %q, %q, or %q", StatusPass, StatusFail, StatusFeedback)
+		return fmt.Errorf("status must be one of %q, %q, %q, or %q", StatusPass, StatusFail, StatusFeedback, StatusDeferred)
+	}
+	if v.Status == StatusDeferred {
+		if strings.TrimSpace(v.ProofItPassed) != "" {
+			return fmt.Errorf("deferred validation must not include proof it passed")
+		}
+		return (DeferredCheck{
+			TestLocation: v.TestLocation, CheckName: v.TestName, FlowScenario: v.FlowScenario,
+			ExpectedBehavior: v.WhatItVerifies, RemoteOnlyReason: v.RemoteOnlyReason,
+			RepositoryEvidence: v.RepositoryEvidence, RunInstructions: v.ManualRunInstructions,
+		}).Validate()
 	}
 	fields := []struct{ name, value string }{
 		{"test location", v.TestLocation}, {"test name", v.TestName},
@@ -223,4 +264,22 @@ func (p Proof) Classify() Classification {
 		}
 	}
 	return ClassificationPass
+}
+
+// DeferredChecks returns a copy of every validated remote-only check in
+// stable PROOF.md order.
+func (p Proof) DeferredChecks() []DeferredCheck {
+	checks := make([]DeferredCheck, 0)
+	for _, validation := range p.Validations {
+		if validation.Status != StatusDeferred {
+			continue
+		}
+		checks = append(checks, DeferredCheck{
+			TestLocation: validation.TestLocation, CheckName: validation.TestName,
+			FlowScenario: validation.FlowScenario, ExpectedBehavior: validation.WhatItVerifies,
+			RemoteOnlyReason: validation.RemoteOnlyReason, RepositoryEvidence: validation.RepositoryEvidence,
+			RunInstructions: validation.ManualRunInstructions,
+		})
+	}
+	return checks
 }

@@ -24,14 +24,6 @@ func parseRunOptions(args []string) (runOptions, error) {
 	options := runOptions{overrides: config.RunOverrides{PhaseOverrides: make(map[config.Phase]config.PhaseOverride)}, maxIterations: 3}
 	flags := flag.NewFlagSet("gg run", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
-	flags.Var(agentValue{target: &options.overrides.Defaults.Agent}, "agent", "agent for every phase in this run (claude or codex)")
-	flags.StringVar(&options.overrides.Defaults.Model, "model", "", "model for every phase in this run")
-	flags.Var(effortValue{target: &options.overrides.Defaults.Effort}, "effort", "reasoning effort for every phase in this run (low, medium, or high)")
-	flags.Var(phaseSettingValue{overrides: options.overrides.PhaseOverrides, field: phaseAgent}, "phase-agent", "per-phase agent override, repeatable as phase=agent")
-	flags.Var(phaseSettingValue{overrides: options.overrides.PhaseOverrides, field: phaseModel}, "phase-model", "per-phase model override, repeatable as phase=model")
-	flags.Var(phaseSettingValue{overrides: options.overrides.PhaseOverrides, field: phaseEffort}, "phase-effort", "per-phase effort override, repeatable as phase=effort")
-	flags.Var(phaseEnabledValue{overrides: options.overrides.PhaseOverrides, enabled: true}, "enable-phase", "enable a phase for this run; repeat for multiple phases")
-	flags.Var(phaseEnabledValue{overrides: options.overrides.PhaseOverrides, enabled: false}, "disable-phase", "disable a phase for this run; repeat for multiple phases")
 	flags.StringVar(&options.overrides.GitOps.ParentBranch, "parent-branch", "", "GitOps parent branch for this run")
 	flags.StringVar(&options.overrides.GitOps.BaseRef, "base-ref", "", "GitOps worktree base ref for this run")
 	flags.Var(gitOpsToggleValue{target: &options.overrides.GitOps.EnablePR, value: true}, "enable-pr", "enable the PR phase for this run")
@@ -63,11 +55,14 @@ func parseRunOptions(args []string) (runOptions, error) {
 }
 
 var runFlags = map[string]struct{}{
+	"--parent-branch": {}, "--base-ref": {}, "--enable-pr": {}, "--disable-pr": {}, "--enable-ci": {}, "--disable-ci": {},
+	"--max-iterations": {},
+}
+
+var removedRunFlags = map[string]struct{}{
 	"--agent": {}, "--model": {}, "--effort": {},
 	"--phase-agent": {}, "--phase-model": {}, "--phase-effort": {},
 	"--enable-phase": {}, "--disable-phase": {},
-	"--parent-branch": {}, "--base-ref": {}, "--enable-pr": {}, "--disable-pr": {}, "--enable-ci": {}, "--disable-ci": {},
-	"--max-iterations": {},
 }
 
 var runBoolFlags = map[string]struct{}{
@@ -97,6 +92,14 @@ func orderRunFlags(args []string) ([]string, error) {
 			}
 			flagArgs = append(flagArgs, arg, args[i+1])
 			i++
+			continue
+		}
+		if _, removed := removedRunFlags[strings.SplitN(arg, "=", 2)[0]]; removed {
+			flagArgs = append(flagArgs, arg)
+			if !strings.Contains(arg, "=") && i+1 < len(args) {
+				flagArgs = append(flagArgs, args[i+1])
+				i++
+			}
 			continue
 		}
 		if isRunFlagAssignment(arg) {
@@ -130,79 +133,3 @@ type gitOpsToggleValue struct {
 func (v gitOpsToggleValue) String() string   { return "" }
 func (v gitOpsToggleValue) IsBoolFlag() bool { return true }
 func (v gitOpsToggleValue) Set(string) error { value := v.value; *v.target = &value; return nil }
-
-type agentValue struct{ target *config.Agent }
-
-func (v agentValue) String() string { return string(*v.target) }
-func (v agentValue) Set(value string) error {
-	*v.target = config.Agent(value)
-	return nil
-}
-
-type effortValue struct{ target *config.Effort }
-
-func (v effortValue) String() string { return string(*v.target) }
-func (v effortValue) Set(value string) error {
-	*v.target = config.Effort(value)
-	return nil
-}
-
-type phaseSetting uint8
-
-const (
-	phaseAgent phaseSetting = iota
-	phaseModel
-	phaseEffort
-)
-
-type phaseSettingValue struct {
-	overrides map[config.Phase]config.PhaseOverride
-	field     phaseSetting
-}
-
-func (phaseSettingValue) String() string { return "" }
-func (v phaseSettingValue) Set(value string) error {
-	phase, setting, err := splitPhaseSetting(value)
-	if err != nil {
-		return err
-	}
-	override := v.overrides[phase]
-	switch v.field {
-	case phaseAgent:
-		override.Agent = config.Agent(setting)
-	case phaseModel:
-		override.Model = setting
-	case phaseEffort:
-		override.Effort = config.Effort(setting)
-	}
-	v.overrides[phase] = override
-	return nil
-}
-
-func splitPhaseSetting(value string) (config.Phase, string, error) {
-	if strings.Count(value, "=") != 1 {
-		return "", "", fmt.Errorf("expected phase=value, got %q", value)
-	}
-	parts := strings.SplitN(value, "=", 2)
-	if parts[0] == "" || parts[1] == "" {
-		return "", "", fmt.Errorf("expected non-empty phase=value, got %q", value)
-	}
-	return config.Phase(parts[0]), parts[1], nil
-}
-
-type phaseEnabledValue struct {
-	overrides map[config.Phase]config.PhaseOverride
-	enabled   bool
-}
-
-func (phaseEnabledValue) String() string { return "" }
-func (v phaseEnabledValue) Set(value string) error {
-	if value == "" || strings.Contains(value, "=") {
-		return fmt.Errorf("expected a phase name, got %q", value)
-	}
-	override := v.overrides[config.Phase(value)]
-	enabled := v.enabled
-	override.Enabled = &enabled
-	v.overrides[config.Phase(value)] = override
-	return nil
-}

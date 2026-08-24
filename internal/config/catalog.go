@@ -195,3 +195,49 @@ func (catalog AgentCatalog) ValidateSelection(agent Agent, model string) error {
 	}
 	return fmt.Errorf("model %q is not in the catalog for agent %q", model, agent)
 }
+
+// ValidateSettings checks one persisted selection against the offline
+// catalog. Manual selections intentionally bypass model ownership checks;
+// catalog selections must name a model owned by the selected agent.
+func (catalog AgentCatalog) ValidateSettings(settings AgentSettings) error {
+	if err := ValidateAgentSettings(settings); err != nil {
+		return err
+	}
+	switch settings.Provenance {
+	case ModelProvenanceManual:
+		return nil
+	case ModelProvenanceCatalog:
+		return catalog.ValidateSelection(settings.Agent, settings.Model)
+	default:
+		return fmt.Errorf("model provenance must be %q or %q", ModelProvenanceCatalog, ModelProvenanceManual)
+	}
+}
+
+// ValidateCompleteSettings is the override-shaped counterpart used by the
+// complete folder default, where all tuple fields are persisted together.
+func (catalog AgentCatalog) ValidateCompleteSettings(settings AgentSettingsOverride) error {
+	if settings.Agent == "" || settings.Model == "" || settings.Effort == "" {
+		return errors.New("complete settings must include agent, model, and effort")
+	}
+	return catalog.ValidateSettings(AgentSettings{
+		Agent: settings.Agent, Model: settings.Model, Effort: settings.Effort, Provenance: settings.Provenance,
+	})
+}
+
+// ValidateCompleteProject validates both the schema and catalog ownership for
+// a complete folder configuration. Schema validation remains offline and does
+// not infer ownership for manual model text.
+func (catalog AgentCatalog) ValidateCompleteProject(project ProjectConfig) error {
+	if err := ValidateCompleteProjectConfig(project); err != nil {
+		return err
+	}
+	if err := catalog.ValidateCompleteSettings(project.Defaults); err != nil {
+		return fmt.Errorf("defaults: %w", err)
+	}
+	for index, phase := range project.Phases {
+		if err := catalog.ValidateSettings(phase.AgentSettings); err != nil {
+			return fmt.Errorf("phases[%d].settings: %w", index, err)
+		}
+	}
+	return nil
+}

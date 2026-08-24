@@ -20,6 +20,19 @@ type ConfigureStore interface {
 	SaveConfiguration(string, config.GlobalConfig, config.ProjectConfig) error
 }
 
+type classifiedConfigureStore interface {
+	LoadProjectClassified(string) (config.ProjectConfigLoad, error)
+}
+
+type completeConfigurationStore interface {
+	SaveCompleteConfiguration(string, config.GlobalConfig, config.ProjectConfig) error
+}
+
+// ProjectConfigurationChooser is the TUI boundary used before a new project
+// description is collected. Index zero is inheritance; index one starts the
+// isolated project wizard.
+type ProjectConfigurationChooser func(context.Context, io.Reader, io.Writer) (int, error)
+
 // ConfigurePicker is the composition boundary for the interactive configure
 // wizard: agent, model, effort, and per-phase enable toggles in one flow.
 type ConfigurePicker func(context.Context, config.AgentCatalog, tui.WizardDefaults, io.Reader, io.Writer) (tui.PickerResult, error)
@@ -101,6 +114,13 @@ func (w *ConfigureWorkflow) Run(ctx context.Context) error {
 	if err := config.ValidateGlobalConfig(global); err != nil {
 		return fmt.Errorf("validate staged global configuration: %w", err)
 	}
+	if config.ClassifyProjectConfig(project) == config.ProjectConfigMigrationRequired {
+		materialized, materializeErr := config.MaterializeCompleteProjectConfig(global, &project)
+		if materializeErr != nil {
+			return fmt.Errorf("materialize staged project configuration: %w", materializeErr)
+		}
+		project = materialized
+	}
 	if err := config.ValidateProjectConfig(project); err != nil {
 		return fmt.Errorf("validate staged project configuration: %w", err)
 	}
@@ -152,7 +172,8 @@ var phaseDescriptions = map[config.Phase]string{
 // lockedPhaseDescriptions annotate the fixed pipeline steps shown for context.
 var lockedPhaseDescriptions = map[pipeline.PhaseID]string{
 	pipeline.PhaseAcceptanceCriteria: "Capture the goal and acceptance criteria (always runs)",
-	pipeline.PhaseGrooming:           "Requirement grilling (on by default; per run: --disable-phase grooming)",
+	pipeline.PhaseGrooming:           "Requirement grilling (always runs)",
+	pipeline.PhasePlanning:           "Plan implementation phases and deliverables (always runs)",
 	pipeline.PhaseDevelopment:        "Implement each planned phase with subagents (always runs)",
 	pipeline.PhaseRebase:             "Fetch the parent branch and rebase (always runs)",
 	pipeline.PhaseTestDocument:       "Close test coverage gaps and update docs (always runs)",
@@ -182,7 +203,7 @@ func currentPhaseStates(global config.GlobalConfig, project *config.ProjectConfi
 			state.Locked, state.Enabled, state.Description = true, true, lockedPhaseDescriptions[phase.ID()]
 			// Locked phases always run, but grooming and the fixed pipeline
 			// steps still accept per-phase agent/model/effort overrides.
-			if candidate := config.Phase(phase.ID()); candidate == config.PhaseGrooming || config.IsFixedPhase(candidate) {
+			if candidate := config.Phase(phase.ID()); candidate == config.PhaseGrooming || candidate == config.PhasePlanning || config.IsFixedPhase(candidate) {
 				state.Phase = candidate
 			}
 		}
@@ -345,18 +366,11 @@ func (w *ConfigureWorkflow) reconfigurePhases(global *config.GlobalConfig, proje
 	return nil
 }
 
-// configurablePhases returns the phases offered by the interactive workflow.
-// Grooming is always enabled by default and intentionally not part of
-// configuration; it can still be disabled per run via --disable-phase.
+// configurablePhases returns the optional phases offered by the interactive
+// workflow. Required phases remain enabled and their settings are still
+// editable through the same complete configuration flow.
 func configurablePhases() []config.Phase {
-	phases := make([]config.Phase, 0, len(config.RemovablePhases()))
-	for _, phase := range config.RemovablePhases() {
-		if phase == config.PhaseGrooming {
-			continue
-		}
-		phases = append(phases, phase)
-	}
-	return phases
+	return config.OptionalPhases()
 }
 
 func (w *ConfigureWorkflow) selectAgentModel(p *promptSession, label string, current config.Agent, currentModel string) (config.Agent, string, bool, error) {

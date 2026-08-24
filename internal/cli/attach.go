@@ -8,6 +8,8 @@ import (
 	"os"
 
 	"github.com/VedranJanjetovic/gg/internal/git"
+	"github.com/VedranJanjetovic/gg/internal/orchestrator"
+	"github.com/VedranJanjetovic/gg/internal/pipeline"
 	"github.com/VedranJanjetovic/gg/internal/state"
 	"github.com/VedranJanjetovic/gg/internal/tui"
 )
@@ -16,13 +18,18 @@ import (
 // to terminal frontends. Actions are synchronous: the frontend decides how to
 // coordinate them with rendering, and action errors are returned unchanged.
 type ProjectAttachment struct {
-	Project      state.ProjectState
-	Load         func(context.Context) (state.ProjectState, error)
-	Start        func(context.Context) error
-	Stop         func(context.Context) error
-	Resume       func(context.Context) error
-	OpenCode     func(context.Context) error
-	OpenTerminal func(context.Context) error
+	Project       state.ProjectState
+	Load          func(context.Context) (state.ProjectState, error)
+	Start         func(context.Context) error
+	Stop          func(context.Context) error
+	Resume        func(context.Context) error
+	Configure     func(context.Context) error
+	Skip          func(context.Context) error
+	SkipAvailable bool
+	SkipLabel     string
+	SkipTarget    func(state.ProjectState) (bool, string)
+	OpenCode      func(context.Context) error
+	OpenTerminal  func(context.Context) error
 	// Notice is an optional one-off message the frontend shows when the
 	// session opens (for example why the grooming interview was skipped).
 	Notice string
@@ -68,7 +75,7 @@ func (a *App) createAndAttach(ctx context.Context, stdout io.Writer) error {
 // attaches the live TUI; the pipeline starts through the attachment's Start
 // action so progress is visible instead of running headless.
 func (a *App) createAndAttachWithOptions(ctx context.Context, stdout io.Writer, options runOptions) error {
-	selector, err := a.createProject(ctx, stdout)
+	selector, err := a.createProject(ctx, stdout, options.maxIterations)
 	if err != nil {
 		return fmt.Errorf("create project: %w", err)
 	}
@@ -203,6 +210,20 @@ func (a *App) attachProject(ctx context.Context, selector string, start func(con
 				return a.resume(resumeCtx, io.Discard, []string{selector})
 			},
 		}
+		if skipper, ok := service.(skipExecutionService); ok {
+			available, label := skipProjection(project)
+			attachment.SkipAvailable = available
+			attachment.SkipLabel = label
+			attachment.SkipTarget = skipProjection
+			attachment.Skip = func(skipCtx context.Context) error {
+				return a.skipFailedExecution(skipCtx, selector, skipper)
+			}
+		}
+		if project.Status == state.StatusFailed || project.Status == state.StatusStopped {
+			attachment.Configure = func(configureCtx context.Context) error {
+				return a.configureExistingProject(configureCtx, selector, project)
+			}
+		}
 		if a.launchActions != nil {
 			attachment.OpenCode = func(openCtx context.Context) error {
 				return a.launchActions.OpenCode(openCtx, project)
@@ -230,9 +251,109 @@ func (a *App) attachProject(ctx context.Context, selector string, start func(con
 			start = nil
 			continue
 		}
+		if errors.Is(err, tui.ErrConfigureRequested) {
+			if attachment.Configure == nil {
+				return errors.New("project configuration editing is not configured")
+			}
+			if configureErr := attachment.Configure(ctx); configureErr != nil {
+				if errors.Is(configureErr, errProjectConfigurationCancelled) {
+					carryNotice = "Configuration unchanged."
+					start = nil
+					continue
+				}
+				return fmt.Errorf("configure project %q: %w", selector, configureErr)
+			}
+			carryNotice = "Configuration saved. Press r to resume the project."
+			start = nil
+			continue
+		}
 		if err != nil {
 			return fmt.Errorf("attach project %q: %w", selector, err)
 		}
 		return nil
 	}
+}
+
+type skipExecutionService interface {
+	SkipFailedExecution(context.Context, string, state.SkipRequest, state.SkipCleanupFunc) (state.ProjectState, error)
+}
+
+func skipProjection(project state.ProjectState) (bool, string) {
+	if project.Status != state.StatusFailed || len(project.PhaseHistory) == 0 {
+		return false, ""
+	}
+	record := project.PhaseHistory[len(project.PhaseHistory)-1]
+	if record.OccurrenceID == "" || record.Status != state.StatusFailed || record.Skip != nil || (record.Outcome != nil && record.Outcome.Canceled) {
+		return false, ""
+	}
+	phase := pipeline.PhaseID(record.Phase)
+	if err := orchestrator.ValidateSkipTarget(project, phase, record.Subphase, record.OccurrenceID); err != nil {
+		return false, ""
+	}
+	if record.Phase == string(pipeline.PhaseDevelopment) {
+		if planPhase := currentPlanPhase(project); planPhase != "" {
+			return true, "Development / " + planPhase + " / Testing"
+		}
+		return true, "Development / Testing"
+	}
+	for _, definition := range pipeline.DefaultPipeline().Phases() {
+		if definition.ID() == phase {
+			return true, definition.Metadata().DisplayName
+		}
+	}
+	return false, ""
+}
+
+func currentPlanPhase(project state.ProjectState) string {
+	if project.Plan == nil {
+		return ""
+	}
+	completed := make(map[string]struct{}, len(project.Plan.Completed))
+	for _, phase := range project.Plan.Completed {
+		completed[phase] = struct{}{}
+	}
+	for _, phase := range project.Plan.Phases {
+		if _, ok := completed[phase]; !ok {
+			return phase
+		}
+	}
+	return ""
+}
+
+func (a *App) skipFailedExecution(ctx context.Context, selector string, skipper skipExecutionService) error {
+	project, err := a.projectService(ctx)
+	if err != nil {
+		return fmt.Errorf("load project service for skip: %w", err)
+	}
+	current, err := project.Load(ctx, selector)
+	if err != nil {
+		return fmt.Errorf("load project %q for skip: %w", selector, err)
+	}
+	if _, label := skipProjection(current); label == "" {
+		return fmt.Errorf("skip project %q: no eligible failed execution", selector)
+	}
+	last := current.PhaseHistory[len(current.PhaseHistory)-1]
+	nextPhase, nextSubphase, err := orchestrator.SkipContinuation(current)
+	if err != nil {
+		return err
+	}
+	externalIdentity := ""
+	if last.Outcome != nil {
+		externalIdentity = last.Outcome.ExternalIdentity
+	}
+	if externalIdentity == "" {
+		externalIdentity = current.PullRequestURL
+	}
+	if _, err := skipper.SkipFailedExecution(ctx, selector, state.SkipRequest{
+		OccurrenceID:     last.OccurrenceID,
+		NextPhase:        nextPhase,
+		NextSubphase:     nextSubphase,
+		ExternalIdentity: externalIdentity,
+	}, nil); err != nil {
+		return fmt.Errorf("skip %s/%s: %w", last.Phase, last.Subphase, err)
+	}
+	if a.runSpawner != nil {
+		return a.startDetached(ctx, selector, []string{"resume", selector})
+	}
+	return a.resume(ctx, io.Discard, []string{selector})
 }

@@ -24,7 +24,7 @@ func TestFetchParentUsesConfiguredBranch(t *testing.T) {
 
 func TestRebaseSuccess(t *testing.T) {
 	f := &remoteExecutor{outputs: []string{"rebased\n"}}
-	got, err := git.NewClient("/repo", f).RebaseProject(context.Background(), git.RebaseRequest{WorktreePath: "/repo/project", Branch: "gg/project", ParentBranch: "develop", BaseRef: "origin/develop"})
+	got, err := git.NewClient("/repo", f).RebaseProject(context.Background(), git.RebaseRequest{WorktreePath: "/repo/project", Branch: "gg/project", ParentBranch: "develop", BaseRef: "stale/base"})
 	if err != nil || got.Conflict != nil || got.Output != "rebased\n" {
 		t.Fatalf("result=%#v err=%v", got, err)
 	}
@@ -34,10 +34,96 @@ func TestRebaseSuccess(t *testing.T) {
 	}
 }
 
+func TestRebaseRejectsUnsafeBranchBeforeInvokingGit(t *testing.T) {
+	f := &remoteExecutor{outputs: []string{"unexpected"}}
+	_, err := git.NewClient("/repo", f).RebaseProject(context.Background(), git.RebaseRequest{
+		WorktreePath: "/repo/project",
+		Branch:       "feature..bad",
+		ParentBranch: "main",
+	})
+	if err == nil || !strings.Contains(err.Error(), "branch is invalid") {
+		t.Fatalf("error = %v, want unsafe branch rejection", err)
+	}
+	if len(f.calls) != 0 {
+		t.Fatalf("git calls = %#v, want none", f.calls)
+	}
+}
+
+func TestRebaseRequiresConfiguredParentEvenWhenBaseRefIsPresent(t *testing.T) {
+	f := &remoteExecutor{outputs: []string{"unexpected"}}
+	_, err := git.NewClient("/repo", f).RebaseProject(context.Background(), git.RebaseRequest{
+		WorktreePath: "/repo/project",
+		Branch:       "gg/project",
+		BaseRef:      "origin/main",
+	})
+	if err == nil || !strings.Contains(err.Error(), "parent branch is required") {
+		t.Fatalf("error = %v, want configured-parent rejection", err)
+	}
+	if len(f.calls) != 0 {
+		t.Fatalf("git calls = %#v, want none", f.calls)
+	}
+}
+
+func TestRebaseCheckpointCommandsRestoreCleanBranchState(t *testing.T) {
+	f := &remoteExecutor{
+		outputs: []string{"gg/project\n", "0123456789abcdef\n", "", "", "", "", "", "", "gg/project\n", "0123456789abcdef\n", ""},
+		errs:    []error{nil, nil, nil, errors.New("no rebase"), nil, nil, nil, errors.New("no rebase"), nil, nil, nil},
+	}
+	c := git.NewClient("/repo", f)
+	checkpoint, err := c.CaptureRebaseCheckpoint(context.Background(), "/repo/project")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if checkpoint.Branch != "gg/project" || checkpoint.Head != "0123456789abcdef" {
+		t.Fatalf("checkpoint = %#v", checkpoint)
+	}
+	if err := c.RestoreRebaseCheckpoint(context.Background(), checkpoint); err != nil {
+		t.Fatal(err)
+	}
+	want := []git.Command{
+		{Dir: "/repo/project", Name: "git", Args: []string{"branch", "--show-current"}},
+		{Dir: "/repo/project", Name: "git", Args: []string{"rev-parse", "HEAD"}},
+		{Dir: "/repo/project", Name: "git", Args: []string{"status", "--porcelain=v1", "--untracked-files=all", "--"}},
+		{Dir: "/repo/project", Name: "git", Args: []string{"rev-parse", "--verify", "REBASE_HEAD"}},
+		{Dir: "/repo/project", Name: "git", Args: []string{"checkout", "--force", "gg/project"}},
+		{Dir: "/repo/project", Name: "git", Args: []string{"reset", "--hard", "0123456789abcdef"}},
+		{Dir: "/repo/project", Name: "git", Args: []string{"clean", "-fd", "--"}},
+		{Dir: "/repo/project", Name: "git", Args: []string{"rev-parse", "--verify", "REBASE_HEAD"}},
+		{Dir: "/repo/project", Name: "git", Args: []string{"branch", "--show-current"}},
+		{Dir: "/repo/project", Name: "git", Args: []string{"rev-parse", "HEAD"}},
+		{Dir: "/repo/project", Name: "git", Args: []string{"status", "--porcelain=v1", "--untracked-files=all", "--"}},
+	}
+	if !reflect.DeepEqual(f.calls, want) {
+		t.Fatalf("calls = %#v, want %#v", f.calls, want)
+	}
+}
+
+func TestRestoreRebaseCheckpointAbortsActiveRebase(t *testing.T) {
+	f := &remoteExecutor{
+		outputs: []string{"rebase-head\n", "", "", "", "", "", "gg/project\n", "0123456789abcdef\n", ""},
+		errs:    []error{nil, nil, nil, nil, nil, errors.New("no rebase"), nil, nil, nil},
+	}
+	checkpoint := git.RebaseCheckpoint{WorktreePath: "/repo/project", Branch: "gg/project", Head: "0123456789abcdef"}
+	if err := git.NewClient("/repo", f).RestoreRebaseCheckpoint(context.Background(), checkpoint); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.calls) != 9 || !reflect.DeepEqual(f.calls[1].Args, []string{"rebase", "--abort"}) {
+		t.Fatalf("calls = %#v, want active rebase abort before restore", f.calls)
+	}
+}
+
+func TestCaptureRebaseCheckpointRejectsDirtyWorktree(t *testing.T) {
+	f := &remoteExecutor{outputs: []string{"gg/project\n", "0123456789abcdef\n", " M README.md\n"}}
+	_, err := git.NewClient("/repo", f).CaptureRebaseCheckpoint(context.Background(), "/repo/project")
+	if err == nil || !strings.Contains(err.Error(), "uncommitted changes") {
+		t.Fatalf("error = %v, want dirty-worktree rejection", err)
+	}
+}
+
 func TestRebaseConflictPreservesOutputAndPaths(t *testing.T) {
 	cause := errors.New("rebase failed")
 	f := &remoteExecutor{outputs: []string{"CONFLICT (content): Merge conflict in app.go\n", "app.go\nREADME.md\napp.go\n"}, errs: []error{cause}}
-	got, err := git.NewClient("/repo", f).RebaseProject(context.Background(), git.RebaseRequest{WorktreePath: "/repo/project", Branch: "gg/project", BaseRef: "main"})
+	got, err := git.NewClient("/repo", f).RebaseProject(context.Background(), git.RebaseRequest{WorktreePath: "/repo/project", Branch: "gg/project", ParentBranch: "main", BaseRef: "stale/base"})
 	if !errors.Is(err, git.ErrRebaseConflict) || got.Conflict == nil {
 		t.Fatalf("result=%#v err=%v", got, err)
 	}
@@ -56,7 +142,7 @@ func TestRebaseMalformedConflictOutputRemainsOrdinaryError(t *testing.T) {
 	cause := errors.New("bad rebase")
 	inspect := errors.New("status unavailable")
 	f := &remoteExecutor{outputs: []string{"rebase output\n"}, errs: []error{cause, inspect}}
-	got, err := git.NewClient("/repo", f).RebaseProject(context.Background(), git.RebaseRequest{WorktreePath: "/repo/project", Branch: "gg/project", BaseRef: "main"})
+	got, err := git.NewClient("/repo", f).RebaseProject(context.Background(), git.RebaseRequest{WorktreePath: "/repo/project", Branch: "gg/project", ParentBranch: "main", BaseRef: "stale/base"})
 	if errors.Is(err, git.ErrRebaseConflict) || err == nil || !strings.Contains(err.Error(), "inspect conflicts") {
 		t.Fatalf("result=%#v err=%v", got, err)
 	}

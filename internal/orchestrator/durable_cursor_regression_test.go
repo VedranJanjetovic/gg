@@ -59,7 +59,7 @@ func TestStopDuringPostConflictQASurvivesRestartWithoutReplayingRebase(t *testin
 	conflictRunner := &feedbackRunner{
 		statuses: []state.LifecycleStatus{
 			state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFinished,
-			state.StatusFinished, state.StatusFailed,
+			state.StatusFailed,
 		},
 		artifacts: []string{"rebase-report.md"},
 	}
@@ -132,7 +132,7 @@ func TestStopDuringPostConflictQASurvivesRestartWithoutReplayingRebase(t *testin
 
 	want := []string{
 		"development/implementation", "development/testing", "development/review",
-		"qa/", "test_document/",
+		"rebase/", "qa/", "test_document/",
 	}
 	if !reflect.DeepEqual(finishRunner.calls, want) {
 		t.Fatalf("post-conflict resume dispatches = %v, want %v (Rebase must remain skipped)", finishRunner.calls, want)
@@ -171,7 +171,7 @@ func TestResumeAfterSuccessfulQAFixSubphaseStartsAtNextSubphase(t *testing.T) {
 	runner := &feedbackRunner{
 		statuses: []state.LifecycleStatus{
 			state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFinished,
-			state.StatusFailed, state.StatusFinished,
+			state.StatusFinished, state.StatusFailed, state.StatusFinished,
 		},
 		artifacts: []string{"qa-report.md"},
 	}

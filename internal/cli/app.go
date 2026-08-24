@@ -3,6 +3,7 @@ package cli
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -146,6 +147,7 @@ type App struct {
 	store                ConfigureStore
 	catalogSource        config.AgentCatalogSource
 	configurePicker      ConfigurePicker
+	projectConfigChooser ProjectConfigurationChooser
 	config               *config.Service
 	root                 config.RootResolver
 	rootInjected         bool
@@ -248,6 +250,11 @@ func WithAgentCatalogSource(source config.AgentCatalogSource) Option {
 // WithConfigurePicker injects the interactive agent/model picker.
 func WithConfigurePicker(picker ConfigurePicker) Option {
 	return func(app *App) { app.configurePicker = picker }
+}
+
+// WithProjectConfigurationChooser injects the new-project Inherit/Pick choice.
+func WithProjectConfigurationChooser(chooser ProjectConfigurationChooser) Option {
+	return func(app *App) { app.projectConfigChooser = chooser }
 }
 
 // WithPipelineService supplies workflow dispatch, primarily for tests.
@@ -608,7 +615,7 @@ func (a *App) runPipeline(ctx context.Context, stdout io.Writer, options runOpti
 	var selector, worktreePath string
 	var resumeExisting bool
 	if rawSelector == "" && a.projectPrompt != nil {
-		selector, err = a.createProject(ctx, stdout)
+		selector, err = a.createProject(ctx, stdout, options.maxIterations)
 		if err != nil {
 			return fmt.Errorf("create project: %w", err)
 		}
@@ -639,6 +646,22 @@ func (a *App) runPipeline(ctx context.Context, stdout io.Writer, options runOpti
 		}
 		worktreePath = projectState.WorktreePath
 		resumeExisting = projectState.Status == state.StatusStopped || projectState.Status == state.StatusFailed
+		// A newly created project owns its complete snapshot before Grooming
+		// starts. Restore it here so ambient folder/global changes cannot replace
+		// the user's Inherit/Pick decision on the first execution.
+		if !resumeExisting && projectState.Status == state.StatusPending && hasPersistedExecutionSnapshot(projectState.PipelineConfig) {
+			persistedPlan, persistedSubphases, persistedMax, restoreErr := pipeline.RestoreExecution(projectState.PipelineConfig)
+			if restoreErr != nil {
+				return fmt.Errorf("restore project %q creation snapshot: %w", selector, restoreErr)
+			}
+			plan, subphases, options.maxIterations = persistedPlan, persistedSubphases, persistedMax
+			executionSnapshot = projectState.PipelineConfig
+		}
+		if projectConfig, configErr := pipeline.RestoreResolvedConfiguration(projectState.PipelineConfig); configErr == nil {
+			// The project snapshot is authoritative for both controller and
+			// legacy pipeline-service dispatches.
+			resolved = projectConfig
+		}
 		if resumeExisting {
 			_, _, _, restoreErr := pipeline.RestoreExecution(projectState.PipelineConfig)
 			resumeExisting = restoreErr == nil
@@ -775,6 +798,10 @@ func snapshotGitOps(snapshot state.PipelineConfigSnapshot) config.GitOpsConfig {
 	return gitOps
 }
 
+func hasPersistedExecutionSnapshot(snapshot state.PipelineConfigSnapshot) bool {
+	return snapshot.SchemaVersion > 0 && len(bytes.TrimSpace(snapshot.Data)) > 0 && !bytes.Equal(bytes.TrimSpace(snapshot.Data), []byte("{}"))
+}
+
 func (a *App) resume(ctx context.Context, stdout io.Writer, args []string) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -807,6 +834,10 @@ func (a *App) resume(ctx context.Context, stdout io.Writer, args []string) error
 		project, loadErr := projectService.Load(ctx, selector)
 		if loadErr != nil {
 			return fmt.Errorf("load project %q: %w", selector, loadErr)
+		}
+		project, loadErr = a.repairCurrentPhaseConfiguration(ctx, selector, project)
+		if loadErr != nil {
+			return fmt.Errorf("repair project %q configuration: %w", selector, loadErr)
 		}
 		plan, subphases, maxAttempts, planErr := pipeline.RestoreExecution(project.PipelineConfig)
 		gitOps := snapshotGitOps(project.PipelineConfig)
@@ -900,7 +931,11 @@ func (a *App) stopAll(ctx context.Context, stdout io.Writer) error {
 	return stopErr
 }
 
-func (a *App) createProject(ctx context.Context, stdout io.Writer) (string, error) {
+func (a *App) createProject(ctx context.Context, stdout io.Writer, maxQAAttempts int) (string, error) {
+	creation, err := a.chooseNewProjectConfiguration(ctx, stdout, maxQAAttempts)
+	if err != nil {
+		return "", err
+	}
 	input, err := a.projectPrompt.Prompt(ctx, stdout)
 	if err != nil {
 		return "", err
@@ -912,7 +947,7 @@ func (a *App) createProject(ctx context.Context, stdout io.Writer) (string, erro
 	if err != nil {
 		return "", err
 	}
-	return a.prepareProjectWithInput(ctx, name, input)
+	return a.prepareProjectWithInput(ctx, name, input, creation.snapshot)
 }
 
 func (a *App) projectWorktreePath(ctx context.Context, selector string) (string, error) {
@@ -927,7 +962,7 @@ func (a *App) projectWorktreePath(ctx context.Context, selector string) (string,
 	return project.WorktreePath, nil
 }
 
-func (a *App) prepareProjectWithInput(ctx context.Context, displayName string, input orchestrator.ProjectInput) (string, error) {
+func (a *App) prepareProjectWithInput(ctx context.Context, displayName string, input orchestrator.ProjectInput, snapshot state.PipelineConfigSnapshot) (string, error) {
 	slug, err := git.ProjectSlug(displayName)
 	if err != nil {
 		return "", fmt.Errorf("normalize inferred project name: %w", err)
@@ -953,7 +988,7 @@ func (a *App) prepareProjectWithInput(ctx context.Context, displayName string, i
 	if err != nil {
 		return "", err
 	}
-	project := newProjectState(displayName, slug, input.Goal, input.AcceptanceCriteria, worktree.Path, worktree.Branch)
+	project := newProjectState(displayName, slug, input.Goal, input.AcceptanceCriteria, worktree.Path, worktree.Branch, snapshot)
 	project.GitDisabled = gitDisabled
 	// New projects owe the user a grooming interview before the pipeline
 	// starts; it runs (and can be re-entered) through the attach flow.
@@ -1114,11 +1149,15 @@ func (a *App) prepareProjectWorkspace(ctx context.Context, client worktreeServic
 	return worktree, created, false, nil
 }
 
-func newProjectState(displayName, slug, goal string, criteria []string, worktreePath, branchName string) state.ProjectState {
+func newProjectState(displayName, slug, goal string, criteria []string, worktreePath, branchName string, snapshots ...state.PipelineConfigSnapshot) state.ProjectState {
+	snapshot := state.PipelineConfigSnapshot{SchemaVersion: 1, Data: json.RawMessage(`{}`)}
+	if len(snapshots) > 0 {
+		snapshot = snapshots[0]
+	}
 	return state.ProjectState{
 		Name: displayName, Slug: slug, OriginalGoal: goal,
 		AcceptanceCriteria: append([]string(nil), criteria...),
-		PipelineConfig:     state.PipelineConfigSnapshot{SchemaVersion: 1, Data: json.RawMessage(`{}`)},
+		PipelineConfig:     snapshot,
 		CurrentPhase:       "pipeline", WorktreePath: filepath.Clean(worktreePath), BranchName: branchName,
 	}
 }
@@ -1419,7 +1458,7 @@ func writeCommandHelp(w io.Writer, command string) {
 	}
 	fmt.Fprintf(w, "%s\n\nUsage:\n  gg %s%s\n", description.summary, command, description.usageSuffix)
 	if command == "run" {
-		fmt.Fprint(w, "\nTransient run overrides apply to this invocation only: --agent, --model, --effort, --phase-agent, --phase-model, --phase-effort, --enable-phase, --disable-phase, --max-iterations (default 3 total QA attempts). The linting alias maps to build_checker; use -- to pass every following token to the pipeline unchanged.\n")
+		fmt.Fprint(w, "\nRun controls: --parent-branch, --base-ref, --enable-pr, --disable-pr, --enable-ci, --disable-ci, and --max-iterations (default 3 total QA attempts). New projects choose Inherit or Pick configuration in the attached TUI; use -- to pass every following token to the pipeline unchanged.\n")
 	}
 }
 

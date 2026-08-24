@@ -62,11 +62,16 @@ func (c *Client) LookupWorktree(ctx context.Context, path, branch string) (Workt
 		return Worktree{}, err
 	}
 	for _, worktree := range worktrees {
-		pathMatch := path != "" && filepath.Clean(worktree.Path) == path
+		pathMatch := path != "" && worktreePathsEqual(worktree.Path, path)
 		branchMatch := branch != "" && worktree.Branch == branch
 		if pathMatch || branchMatch {
 			if path != "" && branch != "" && (!pathMatch || !branchMatch) {
 				return Worktree{}, fmt.Errorf("%w: requested path %q and branch %q, found path %q and branch %q", ErrWorktreeMismatch, path, branch, worktree.Path, worktree.Branch)
+			}
+			if pathMatch {
+				// Preserve the caller's spelling when Git reports the same path
+				// through a platform-specific symlink such as macOS /var.
+				worktree.Path = path
 			}
 			return worktree, nil
 		}
@@ -96,10 +101,11 @@ func (c *Client) EnsureWorktree(ctx context.Context, request WorktreeRequest) (W
 		return Worktree{}, false, err
 	}
 	for _, worktree := range worktrees {
-		pathMatch := filepath.Clean(worktree.Path) == request.Path
+		pathMatch := worktreePathsEqual(worktree.Path, request.Path)
 		branchMatch := worktree.Branch == request.Branch
 		switch {
 		case pathMatch && branchMatch:
+			worktree.Path = request.Path
 			return worktree, false, nil
 		case pathMatch:
 			return Worktree{}, false, fmt.Errorf("%w: path %q belongs to branch %q, requested %q", ErrWorktreePathInUse, request.Path, worktree.Branch, request.Branch)
@@ -178,7 +184,7 @@ func (c *Client) removeWorktree(ctx context.Context, path, branch string, force 
 			return err
 		}
 	}
-	if filepath.Clean(worktree.Path) != path || worktree.Branch != branch || worktree.Bare || worktree.Detached {
+	if !worktreePathsEqual(worktree.Path, path) || worktree.Branch != branch || worktree.Bare || worktree.Detached {
 		return fmt.Errorf("%w: path %q branch %q is not an owned attached worktree", ErrUnsafeWorktree, path, branch)
 	}
 	statusCommand := Command{Dir: path, Name: "git", Args: []string{"status", "--porcelain", "--untracked-files=all"}}
@@ -222,6 +228,16 @@ func cleanWorktreePath(path string) string {
 		return ""
 	}
 	return filepath.Clean(absolute)
+}
+
+func worktreePathsEqual(left, right string) bool {
+	left, right = filepath.Clean(left), filepath.Clean(right)
+	if left == right {
+		return true
+	}
+	resolvedLeft, leftErr := filepath.EvalSymlinks(left)
+	resolvedRight, rightErr := filepath.EvalSymlinks(right)
+	return leftErr == nil && rightErr == nil && filepath.Clean(resolvedLeft) == filepath.Clean(resolvedRight)
 }
 
 func parseWorktreePorcelain(output string) ([]Worktree, error) {
