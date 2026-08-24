@@ -363,26 +363,11 @@ func (c *sequentialController) execute(ctx context.Context, request Request, res
 				}
 			}
 			if err != nil {
-				if phase == pipeline.PhaseRebase && outcome.Result.Status == state.StatusFailed {
-					bookkeepingCtx := context.WithoutCancel(ctx)
-					conflict, inspectErr := c.isRebaseConflict(bookkeepingCtx, request.Project.WorktreePath)
-					if inspectErr != nil {
-						return outcomes, errors.Join(err, inspectErr)
+				if phase == pipeline.PhaseRebase {
+					if conflictErr := c.recordRebaseConflict(context.WithoutCancel(ctx), &request, &outcome, err); conflictErr != nil {
+						return outcomes, errors.Join(err, conflictErr)
 					}
-					if conflict {
-						outcomes[len(outcomes)-1].ConflictResolutionNeeded = true
-						outcome.ConflictResolutionNeeded = true
-						if durable, ok := c.state.(durableOrchestrationState); ok {
-							project, persistErr := durable.SetRebaseConflict(context.WithoutCancel(ctx), request.Project.Slug, true, outcome.Result.ArtifactPaths)
-							if persistErr != nil {
-								return outcomes, errors.Join(err, persistErr)
-							}
-							request.Project = project
-						}
-						if _, routeErr := c.routeConflict(bookkeepingCtx, request, outcome, err); routeErr != nil {
-							return outcomes, routeErr
-						}
-					}
+					outcomes[len(outcomes)-1].ConflictResolutionNeeded = outcome.ConflictResolutionNeeded
 				}
 				return outcomes, err
 			}
@@ -573,6 +558,15 @@ func (c *sequentialController) executeQAFeedbackLoop(ctx context.Context, reques
 			outcomes = append(outcomes, rebaseOutcome)
 		}
 		if rebaseErr != nil {
+			if conflictErr := c.recordRebaseConflict(context.WithoutCancel(ctx), request, &rebaseOutcome, rebaseErr); conflictErr != nil {
+				if rebaseOutcome.Result.Phase != "" {
+					outcomes[len(outcomes)-1] = rebaseOutcome
+				}
+				return errors.Join(rebaseErr, conflictErr)
+			}
+			if rebaseOutcome.Result.Phase != "" {
+				outcomes[len(outcomes)-1] = rebaseOutcome
+			}
 			return rebaseErr
 		}
 		stage = "qa"
@@ -702,6 +696,29 @@ func (c *sequentialController) executeRebaseBeforeQA(ctx context.Context, reques
 	outcome, err := c.executePhase(ctx, *request, rebase, "", iteration, feedback)
 	request.Project.ArtifactPaths = appendUnique(request.Project.ArtifactPaths, outcome.Result.ArtifactPaths...)
 	return outcome, err
+}
+
+func (c *sequentialController) recordRebaseConflict(ctx context.Context, request *Request, outcome *PhaseOutcome, phaseErr error) error {
+	if outcome == nil || outcome.Result.Status != state.StatusFailed {
+		return nil
+	}
+	conflict, err := c.isRebaseConflict(ctx, request.Project.WorktreePath)
+	if err != nil {
+		return err
+	}
+	if !conflict {
+		return nil
+	}
+	outcome.ConflictResolutionNeeded = true
+	if durable, ok := c.state.(durableOrchestrationState); ok {
+		project, persistErr := durable.SetRebaseConflict(ctx, request.Project.Slug, true, outcome.Result.ArtifactPaths)
+		if persistErr != nil {
+			return persistErr
+		}
+		request.Project = project
+	}
+	_, err = c.routeConflict(ctx, *request, *outcome, phaseErr)
+	return err
 }
 
 func rebaseBeforeQAExecutable(plan pipeline.ExecutablePipeline) (pipeline.ExecutablePhase, bool) {

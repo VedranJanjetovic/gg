@@ -1,34 +1,44 @@
 ---
-gg_run_id: "gg-tool-generally-great-but-1787557476767017000/development/testing/iteration-0"
+gg_run_id: "gg-tool-generally-great-but-1787557476767017000/development/review/iteration-0"
 gg_disposition: passed
 ---
 
-# Development result
+# Development review result
 
-Testing completed for Phase 2: Versioned pipeline order and loop invariants.
+Phase 2 review passed after fixing the remaining order-documentation and
+feedback-loop conflict-routing defects.
 
-## Subphase result
+## Review findings and fixes
 
-- Implementation: Passed in the preceding committed subphase.
-- Testing: Passed. Added regression coverage for restored schema-v2 and legacy schema-v1 execution order, plus legacy QA retry routing. Updated the production composition fixture to provide local origin/GitHub seams and assert the new order and artifact paths.
-- Review: Passed through formatting, diff, focused tests, and race-enabled tests.
+- Updated `README.md` and the Linux E2E phase-order expectation to describe
+  Development → Rebase → QA, including QA feedback cycles.
+- Unified Rebase conflict inspection, durable conflict evidence, and routing
+  for initial execution and Rebase runs inserted into QA feedback loops.
+- Added regression coverage proving a feedback-loop Rebase conflict remains
+  the terminal outcome and emits conflict-routing evidence.
+- Legacy schema-v1 snapshots still restore and execute their persisted
+  Acceptance criteria → Grooming → Planning → Development → QA → Rebase order;
+  new schema-v2 snapshots use Rebase before QA.
 
-## Changed files
+## Changed files in this review
 
+- `README.md`
+- `internal/e2e/phase3_cli_e2e_test.go`
+- `internal/orchestrator/execution.go`
 - `internal/orchestrator/execution_test.go`
-- `cmd/gg/production_pipeline_regression_test.go`
 - `.gg/development.md`
 
 ## Verification
 
-- `$ go test ./internal/pipeline ./internal/orchestrator ./internal/cli ./internal/tui ./cmd/gg` — PASS.
-- `$ go test -race ./internal/pipeline ./internal/orchestrator ./internal/cli ./internal/tui ./cmd/gg` — PASS.
-- `$ go test ./cmd/gg -run TestProductionCompositionRunsFakeAgentsGitStateAndPersistsAllEvents -count=1` — PASS.
-- `$ git diff --check` — PASS.
-- `$ go test ./...` — FAILS only in two documented macOS baseline tests outside this phase: `internal/e2e.TestRealCLIConfigureCreatesProjectAndDisposableWorktree` cannot find its expected temporary-root state file, and `internal/git.TestWorktreeIntegrationCreateReuseLookupAndRemove` compares `/var` with Git’s `/private/var` path. All phase-relevant packages and the production integration test pass.
+- `go test ./internal/pipeline ./internal/orchestrator ./internal/cli ./internal/tui ./cmd/gg` — PASS.
+- `go test -race ./internal/pipeline ./internal/orchestrator ./internal/cli ./internal/tui ./cmd/gg` — PASS.
+- `go test ./internal/e2e -run TestRealCLIFakePipelineOrdersAgentsAndCopiesCanonicalProof -count=1` — PASS on this macOS environment; the network-denied Linux-only path is skipped locally.
+- `go test ./...` — FAILS only in the two pre-existing macOS baseline tests documented in the approved plan: `internal/e2e.TestRealCLIConfigureCreatesProjectAndDisposableWorktree` (temporary-root state lookup) and `internal/git.TestWorktreeIntegrationCreateReuseLookupAndRemove` (`/var` versus `/private/var` path spelling). No Phase 2 package failed.
+- `git diff --check` — PASS.
 
 ## Handoff risks
 
-- New snapshots execute Rebase before QA; persisted schema-v1 snapshots retain their exact historical QA-before-Rebase order.
-- QA feedback retries for new snapshots run Development fixes, Rebase, then QA; legacy snapshots retain QA-before-Rebase retry behavior.
+- No actionable Phase 2 defects remain.
 - No manual or external verification is required for this phase.
+- The full-suite macOS baseline failures remain outside this phase and were not
+  changed.

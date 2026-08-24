@@ -762,6 +762,51 @@ func TestExecuteQAFailThenFixDevelopmentThenPass(t *testing.T) {
 	}
 }
 
+type stagedConflictReader struct {
+	checks        int
+	firstConflict int
+}
+
+func (r *stagedConflictReader) HasUnresolvedConflicts(context.Context, string) (bool, error) {
+	r.checks++
+	return r.checks >= r.firstConflict, nil
+}
+
+func TestQAFixRebaseFailurePersistsConflictRouting(t *testing.T) {
+	runner := &feedbackRunner{
+		statuses: []state.LifecycleStatus{
+			state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFinished,
+			state.StatusFinished, state.StatusFailed,
+			state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFailed,
+		},
+		artifacts: []string{"rebase-conflict.md"},
+	}
+	reader := &stagedConflictReader{firstConflict: 2}
+	events := &fakeEvents{}
+	outcomes, err := orchestrator.NewProductionController(
+		runner,
+		&fakeState{},
+		reader,
+		orchestrator.WithEventSink(events),
+		orchestrator.WithPromptBuilder(fakePrompt{}),
+	).Execute(context.Background(), request(t, pipelineWithQA(t)))
+	if err == nil {
+		t.Fatal("QA feedback Rebase failure unexpectedly succeeded")
+	}
+	if len(outcomes) != 10 || outcomes[len(outcomes)-1].Result.Phase != pipeline.PhaseRebase {
+		t.Fatalf("outcomes = %#v, want terminal feedback Rebase", outcomes)
+	}
+	if !outcomes[len(outcomes)-1].ConflictResolutionNeeded {
+		t.Fatal("feedback Rebase failure did not retain conflict-routing evidence")
+	}
+	for _, event := range events.types {
+		if event == orchestrator.EventConflictDetected {
+			return
+		}
+	}
+	t.Fatalf("events = %v, want conflict detection", events.types)
+}
+
 type retryPRService struct{}
 
 func (retryPRService) Create(context.Context, pr.Request) (pr.Result, error) {

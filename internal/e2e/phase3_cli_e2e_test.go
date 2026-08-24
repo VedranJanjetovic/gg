@@ -216,7 +216,7 @@ func TestRealCLIFakePipelineOrdersAgentsAndCopiesCanonicalProof(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"acceptance_criteria", "development", "development", "development", "qa", "development", "development", "development", "qa", "rebase", "test_document"}
+	want := []string{"acceptance_criteria", "development", "development", "development", "rebase", "qa", "development", "development", "development", "rebase", "qa", "test_document"}
 	if got := phase3Phases(t, data); !equalStrings(got, want) {
 		t.Fatalf("phase order = %v, want %v\nlog=%s", got, want, data)
 	}

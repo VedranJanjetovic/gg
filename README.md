@@ -277,9 +277,9 @@ A bare `gg` creates a project and attaches to it. `gg <project>` attaches to an 
 
 ### Pipeline phases and QA feedback
 
-The executable pipeline uses the canonical contracts from the repository's root `skills/` directory rather than CLI-specific copies. The default order is acceptance criteria, grooming, planning, development (implementation/testing/review subphases), QA, rebase, test/document, build checker, PR, and CI; PR and CI can be disabled by effective configuration. The persisted phase history and attached view show the actual enabled phases and development subphases.
+The executable pipeline uses the canonical contracts from the repository's root `skills/` directory rather than CLI-specific copies. The default order is acceptance criteria, grooming, planning, development (implementation/testing/review subphases), rebase, QA, test/document, build checker, PR, and CI; PR and CI can be disabled by effective configuration. The persisted phase history and attached view show the actual enabled phases and development subphases.
 
-QA must produce a structured `PROOF.md` validation artifact. A pass advances to the next phase. QA feedback routes the workflow back through Development and then QA again, up to `--max-iterations` total QA attempts (default `3`). Exhaustion leaves the project failed with the attempt count persisted. For example:
+QA must produce a structured `PROOF.md` validation artifact. A pass advances to the next phase. QA feedback routes the workflow back through Development, Rebase, and then QA again, up to `--max-iterations` total QA attempts (default `3`). Exhaustion leaves the project failed with the attempt count persisted. For example:
 
 ```bash
 gg run dashboard --max-iterations 2 --disable-pr --disable-ci
