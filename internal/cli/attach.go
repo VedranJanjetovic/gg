@@ -23,6 +23,7 @@ type ProjectAttachment struct {
 	Start         func(context.Context) error
 	Stop          func(context.Context) error
 	Resume        func(context.Context) error
+	Configure     func(context.Context) error
 	Skip          func(context.Context) error
 	SkipAvailable bool
 	SkipLabel     string
@@ -218,6 +219,11 @@ func (a *App) attachProject(ctx context.Context, selector string, start func(con
 				return a.skipFailedExecution(skipCtx, selector, skipper)
 			}
 		}
+		if project.Status == state.StatusFailed || project.Status == state.StatusStopped {
+			attachment.Configure = func(configureCtx context.Context) error {
+				return a.configureExistingProject(configureCtx, selector, project)
+			}
+		}
 		if a.launchActions != nil {
 			attachment.OpenCode = func(openCtx context.Context) error {
 				return a.launchActions.OpenCode(openCtx, project)
@@ -242,6 +248,17 @@ func (a *App) attachProject(ctx context.Context, selector string, start func(con
 			// terminal; its outcome is shown as the next session's notice.
 			// A feedback rerun starts only via g (interview) then r.
 			carryNotice = a.runInteractiveSession(ctx, service, &project)
+			start = nil
+			continue
+		}
+		if errors.Is(err, tui.ErrConfigureRequested) {
+			if attachment.Configure == nil {
+				return errors.New("project configuration editing is not configured")
+			}
+			if configureErr := attachment.Configure(ctx); configureErr != nil {
+				return fmt.Errorf("configure project %q: %w", selector, configureErr)
+			}
+			carryNotice = "Configuration saved. Press r to resume the project."
 			start = nil
 			continue
 		}

@@ -2,6 +2,7 @@
 package state
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -64,6 +65,8 @@ var ErrProjectExists = errors.New("project already exists")
 var ErrRunNotActive = errors.New("project run is not active")
 var ErrStaleStopRequest = errors.New("stop request does not match the active run")
 var ErrStopRequested = errors.New("project run stop requested")
+
+var ErrPipelineSnapshotChanged = errors.New("project pipeline snapshot changed")
 
 // RecoverIfStale converts a running project into a resumable stopped project
 // when its owning process is no longer alive. Projects owned by a live
@@ -365,6 +368,41 @@ func (s *LifecycleService) Save(ctx context.Context, state ProjectState) error {
 		return s.store.Save(locked, state)
 	})
 }
+
+// CompareAndUpdateProjectSnapshot is the atomic form used when a snapshot
+// edit also changes related durable metadata, such as a phase warning.
+func (s *LifecycleService) CompareAndUpdateProjectSnapshot(ctx context.Context, slug string, expected PipelineConfigSnapshot, update func(*ProjectState) error) (ProjectState, error) {
+	if err := checkContext(ctx); err != nil {
+		return ProjectState{}, err
+	}
+	if s.store == nil || s.locker == nil {
+		return ProjectState{}, errors.New("lifecycle service requires store and locker")
+	}
+	if update == nil {
+		return ProjectState{}, errors.New("project snapshot update is required")
+	}
+	var result ProjectState
+	err := s.withProjectLock(ctx, slug, func(locked context.Context) error {
+		project, err := s.store.Load(locked, slug)
+		if err != nil {
+			return err
+		}
+		if project.PipelineConfig.SchemaVersion != expected.SchemaVersion || !bytes.Equal(project.PipelineConfig.Data, expected.Data) {
+			return ErrPipelineSnapshotChanged
+		}
+		if err := update(&project); err != nil {
+			return err
+		}
+		project.UpdatedAt = s.clock.Now()
+		if err := s.store.Save(locked, project); err != nil {
+			return err
+		}
+		result = project
+		return nil
+	})
+	return result, err
+}
+
 func (s *LifecycleService) List(ctx context.Context) ([]ProjectState, error) {
 	if s.store == nil {
 		return nil, errors.New("lifecycle service requires store")

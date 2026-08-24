@@ -117,6 +117,13 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				return m, actionCmd(m.ctx, actionResume, m.actions.Resume)
 			}
 			m.notice = keyNotice("resume", m.actions.Resume != nil, !resumable, "the project is not stopped or failed")
+		case "e":
+			editable := m.project.Status == state.StatusFailed || m.project.Status == state.StatusStopped
+			if editable && !m.actionPending() && m.actions.Configure != nil {
+				m.configureRequested = true
+				return m, tea.Quit
+			}
+			m.notice = keyNotice("configure", m.actions.Configure != nil, !editable, "the project is not stopped or failed")
 		case "c":
 			// Launches only conflict with other launches: a running
 			// pipeline (start/resume pending) must not block them.

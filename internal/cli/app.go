@@ -835,6 +835,10 @@ func (a *App) resume(ctx context.Context, stdout io.Writer, args []string) error
 		if loadErr != nil {
 			return fmt.Errorf("load project %q: %w", selector, loadErr)
 		}
+		project, loadErr = a.repairCurrentPhaseConfiguration(ctx, selector, project)
+		if loadErr != nil {
+			return fmt.Errorf("repair project %q configuration: %w", selector, loadErr)
+		}
 		plan, subphases, maxAttempts, planErr := pipeline.RestoreExecution(project.PipelineConfig)
 		gitOps := snapshotGitOps(project.PipelineConfig)
 		if planErr != nil {

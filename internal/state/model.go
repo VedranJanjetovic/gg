@@ -210,9 +210,13 @@ type ProjectState struct {
 	// repository: they execute directly in that folder (no worktree, no
 	// branch) and every git-dependent behavior — commit enforcement, proof
 	// uncommitted checks, and the rebase/PR/CI phases — is skipped.
-	GitDisabled   bool          `json:"gitDisabled,omitempty"`
-	PhaseHistory  []PhaseRecord `json:"phaseHistory,omitempty"`
-	ArtifactPaths []string      `json:"artifactPaths,omitempty"`
+	GitDisabled  bool          `json:"gitDisabled,omitempty"`
+	PhaseHistory []PhaseRecord `json:"phaseHistory,omitempty"`
+	// PhaseConfigurationWarnings are sticky, phase-scoped notices explaining a
+	// legacy tuple repair. They are removed only when that phase is explicitly
+	// edited by the user.
+	PhaseConfigurationWarnings map[string]string `json:"phaseConfigurationWarnings,omitempty"`
+	ArtifactPaths              []string          `json:"artifactPaths,omitempty"`
 	// DeferredChecks is the normalized project handoff for later PR disclosure.
 	DeferredChecks []proof.DeferredCheck `json:"deferredChecks,omitempty"`
 	// PullRequestURL is the created PR identity used by later GitOps phases.
@@ -283,6 +287,12 @@ func NewProjectState(input ProjectState) (ProjectState, error) {
 	state := input
 	state.AcceptanceCriteria = append([]string(nil), input.AcceptanceCriteria...)
 	state.PhaseHistory = append([]PhaseRecord(nil), input.PhaseHistory...)
+	if input.PhaseConfigurationWarnings != nil {
+		state.PhaseConfigurationWarnings = make(map[string]string, len(input.PhaseConfigurationWarnings))
+		for phase, warning := range input.PhaseConfigurationWarnings {
+			state.PhaseConfigurationWarnings[phase] = warning
+		}
+	}
 	state.ArtifactPaths = append([]string(nil), input.ArtifactPaths...)
 	state.DeferredChecks = append([]proof.DeferredCheck(nil), input.DeferredChecks...)
 	state.QAFeedbackArtifactPaths = append([]string(nil), input.QAFeedbackArtifactPaths...)
@@ -421,6 +431,11 @@ func (state ProjectState) Validate() error {
 					return fmt.Errorf("invalid deferred check %d in phase outcome %d: %w", j+1, i, err)
 				}
 			}
+		}
+	}
+	for phase, warning := range state.PhaseConfigurationWarnings {
+		if strings.TrimSpace(phase) == "" || strings.TrimSpace(warning) == "" {
+			return fmt.Errorf("invalid phase configuration warning for %q", phase)
 		}
 	}
 	for i, check := range state.DeferredChecks {

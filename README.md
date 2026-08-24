@@ -273,7 +273,7 @@ gg prune --yes      # non-interactive prune confirmation
 gg <project>        # attach to an existing project
 ```
 
-A bare `gg` creates a project and attaches to it. `gg <project>` attaches to an existing project. The attached view exposes the persisted phase/subphase state; `s` stops a running pipeline, `r` resumes a stopped pipeline, and `q` exits when no lifecycle action owns the foreground. In a non-TTY, startup runs synchronously and prints a deterministic status snapshot instead of opening the interactive UI. `run`, `resume`, and `stop` remain available for scripts.
+A bare `gg` creates a project and attaches to it. `gg <project>` attaches to an existing project. The attached view exposes the persisted phase/subphase state; `s` stops a running pipeline, `r` resumes a stopped pipeline, `e` opens project configuration for a failed or stopped project, and `q` exits when no lifecycle action owns the foreground. Saving with `e` changes only future execution tuples and returns to the same screen; it never resumes automatically, so press `r` explicitly. A repaired legacy tuple is retried by that same `r` action and leaves a durable warning on the affected phase. In a non-TTY, startup runs synchronously and prints a deterministic status snapshot instead of opening the interactive UI. `run`, `resume`, and `stop` remain available for scripts.
 
 `list` hides terminal projects unless `--all` is supplied. `prune` only considers `finished` and `terminated` projects, verifies the recorded worktree is the expected clean attached worktree, removes that worktree, and deletes state only after cleanup succeeds. It intentionally retains the `gg/<slug>` branch. Active and stopped projects are preserved.
 
@@ -289,24 +289,24 @@ QA must produce a structured `PROOF.md` validation artifact. A pass advances to 
 gg run dashboard --max-iterations 2 --disable-pr --disable-ci
 ```
 
-Run-only overrides are not persisted. Use `--agent`, `--model`, `--effort`, `--phase-agent phase=agent`, `--phase-model phase=model`, `--phase-effort phase=effort`, `--enable-phase phase`, `--disable-phase phase`, `--parent-branch branch`, and `--base-ref ref` as needed. `linting` is accepted as an alias for `build_checker`.
+Run-only operational overrides are not persisted. Use `--parent-branch branch`, `--base-ref ref`, `--enable-pr`, `--disable-pr`, `--enable-ci`, `--disable-ci`, and `--max-iterations`. Agent/model/effort and phase-structure selection is done in the attached project picker; the removed configuration flags are intentionally unknown flags.
 
 ### Per-project configuration
 
-Configuration is layered in this order: built-in defaults, global defaults, project overrides, then one-run overrides. Project configuration is stored at `<configured-root>/.gg/config.yaml`; global configuration is stored at `$XDG_CONFIG_HOME/gg/config.yaml` (or the platform's user config location used by the Go config store). The project file supports:
+Folder configuration is a complete, self-contained future-project template. Project configuration is stored at `<configured-root>/.gg/config.yaml`; global configuration is stored at `$XDG_CONFIG_HOME/gg/config.yaml` (or the platform's user config location used by the Go config store). A complete folder file stores the full `agent`/`model`/`effort` tuple and provenance for the default and every phase, plus the enabled structure. Sparse legacy files are never silently rewritten: `gg run` opens `gg configure` to save a complete replacement before project selection continues.
 
 ```yaml
-version: 1
+version: 2
 defaults:
   agent: claude
   model: claude-model
   effort: medium
-phase_overrides:
-  qa:
+phases:
+  - phase: acceptance_criteria
     enabled: true
-    agent: codex
-    model: gpt-5
-    effort: high
+    required: true
+    settings: {agent: claude, model: claude-model, effort: medium, provenance: catalog}
+  # ...one complete settings tuple per canonical phase...
 gitops:
   parent_branch: main
   base_ref: HEAD
@@ -314,11 +314,11 @@ gitops:
   enable_ci: true
 ```
 
-Phases `grooming`, `planning`, `qa`, `build_checker`, `pr`, and `ci` can be enabled/disabled (grooming per run only); `acceptance_criteria`, `development`, `rebase`, and `test_document` always run. Every phase — fixed ones included — accepts per-phase `agent`, `model`, and `effort` overrides. Grooming is enabled by default and its toggle is not offered by the interactive `gg configure` wizard (disable it per run with `--disable-phase grooming` or per project in `config.yaml`), but it still accepts per-phase agent/model/effort overrides.
+`acceptance_criteria`, `grooming`, `planning`, `development`, `rebase`, and `test_document` are required. `qa`, `build_checker`, `pr`, and `ci` are optional. Every phase — fixed ones included — stores its own complete tuple; changing a default never changes phase tuples. Catalog-selected models are checked against their selected agent. A model typed manually is stored as manual and is not compatibility-validated; an unknown model then fails normally when its agent CLI runs.
 
-To change models for a single project without touching any config file, pass run overrides when creating it: `gg run --phase-model qa=claude-opus-4-8 --phase-agent pr=codex --phase-effort development=high --enable-phase ci --disable-phase grooming "description"`. Run overrides apply to that invocation only and are baked into the created project's pipeline; `--agent`, `--model`, and `--effort` override the defaults for every phase of that run. Per-folder defaults for every future project live in the wizard (`gg configure`) or directly in `phase_overrides` in `<configured-root>/.gg/config.yaml`.
+When `gg run` creates a project, the attached TUI first offers `Inherit folder configuration` or `Pick configuration for this project`. Pick edits a complete isolated snapshot and never writes back to the folder or affects another project. The snapshot's phase structure is immutable after creation. For a failed or stopped project, press `e configure` to edit the project default and every phase tuple with the same catalog/manual picker; phase enablement, ordering, and required state are locked. Cancel leaves state unchanged, and saving returns to the parked project screen.
 
-On a terminal, `gg configure` runs a single full-screen wizard: agent → model → effort → pipeline phases. The model screen lists the known models for the selected agent and ends with an `Enter model name manually…` option for any model not in the list (for example a newly released one). The phase screen shows the whole canonical pipeline in execution order with each phase's effective agent/model/effort. `Space` toggles the removable phases on/off; `Enter` on any phase row (fixed ones included) opens the same agent → model → effort pickers scoped to that phase and stages a per-phase override in the folder's `config.yaml`; `Enter` on the final `Save configuration` row writes everything. Only the fields that differ from the global defaults are pinned, so re-picking the default values makes the phase inherit again. Toggled phases are persisted as project `enabled` overrides, and untouched phases keep their existing configuration. Every screen is prefilled with the current values, so pressing Enter through the wizard keeps the configuration unchanged. Nothing is written until the wizard completes, and staged values are validated before saving. Without a terminal (piped input), configure falls back to equivalent line-oriented prompts, where per-phase agent/model/effort overrides can also be set.
+On a terminal, `gg configure` runs a single full-screen wizard: agent → model → effort → pipeline phases. The model screen lists known models for the selected agent and ends with an `Enter model name manually…` option. The phase screen shows the complete canonical pipeline; required rows are locked, while optional rows can be toggled. `Enter` on any phase row opens the tuple editor and `Enter` on the final save row writes the complete folder template. Nothing is written until the wizard completes and staged values are validated. Folder reconfiguration may be repeated and affects only future projects.
 
 Creating a project (`gg run` with no selector) opens a full-screen description editor in the same TUI style as the configure wizard: typed text is echoed live, `Enter` starts a new line, and `Enter` on an empty line (double Enter) opens a confirmation screen showing the inferred project name and the full description before anything is created (`Enter` creates the project, `Esc` returns to editing). Without a terminal (piped input), the flow falls back to the line prompt `Describe the project (finish with an empty line):`. The description becomes the project goal and seeds the initial acceptance criterion; the pipeline's Acceptance criteria phase derives the formal criteria from it.
 

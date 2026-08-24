@@ -117,12 +117,20 @@ func (m Model) render(interactive bool) string {
 				fmt.Fprintf(&output, "%s stop  %s quit\n", m.styles.key.Render("s"), m.styles.key.Render("q"))
 			case state.StatusStopped:
 				output.WriteString("Type r to continue pipeline\n")
-				fmt.Fprintf(&output, "%s quit\n", m.styles.key.Render("q"))
-			case state.StatusFailed:
-				if m.actions.Skip != nil && skipAvailable {
-					fmt.Fprintf(&output, "%s skip  %s resume  %s quit\n", m.styles.key.Render("s"), m.styles.key.Render("r"), m.styles.key.Render("q"))
+				if m.actions.Configure != nil {
+					fmt.Fprintf(&output, "%s configure  %s quit\n", m.styles.key.Render("e"), m.styles.key.Render("q"))
 				} else {
-					fmt.Fprintf(&output, "%s resume  %s quit\n", m.styles.key.Render("r"), m.styles.key.Render("q"))
+					fmt.Fprintf(&output, "%s quit\n", m.styles.key.Render("q"))
+				}
+			case state.StatusFailed:
+				configure := ""
+				if m.actions.Configure != nil {
+					configure = fmt.Sprintf("  %s configure", m.styles.key.Render("e"))
+				}
+				if m.actions.Skip != nil && skipAvailable {
+					fmt.Fprintf(&output, "%s skip  %s resume%s  %s quit\n", m.styles.key.Render("s"), m.styles.key.Render("r"), configure, m.styles.key.Render("q"))
+				} else {
+					fmt.Fprintf(&output, "%s resume%s  %s quit\n", m.styles.key.Render("r"), configure, m.styles.key.Render("q"))
 				}
 			default:
 				fmt.Fprintf(&output, "%s quit\n", m.styles.key.Render("q"))
@@ -133,6 +141,9 @@ func (m Model) render(interactive bool) string {
 					keys += "  s stop"
 				} else if m.project.Status == state.StatusFailed && skipAvailable {
 					keys += "  s skip"
+				}
+				if (m.project.Status == state.StatusFailed || m.project.Status == state.StatusStopped) && m.actions.Configure != nil {
+					keys += "  e configure"
 				}
 				output.WriteString(keys + "  q quit\n")
 			} else {
@@ -317,6 +328,9 @@ func (m Model) interviewLine() string {
 
 func (m Model) phaseLine(phase PhaseView, interactive bool) string {
 	name := phase.Name
+	if phase.Warning != "" {
+		name += " (" + phase.Warning + ")"
+	}
 	if phase.SkipCount > 0 {
 		suffix := " skipped execution"
 		if phase.SkipCount != 1 {

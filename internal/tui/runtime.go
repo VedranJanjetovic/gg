@@ -21,6 +21,11 @@ var ErrGroomingRequested = errors.New("grooming interview requested")
 // chat; the caller runs it and re-attaches.
 var ErrInteractiveRequested = errors.New("project interactive session requested")
 
+// ErrConfigureRequested reports that the user pressed e to edit a parked
+// project's execution tuples. The caller must release the progress terminal
+// before opening the configuration picker.
+var ErrConfigureRequested = errors.New("project configuration requested")
+
 // Run attaches to a project. When either stream is not a terminal it performs
 // a deterministic one-shot render instead of initializing Bubble Tea.
 func Run(ctx context.Context, project state.ProjectState, loader Loader, actions Actions, input io.Reader, output io.Writer, options ...Option) error {
@@ -65,6 +70,9 @@ func Run(ctx context.Context, project state.ProjectState, loader Loader, actions
 		}
 		if finalModel.interactiveRequested {
 			return ErrInteractiveRequested
+		}
+		if finalModel.configureRequested {
+			return ErrConfigureRequested
 		}
 		if finalModel.LastError() != nil {
 			return finalModel.LastError()

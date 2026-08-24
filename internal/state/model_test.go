@@ -61,6 +61,23 @@ func TestNewProjectStateValidation(t *testing.T) {
 	}
 }
 
+func TestProjectConfigurationWarningsCloneAndValidate(t *testing.T) {
+	project := validProjectState()
+	project.PhaseConfigurationWarnings = map[string]string{"test_document": "invalid saved configuration; using project default: codex / gpt-5.6-sol / high"}
+	cloned, err := NewProjectState(project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cloned.PhaseConfigurationWarnings["test_document"] = "changed"
+	if project.PhaseConfigurationWarnings["test_document"] == "changed" {
+		t.Fatal("warning map shares caller-owned storage")
+	}
+	project.PhaseConfigurationWarnings["test_document"] = ""
+	if _, err := NewProjectState(project); err == nil {
+		t.Fatal("empty warning was accepted")
+	}
+}
+
 func TestLifecycleStatusCoverage(t *testing.T) {
 	statuses := []LifecycleStatus{StatusPending, StatusRunning, StatusStopped, StatusFailed, StatusFinished, StatusTerminated}
 	for _, status := range statuses {

@@ -28,6 +28,7 @@ type Actions struct {
 	Start         func(context.Context) error
 	Stop          func(context.Context) error
 	Resume        func(context.Context) error
+	Configure     func(context.Context) error
 	Skip          func(context.Context) error
 	SkipAvailable bool
 	SkipLabel     string
@@ -56,6 +57,7 @@ type PhaseView struct {
 	Name      string
 	Status    PhaseStatus
 	SkipCount int
+	Warning   string
 	Subphases []PhaseView
 }
 
@@ -177,6 +179,7 @@ type Model struct {
 	groomingPending      bool
 	groomingRequested    bool
 	interactiveRequested bool
+	configureRequested   bool
 	showTokenDetail      bool
 	startPending         bool
 	stopPending          bool
@@ -325,12 +328,12 @@ func projectPhases(project state.ProjectState, definitions []phaseDefinition) []
 	phases := make([]PhaseView, 0, len(definitions))
 	for _, definition := range definitions {
 		phaseRecord := latest[phaseKey(string(definition.id), "")]
-		phase := PhaseView{ID: string(definition.id), Name: definition.name, Status: phaseStatus(phaseRecord), SkipCount: project.SkipCount(string(definition.id), "")}
+		phase := PhaseView{ID: string(definition.id), Name: definition.name, Status: phaseStatus(phaseRecord), SkipCount: project.SkipCount(string(definition.id), ""), Warning: project.PhaseConfigurationWarnings[string(definition.id)]}
 		for _, definition := range definition.subphases {
 			record := latest[phaseKey(string(pipeline.PhaseDevelopment), definition.id)]
 			phase.Subphases = append(phase.Subphases, PhaseView{
 				ID: definition.id, Name: definition.name,
-				Status: phaseStatus(record), SkipCount: project.SkipCount(string(pipeline.PhaseDevelopment), definition.id),
+				Status: phaseStatus(record), SkipCount: project.SkipCount(string(pipeline.PhaseDevelopment), definition.id), Warning: project.PhaseConfigurationWarnings[string(pipeline.PhaseDevelopment)+"/"+definition.id],
 			})
 		}
 		if len(phase.Subphases) != 0 {

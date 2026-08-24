@@ -332,6 +332,26 @@ func TestStartupOwnsForegroundWhilePollingStillEnablesStop(t *testing.T) {
 	}
 }
 
+func TestFailedProjectCanRequestConfigurationEditAndRetainsWarning(t *testing.T) {
+	project := testProject(testSnapshot(t), state.StatusFailed, string(pipeline.PhaseTestDocument), "", nil)
+	project.PhaseConfigurationWarnings = map[string]string{string(pipeline.PhaseTestDocument): "invalid saved configuration; using project default: codex / gpt-5.6-sol / high"}
+	model, err := NewModel(context.Background(), project, nil, Actions{Configure: func(context.Context) error { return nil }}, WithColor(false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(model.View(), "e configure") || !strings.Contains(model.View(), "invalid saved configuration") {
+		t.Fatalf("configuration affordance/warning missing:\n%s", model.View())
+	}
+	updated, command := model.Update(key('e'))
+	if command == nil {
+		t.Fatal("e did not detach for configuration editing")
+	}
+	final, ok := command().(tea.QuitMsg)
+	if !ok || !updated.(Model).configureRequested {
+		t.Fatalf("configuration request = %#v, command result = %#v", updated, final)
+	}
+}
+
 func TestStartupFailureRestoresQuitAndSurfacesError(t *testing.T) {
 	snapshot := testSnapshot(t)
 	pending := testProject(snapshot, state.StatusPending, "pipeline", "", nil)

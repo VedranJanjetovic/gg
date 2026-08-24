@@ -23,6 +23,7 @@ const PlanningContractVersion = 1
 
 type executionSnapshot struct {
 	SchemaVersion    int                           `json:"schemaVersion"`
+	LegacyOrder      bool                          `json:"legacyOrder,omitempty"`
 	PlanningContract int                           `json:"planningContractVersion,omitempty"`
 	Phases           []executionSnapshotPhase      `json:"phases"`
 	Subphases        DevelopmentSubphaseGeneration `json:"developmentSubphases"`
@@ -43,6 +44,132 @@ type executionSnapshotStructure struct {
 	Enabled  bool                 `json:"enabled"`
 	Required bool                 `json:"required"`
 	Settings config.AgentSettings `json:"settings"`
+}
+
+// ProjectPhaseConfiguration is the mutable part of a persisted project
+// snapshot. Pipeline structure is intentionally not represented as mutable
+// input here; callers can change only the complete tuple for an existing
+// phase.
+type ProjectPhaseConfiguration struct {
+	ID       PhaseID
+	Enabled  bool
+	Required bool
+	Settings config.AgentSettings
+}
+
+// ProjectExecutionConfiguration is the complete configuration carried by a
+// project snapshot. It is a defensive, transport-independent view used by
+// project editing and legacy repair.
+type ProjectExecutionConfiguration struct {
+	Default config.AgentSettings
+	Phases  []ProjectPhaseConfiguration
+}
+
+func (configuration ProjectExecutionConfiguration) Clone() ProjectExecutionConfiguration {
+	configuration.Phases = append([]ProjectPhaseConfiguration(nil), configuration.Phases...)
+	return configuration
+}
+
+// ReadProjectExecutionConfiguration reads a project snapshot without consulting
+// ambient configuration. Legacy execution snapshots are upgraded in memory so
+// an explicit edit or repair can persist them as a complete project snapshot.
+func ReadProjectExecutionConfiguration(snapshot state.PipelineConfigSnapshot) (ProjectExecutionConfiguration, error) {
+	persisted, err := decodeExecutionSnapshot(snapshot)
+	if err != nil {
+		return ProjectExecutionConfiguration{}, err
+	}
+	if persisted.SchemaVersion == projectExecutionSnapshotSchemaVersion && len(persisted.PhaseStructure) > 0 {
+		phases := make([]ProjectPhaseConfiguration, 0, len(persisted.PhaseStructure))
+		for _, phase := range persisted.PhaseStructure {
+			phases = append(phases, ProjectPhaseConfiguration{ID: phase.ID, Enabled: phase.Enabled, Required: phase.Required, Settings: phase.Settings})
+		}
+		return ProjectExecutionConfiguration{Default: persisted.ProjectDefault, Phases: phases}, nil
+	}
+
+	active := make(map[PhaseID]config.AgentSettings, len(persisted.Phases))
+	for _, phase := range persisted.Phases {
+		active[phase.ID] = phase.Settings
+	}
+	phaseOrder, _ := executionPhaseOrderForSnapshot(persisted)
+	phases := make([]ProjectPhaseConfiguration, 0, len(config.CompletePhaseOrder()))
+	var projectDefault config.AgentSettings
+	for _, id := range phaseOrder {
+		settings, enabled := active[id]
+		if enabled && projectDefault.Agent == "" {
+			projectDefault = settings
+		}
+		if !enabled {
+			settings = projectDefault
+		}
+		phases = append(phases, ProjectPhaseConfiguration{ID: id, Enabled: enabled, Required: !isOptionalPhase(id), Settings: settings})
+	}
+	if projectDefault.Agent == "" {
+		return ProjectExecutionConfiguration{}, errors.New("project execution snapshot has no complete phase settings")
+	}
+	return ProjectExecutionConfiguration{Default: projectDefault, Phases: phases}, nil
+}
+
+// UpdateProjectExecutionConfiguration replaces only tuple values in a
+// snapshot. The existing phase IDs, order, enabled state, and required state
+// are retained. Saving an edited legacy snapshot upgrades its representation
+// to the complete project snapshot schema.
+func UpdateProjectExecutionConfiguration(snapshot state.PipelineConfigSnapshot, configuration ProjectExecutionConfiguration) (state.PipelineConfigSnapshot, error) {
+	persisted, err := decodeExecutionSnapshot(snapshot)
+	if err != nil {
+		return state.PipelineConfigSnapshot{}, err
+	}
+	if err := config.ValidateAgentSettings(configuration.Default); err != nil {
+		return state.PipelineConfigSnapshot{}, fmt.Errorf("project default: %w", err)
+	}
+	if configuration.Default.Provenance == "" {
+		configuration.Default.Provenance = config.ModelProvenanceManual
+	}
+	if len(configuration.Phases) == 0 {
+		return state.PipelineConfigSnapshot{}, errors.New("project configuration has no phases")
+	}
+	legacyOrder := persisted.SchemaVersion == legacyExecutionSnapshotSchemaVersion || persisted.LegacyOrder
+	byID := make(map[PhaseID]ProjectPhaseConfiguration, len(configuration.Phases))
+	for _, phase := range configuration.Phases {
+		if _, exists := byID[phase.ID]; exists {
+			return state.PipelineConfigSnapshot{}, fmt.Errorf("project configuration repeats phase %q", phase.ID)
+		}
+		if phase.Settings.Provenance == "" {
+			phase.Settings.Provenance = config.ModelProvenanceManual
+		}
+		if err := config.ValidateAgentSettings(phase.Settings); err != nil {
+			return state.PipelineConfigSnapshot{}, fmt.Errorf("phase %q: %w", phase.ID, err)
+		}
+		byID[phase.ID] = phase
+	}
+	if persisted.SchemaVersion == projectExecutionSnapshotSchemaVersion && len(persisted.PhaseStructure) > 0 {
+		for index := range persisted.PhaseStructure {
+			phase := persisted.PhaseStructure[index]
+			updated, ok := byID[phase.ID]
+			if !ok {
+				return state.PipelineConfigSnapshot{}, fmt.Errorf("project configuration is missing phase %q", phase.ID)
+			}
+			persisted.PhaseStructure[index].Settings = updated.Settings
+		}
+	} else {
+		structure := make([]executionSnapshotStructure, 0, len(configuration.Phases))
+		for _, phase := range configuration.Phases {
+			structure = append(structure, executionSnapshotStructure{ID: phase.ID, Enabled: phase.Enabled, Required: phase.Required, Settings: phase.Settings})
+		}
+		persisted.PhaseStructure = structure
+	}
+	persisted.SchemaVersion = projectExecutionSnapshotSchemaVersion
+	persisted.LegacyOrder = legacyOrder
+	persisted.PlanningContract = PlanningContractVersion
+	persisted.ProjectDefault = configuration.Default
+	data, err := json.Marshal(persisted)
+	if err != nil {
+		return state.PipelineConfigSnapshot{}, fmt.Errorf("encode project execution configuration: %w", err)
+	}
+	result := state.PipelineConfigSnapshot{SchemaVersion: pipelineSnapshotWrapperVersion, Data: data}
+	if _, err := decodeExecutionSnapshot(result); err != nil {
+		return state.PipelineConfigSnapshot{}, err
+	}
+	return result, nil
 }
 
 // SnapshotProjectExecution persists the complete project configuration used
@@ -220,7 +347,7 @@ func RestoreResolvedConfiguration(snapshot state.PipelineConfigSnapshot) (config
 }
 
 func validateExecutionSnapshot(snapshot executionSnapshot) error {
-	phaseOrder, err := executionPhaseOrder(snapshot.SchemaVersion)
+	phaseOrder, err := executionPhaseOrderForSnapshot(snapshot)
 	if err != nil {
 		return fmt.Errorf("unsupported pipeline execution snapshot version %d", snapshot.SchemaVersion)
 	}
@@ -237,7 +364,7 @@ func validateExecutionSnapshot(snapshot executionSnapshot) error {
 		return errors.New("pipeline execution snapshot has no enabled phases")
 	}
 	if snapshot.SchemaVersion == projectExecutionSnapshotSchemaVersion {
-		if err := validateSnapshotStructure(snapshot.PhaseStructure); err != nil {
+		if err := validateSnapshotStructure(snapshot.PhaseStructure, phaseOrder); err != nil {
 			return err
 		}
 		if err := config.ValidateAgentSettings(snapshot.ProjectDefault); err != nil {
@@ -282,6 +409,13 @@ func validateExecutionSnapshot(snapshot executionSnapshot) error {
 		return errors.New("pipeline execution snapshot requires at least one Development subphase")
 	}
 	return nil
+}
+
+func executionPhaseOrderForSnapshot(snapshot executionSnapshot) ([]PhaseID, error) {
+	if snapshot.SchemaVersion == projectExecutionSnapshotSchemaVersion && snapshot.LegacyOrder {
+		return executionPhaseOrder(legacyExecutionSnapshotSchemaVersion)
+	}
+	return executionPhaseOrder(snapshot.SchemaVersion)
 }
 
 func decodeExecutionSnapshot(snapshot state.PipelineConfigSnapshot) (executionSnapshot, error) {
@@ -329,14 +463,17 @@ func executionPhaseOrder(version int) ([]PhaseID, error) {
 	}
 }
 
-func validateSnapshotStructure(phases []executionSnapshotStructure) error {
+func validateSnapshotStructure(phases []executionSnapshotStructure, order []PhaseID) error {
 	if len(phases) == 0 || len(phases) > len(config.CompletePhaseOrder()) {
 		return fmt.Errorf("project execution snapshot requires between one and %d phase structure entries", len(config.CompletePhaseOrder()))
 	}
 	seen := make(map[config.Phase]bool, len(phases))
 	for index, phase := range phases {
-		want := config.Phase(config.CompletePhaseOrder()[index])
-		if config.Phase(phase.ID) != want {
+		if index >= len(order) || phase.ID != order[index] {
+			want := ""
+			if index < len(order) {
+				want = string(order[index])
+			}
 			return fmt.Errorf("project execution snapshot phase structure %d is %q; expected %q", index, phase.ID, want)
 		}
 		if seen[config.Phase(phase.ID)] {

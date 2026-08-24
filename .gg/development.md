@@ -1,39 +1,37 @@
 ---
-gg_run_id: "gg-tool-generally-great-but-1787575707310868000/development/review/iteration-0"
+gg_run_id: "gg-tool-generally-great-but-1787575707310868000/development/implementation/iteration-0"
 gg_disposition: passed
 ---
 
-# Development review
+# Development
 
-## Phase 9: Isolated new-project configuration flow
+## Scope
 
-Reviewed and corrected Phase 9 integration defects:
+Implemented only Phase 10: Project editing, resume repair, and regression handoff.
 
-- Sparse folder configurations now always pass through an explicit configure/save migration gate, including stores using the compatibility `ConfigureStore` interface.
-- Older complete prefix-shaped folder structures can be inherited without adding newer phases; Pick still exposes the current canonical phase list.
-- Project snapshots preserve the inherited structure, reject missing required phases, and restore absent optional phases as disabled for current resolution.
-- Updated fixtures distinguish sparse configuration tests from complete new-project creation tests.
-- Added regression coverage for sparse migration and older-prefix snapshot fidelity.
+## Changes
 
-Changed files:
+- Added project-snapshot inspection and tuple-only mutation APIs. Edits preserve phase IDs, order, enabled/required state, GitOps settings, and unrelated execution settings; explicit edits upgrade legacy snapshots to the complete representation.
+- Added locked compare-and-update persistence for project snapshots and durable phase configuration warnings.
+- Added resume-time repair for the current failed catalog-selected cross-agent mismatch. Fallback selection is whole-tuple and ordered project default, folder default, then global default. Repair persists before retry and records the fallback warning.
+- Added attached-TUI `e configure` handoff for failed/stopped projects only. The existing picker edits the project default and phase tuples while keeping structure locked; cancel is a no-op and save never auto-resumes.
+- Rendered sticky configuration warnings on affected phase rows and preserved them across later execution history.
+- Updated README lifecycle/configuration documentation and added focused snapshot, state, TUI, and resume regression tests.
 
-- `internal/cli/project_config.go`
-- `internal/pipeline/snapshot.go`
-- `internal/cli/project_config_test.go`
-- `internal/pipeline/snapshot_phase9_test.go`
-- `internal/cli/configure_test.go`
-- `internal/cli/app_test.go`
-- `internal/cli/attach_test.go`
+## Generated subphases
+
+- Implementation: completed. Snapshot mutation, atomic state persistence, resume repair, TUI handoff, warning projection, documentation, and tests were implemented in the assigned worktree.
+- Testing: completed. Focused suites passed.
+- Review: completed. Diff was checked for formatting errors and the implementation remained within Phase 10 scope.
 
 ## Verification
 
-- `gofmt` on all changed Go files — passed.
+- `go test ./internal/config ./internal/pipeline ./internal/state ./internal/cli ./internal/tui ./internal/orchestrator ./cmd/gg` — passed.
+- `go test ./...` — Phase 10 packages passed; the known baseline `internal/e2e.TestRealCLIConfigureCreatesProjectAndDisposableWorktree` still fails on macOS because `/private/var/...` is reported while the fixture expects `/var/...`.
+- `go vet ./...` — unavailable as a clean gate under the repository’s Go 1.22 module: existing tests use `testing.Context` and `testing.Chdir`, which this toolchain reports as requiring Go 1.24.
 - `git diff --check` — passed.
-- `go test ./internal/config ./internal/pipeline ./internal/state ./internal/cli ./internal/tui ./cmd/gg` — passed.
-- `go test -race ./internal/cli ./internal/pipeline ./internal/tui` — passed.
-- `go test ./...` — all packages passed except the documented macOS baseline failure in `internal/e2e.TestRealCLIConfigureCreatesProjectAndDisposableWorktree`, where `/private/var/...` and `/var/...` are equivalent temporary-path spellings.
 
 ## Handoff risks
 
-- Manual terminal smoke testing of the Inherit/Pick picker remains optional; deterministic chooser/picker coverage passes.
-- The full-suite path-spelling failure is environment-specific baseline evidence recorded in `.gg/plan.md`, not actionable Phase 9 work.
+- The existing macOS path-normalization E2E failure and Go-version vet diagnostics are unrelated to Phase 10 changes and remain for downstream QA/review.
+- No remote-only verification was required. Optional human verification is limited to the live attached-TUI `e configure` terminal handoff and warning presentation.
