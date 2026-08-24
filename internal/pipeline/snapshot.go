@@ -101,7 +101,7 @@ func ReadProjectExecutionConfiguration(snapshot state.PipelineConfigSnapshot) (P
 		if !enabled {
 			settings = projectDefault
 		}
-		phases = append(phases, ProjectPhaseConfiguration{ID: id, Enabled: enabled, Required: !isOptionalPhase(id), Settings: settings})
+		phases = append(phases, ProjectPhaseConfiguration{ID: id, Enabled: enabled, Required: containsConfigPhase(config.RequiredPhases(), config.Phase(id)), Settings: settings})
 	}
 	if projectDefault.Agent == "" {
 		return ProjectExecutionConfiguration{}, errors.New("project execution snapshot has no complete phase settings")
@@ -118,6 +118,10 @@ func UpdateProjectExecutionConfiguration(snapshot state.PipelineConfigSnapshot, 
 	if err != nil {
 		return state.PipelineConfigSnapshot{}, err
 	}
+	original, err := ReadProjectExecutionConfiguration(snapshot)
+	if err != nil {
+		return state.PipelineConfigSnapshot{}, err
+	}
 	if err := config.ValidateAgentSettings(configuration.Default); err != nil {
 		return state.PipelineConfigSnapshot{}, fmt.Errorf("project default: %w", err)
 	}
@@ -127,9 +131,16 @@ func UpdateProjectExecutionConfiguration(snapshot state.PipelineConfigSnapshot, 
 	if len(configuration.Phases) == 0 {
 		return state.PipelineConfigSnapshot{}, errors.New("project configuration has no phases")
 	}
+	if len(configuration.Phases) != len(original.Phases) {
+		return state.PipelineConfigSnapshot{}, errors.New("project configuration cannot change phase structure")
+	}
 	legacyOrder := persisted.SchemaVersion == legacyExecutionSnapshotSchemaVersion || persisted.LegacyOrder
 	byID := make(map[PhaseID]ProjectPhaseConfiguration, len(configuration.Phases))
-	for _, phase := range configuration.Phases {
+	for index, phase := range configuration.Phases {
+		before := original.Phases[index]
+		if phase.ID != before.ID || phase.Enabled != before.Enabled || phase.Required != before.Required {
+			return state.PipelineConfigSnapshot{}, fmt.Errorf("project configuration cannot change phase structure at %q", phase.ID)
+		}
 		if _, exists := byID[phase.ID]; exists {
 			return state.PipelineConfigSnapshot{}, fmt.Errorf("project configuration repeats phase %q", phase.ID)
 		}
@@ -151,11 +162,17 @@ func UpdateProjectExecutionConfiguration(snapshot state.PipelineConfigSnapshot, 
 			persisted.PhaseStructure[index].Settings = updated.Settings
 		}
 	} else {
-		structure := make([]executionSnapshotStructure, 0, len(configuration.Phases))
-		for _, phase := range configuration.Phases {
-			structure = append(structure, executionSnapshotStructure{ID: phase.ID, Enabled: phase.Enabled, Required: phase.Required, Settings: phase.Settings})
+		structure := make([]executionSnapshotStructure, 0, len(original.Phases))
+		for _, phase := range original.Phases {
+			updated := byID[phase.ID]
+			structure = append(structure, executionSnapshotStructure{ID: phase.ID, Enabled: phase.Enabled, Required: phase.Required, Settings: updated.Settings})
 		}
 		persisted.PhaseStructure = structure
+	}
+	for index := range persisted.Phases {
+		if updated, ok := byID[persisted.Phases[index].ID]; ok {
+			persisted.Phases[index].Settings = updated.Settings
+		}
 	}
 	persisted.SchemaVersion = projectExecutionSnapshotSchemaVersion
 	persisted.LegacyOrder = legacyOrder

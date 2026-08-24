@@ -256,6 +256,11 @@ func (a *App) attachProject(ctx context.Context, selector string, start func(con
 				return errors.New("project configuration editing is not configured")
 			}
 			if configureErr := attachment.Configure(ctx); configureErr != nil {
+				if errors.Is(configureErr, errProjectConfigurationCancelled) {
+					carryNotice = "Configuration unchanged."
+					start = nil
+					continue
+				}
 				return fmt.Errorf("configure project %q: %w", selector, configureErr)
 			}
 			carryNotice = "Configuration saved. Press r to resume the project."

@@ -16,6 +16,8 @@ type projectSnapshotEditor interface {
 	CompareAndUpdateProjectSnapshot(context.Context, string, state.PipelineConfigSnapshot, func(*state.ProjectState) error) (state.ProjectState, error)
 }
 
+var errProjectConfigurationCancelled = errors.New("project configuration edit cancelled")
+
 // configureExistingProject edits only the complete tuples in the immutable
 // project snapshot. The picker runs after the progress TUI has released the
 // terminal, and cancellation is deliberately a no-op.
@@ -49,7 +51,7 @@ func (a *App) configureExistingProject(ctx context.Context, selector string, _ s
 	}
 	picked, err := picker(ctx, catalog, wizardDefaultsFromExecution(configuration), a.input, a.output.Stdout)
 	if errors.Is(err, tui.ErrPickerCancelled) {
-		return nil
+		return errProjectConfigurationCancelled
 	}
 	if err != nil {
 		return err
@@ -228,11 +230,13 @@ type repairFallback struct {
 
 func (a *App) repairFallbacks(ctx context.Context, projectDefault config.AgentSettings) ([]repairFallback, error) {
 	result := []repairFallback{{source: "project default", settings: projectDefault}}
-	root, err := a.root.ConfiguredRoot(ctx)
-	if err == nil && a.store != nil {
-		if folder, loadErr := a.store.LoadProject(root); loadErr == nil {
-			if settings, ok := completeOverrideSettings(folder.Defaults); ok {
-				result = append(result, repairFallback{source: "folder default", settings: settings})
+	if a.root != nil && a.store != nil {
+		root, err := a.root.ConfiguredRoot(ctx)
+		if err == nil {
+			if folder, loadErr := a.store.LoadProject(root); loadErr == nil && config.ClassifyProjectConfig(folder) == config.ProjectConfigComplete {
+				if settings, ok := completeOverrideSettings(folder.Defaults); ok {
+					result = append(result, repairFallback{source: "folder default", settings: settings})
+				}
 			}
 		}
 	}
@@ -254,6 +258,9 @@ func completeOverrideSettings(settings config.AgentSettingsOverride) (config.Age
 	if provenance == "" {
 		provenance = config.ModelProvenanceManual
 	}
+	if !validModelProvenance(provenance) {
+		return config.AgentSettings{}, false
+	}
 	return config.AgentSettings{Agent: settings.Agent, Model: settings.Model, Effort: settings.Effort, Provenance: provenance}, true
 }
 
@@ -263,6 +270,9 @@ func completeAgentSettings(settings config.AgentSettings) (config.AgentSettings,
 	}
 	if settings.Provenance == "" {
 		settings.Provenance = config.ModelProvenanceManual
+	}
+	if !validModelProvenance(settings.Provenance) {
+		return config.AgentSettings{}, false
 	}
 	return settings, true
 }
