@@ -1745,6 +1745,19 @@ func resumeExecutionCursor(project state.ProjectState, plan pipeline.ExecutableP
 		return "", "", false, errors.New("project has no phase history for its resume cursor")
 	}
 	last := project.PhaseHistory[len(project.PhaseHistory)-1]
+	if last.Skip != nil {
+		// Skip advances the durable cursor before the continuation is
+		// dispatched. On restart the skipped record is still the latest history
+		// entry, so resume must trust its exact persisted next unit rather than
+		// treating the old failed phase as replayable.
+		if last.Skip.NextPhase == "" {
+			return "", "", true, nil
+		}
+		if project.CurrentPhase != last.Skip.NextPhase || project.CurrentSubphase != last.Skip.NextSubphase {
+			return "", "", false, fmt.Errorf("skip cursor %q/%q does not match current phase %q/%q", last.Skip.NextPhase, last.Skip.NextSubphase, project.CurrentPhase, project.CurrentSubphase)
+		}
+		return project.CurrentPhase, project.CurrentSubphase, false, nil
+	}
 	if last.Phase != project.CurrentPhase || last.Subphase != project.CurrentSubphase {
 		return "", "", false, fmt.Errorf("phase history cursor %q/%q does not match current phase %q/%q", last.Phase, last.Subphase, project.CurrentPhase, project.CurrentSubphase)
 	}

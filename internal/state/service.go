@@ -968,7 +968,7 @@ func (s *LifecycleService) Transition(ctx context.Context, slug string, target L
 			}
 		}
 		state.CurrentPhase, state.CurrentSubphase = phase, subphase
-		state.PhaseHistory = updatePhaseHistory(state.PhaseHistory, phase, subphase, target, now, artifacts)
+		state.PhaseHistory = updatePhaseHistory(state.PhaseHistory, phase, subphase, target, now, artifacts, "")
 		state.ArtifactPaths = appendUnique(state.ArtifactPaths, artifacts...)
 		if state.Status != target {
 			state.Status, state.StatusChangedAt = target, now
@@ -1029,11 +1029,19 @@ func (s *LifecycleService) RecordPhase(ctx context.Context, slug, phase, subphas
 				subphase = current.CurrentSubphase
 			}
 		}
+		occurrenceID := ""
+		if status == StatusRunning || status == StatusFailed || status == StatusFinished || status == StatusStopped {
+			var occurrenceErr error
+			occurrenceID, occurrenceErr = newOccurrenceID()
+			if occurrenceErr != nil {
+				return fmt.Errorf("create phase occurrence ID: %w", occurrenceErr)
+			}
+		}
 		current.CurrentPhase, current.CurrentSubphase = phase, subphase
 		if status == StatusRunning && current.PostRebaseContinuationPhase == phase {
 			current.PostRebaseContinuationPhase = ""
 		}
-		current.PhaseHistory = updatePhaseHistory(current.PhaseHistory, phase, subphase, status, now, artifacts)
+		current.PhaseHistory = updatePhaseHistory(current.PhaseHistory, phase, subphase, status, now, artifacts, occurrenceID)
 		current.ArtifactPaths = appendUnique(current.ArtifactPaths, artifacts...)
 		if outcome != nil && len(current.PhaseHistory) > 0 {
 			copy := *outcome
@@ -1120,18 +1128,21 @@ func canTransition(from, to LifecycleStatus) bool {
 		return false
 	}
 }
-func updatePhaseHistory(history []PhaseRecord, phase, subphase string, status LifecycleStatus, now time.Time, artifacts []string) []PhaseRecord {
+func updatePhaseHistory(history []PhaseRecord, phase, subphase string, status LifecycleStatus, now time.Time, artifacts []string, occurrenceID string) []PhaseRecord {
 	history = append([]PhaseRecord(nil), history...)
 	if len(history) == 0 {
-		return append(history, PhaseRecord{Phase: phase, Subphase: subphase, Status: status, StartedAt: now, CompletedAt: completionTime(status, now), ArtifactPaths: appendUnique(nil, artifacts...)})
+		return append(history, PhaseRecord{Phase: phase, Subphase: subphase, Status: status, StartedAt: now, CompletedAt: completionTime(status, now), ArtifactPaths: appendUnique(nil, artifacts...), OccurrenceID: occurrenceID})
 	}
 	last := &history[len(history)-1]
 	if last.Phase != phase || last.Subphase != subphase || last.CompletedAt != nil {
 		completed := now
 		last.CompletedAt = &completed
-		return append(history, PhaseRecord{Phase: phase, Subphase: subphase, Status: status, StartedAt: now, CompletedAt: completionTime(status, now), ArtifactPaths: appendUnique(nil, artifacts...)})
+		return append(history, PhaseRecord{Phase: phase, Subphase: subphase, Status: status, StartedAt: now, CompletedAt: completionTime(status, now), ArtifactPaths: appendUnique(nil, artifacts...), OccurrenceID: occurrenceID})
 	}
 	last.Status, last.ArtifactPaths = status, appendUnique(last.ArtifactPaths, artifacts...)
+	if last.OccurrenceID == "" {
+		last.OccurrenceID = occurrenceID
+	}
 	last.CompletedAt = completionTime(status, now)
 	return history
 }

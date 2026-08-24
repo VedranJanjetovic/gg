@@ -58,9 +58,69 @@ type PhaseRecord struct {
 	StartedAt     time.Time       `json:"startedAt"`
 	CompletedAt   *time.Time      `json:"completedAt,omitempty"`
 	ArtifactPaths []string        `json:"artifactPaths,omitempty"`
+	// OccurrenceID identifies one execution occurrence. It is assigned when a
+	// new execution starts and is intentionally never reused by a retry.
+	OccurrenceID string `json:"occurrenceId,omitempty"`
 	// Outcome is populated when an executable agent process has completed.
 	// It is optional so state written by earlier versions remains compatible.
 	Outcome *ExecutionOutcome `json:"outcome,omitempty"`
+	// Skip records an explicit user-confirmed waiver for this failed occurrence.
+	// The original Status and Outcome remain unchanged.
+	Skip *SkipResolution `json:"skip,omitempty"`
+}
+
+// SkipCleanupStatus describes the cleanup result recorded with a confirmed
+// skip. A missing status is invalid for new skip resolutions, while old phase
+// records may omit the entire resolution.
+type SkipCleanupStatus string
+
+const (
+	SkipCleanupSucceeded   SkipCleanupStatus = "succeeded"
+	SkipCleanupNotRequired SkipCleanupStatus = "not_required"
+)
+
+// SkipCleanup is the durable result of cleanup for one skipped execution.
+// Evidence is descriptive and may include paths, commands, or Git identity.
+type SkipCleanup struct {
+	Status   SkipCleanupStatus `json:"status"`
+	Evidence []string          `json:"evidence,omitempty"`
+}
+
+// SkipResolution is attached to exactly one failed execution occurrence.
+// NextPhase and NextSubphase are the cursor selected for the continuation;
+// both are empty only when the skipped unit was the final execution unit.
+type SkipResolution struct {
+	ConfirmedAt      time.Time   `json:"confirmedAt"`
+	Cleanup          SkipCleanup `json:"cleanup"`
+	NextPhase        string      `json:"nextPhase,omitempty"`
+	NextSubphase     string      `json:"nextSubphase,omitempty"`
+	ExternalIdentity string      `json:"externalIdentity,omitempty"`
+}
+
+func (status SkipCleanupStatus) IsValid() bool {
+	return status == SkipCleanupSucceeded || status == SkipCleanupNotRequired
+}
+
+// SkipCount returns the number of confirmed skipped executions for a phase
+// and subphase. It is derived from history so a later successful retry cannot
+// erase an earlier waiver.
+func (record PhaseRecord) SkipCount() int {
+	if record.Skip == nil {
+		return 0
+	}
+	return 1
+}
+
+// SkipCount returns the sticky number of confirmed skipped executions for the
+// selected phase and subphase.
+func (state ProjectState) SkipCount(phase, subphase string) int {
+	count := 0
+	for _, record := range state.PhaseHistory {
+		if record.Phase == phase && record.Subphase == subphase {
+			count += record.SkipCount()
+		}
+	}
+	return count
 }
 
 // ExecutionOutcome is the durable, machine-readable result of one phase
@@ -235,6 +295,11 @@ func NewProjectState(input ProjectState) (ProjectState, error) {
 	}
 	for i := range state.PhaseHistory {
 		state.PhaseHistory[i].ArtifactPaths = append([]string(nil), input.PhaseHistory[i].ArtifactPaths...)
+		if input.PhaseHistory[i].Skip != nil {
+			skip := *input.PhaseHistory[i].Skip
+			skip.Cleanup.Evidence = append([]string(nil), input.PhaseHistory[i].Skip.Cleanup.Evidence...)
+			state.PhaseHistory[i].Skip = &skip
+		}
 		if input.PhaseHistory[i].Outcome != nil {
 			outcome := *input.PhaseHistory[i].Outcome
 			state.PhaseHistory[i].Outcome = &outcome
@@ -305,9 +370,30 @@ func (state ProjectState) Validate() error {
 	if state.UpdatedAt.Before(state.CreatedAt) {
 		return errors.New("updated timestamp precedes created timestamp")
 	}
+	occurrences := make(map[string]struct{}, len(state.PhaseHistory))
 	for i, phase := range state.PhaseHistory {
 		if strings.TrimSpace(phase.Phase) == "" || !phase.Status.IsValid() || phase.StartedAt.IsZero() {
 			return fmt.Errorf("invalid phase history entry %d", i)
+		}
+		if phase.OccurrenceID != "" {
+			if _, exists := occurrences[phase.OccurrenceID]; exists {
+				return fmt.Errorf("duplicate phase occurrence ID %q", phase.OccurrenceID)
+			}
+			occurrences[phase.OccurrenceID] = struct{}{}
+		}
+		if phase.Skip != nil {
+			if phase.OccurrenceID == "" {
+				return fmt.Errorf("skipped phase history entry %d has no occurrence ID", i)
+			}
+			if phase.Status != StatusFailed || phase.CompletedAt == nil {
+				return fmt.Errorf("skipped phase history entry %d is not a completed failure", i)
+			}
+			if phase.Skip.ConfirmedAt.IsZero() || !phase.Skip.Cleanup.Status.IsValid() {
+				return fmt.Errorf("invalid skip resolution in phase history entry %d", i)
+			}
+			if phase.Skip.NextPhase == "" && phase.Skip.NextSubphase != "" {
+				return fmt.Errorf("skip resolution entry %d has a subphase without a phase", i)
+			}
 		}
 	}
 	if state.MaxQAAttempts < 0 || state.QACompletedAttempts < 0 {
