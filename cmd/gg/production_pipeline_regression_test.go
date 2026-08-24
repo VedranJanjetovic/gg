@@ -25,6 +25,11 @@ func TestProductionCompositionRunsFakeAgentsGitStateAndPersistsAllEvents(t *test
 	}
 	runProductionGit(t, repo, "add", "README.md")
 	runProductionGit(t, repo, "-c", "commit.gpgsign=false", "commit", "-qm", "initial")
+	runProductionGit(t, repo, "branch", "-M", "master")
+	remote := t.TempDir()
+	runProductionGit(t, remote, "init", "--bare", "-q")
+	runProductionGit(t, repo, "remote", "add", "origin", remote)
+	runProductionGit(t, repo, "push", "-q", "origin", "master")
 
 	configHome := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", configHome)
@@ -44,6 +49,10 @@ func TestProductionCompositionRunsFakeAgentsGitStateAndPersistsAllEvents(t *test
 	binDir := t.TempDir()
 	fakeAgent := filepath.Join(binDir, "claude")
 	if err := os.WriteFile(fakeAgent, []byte(productionFakeAgentScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	fakeGH := filepath.Join(binDir, "gh")
+	if err := os.WriteFile(fakeGH, []byte(productionFakeGHScript), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
@@ -87,11 +96,15 @@ func TestProductionCompositionRunsFakeAgentsGitStateAndPersistsAllEvents(t *test
 	}
 	for _, artifact := range []string{
 		".gg/acceptance-criteria.md", ".gg/grooming.md", ".gg/plan.md", ".gg/development.md",
-		".gg/qa-report.md", ".gg/rebase-report.md", ".gg/test-document.md", ".gg/build-checker.md",
-		".gg/pr.md", ".gg/ci-report.md",
+		".gg/qa-report.md", ".gg/test-document.md", ".gg/build-checker.md",
 	} {
 		if !containsProductionString(project.ArtifactPaths, artifact) {
 			t.Errorf("project artifacts %v missing %q", project.ArtifactPaths, artifact)
+		}
+	}
+	for _, artifact := range []string{"rebase-report.md", "pr.md", "ci-report.md"} {
+		if !containsProductionBasename(project.ArtifactPaths, artifact) {
+			t.Errorf("project artifacts %v missing basename %q", project.ArtifactPaths, artifact)
 		}
 	}
 	proofPath := filepath.Join(repo, ".gg", "projects", project.Slug, "artifacts", "PROOF.md")
@@ -102,12 +115,12 @@ func TestProductionCompositionRunsFakeAgentsGitStateAndPersistsAllEvents(t *test
 	if !bytes.Contains(proofData, []byte("## Validation: production flow")) || !bytes.Contains(proofData, []byte("$ go test ./cmd/gg -run TestProductionCompositionRunsFakeAgentsGitStateAndPersistsAllEvents -count=1; result: exit code 0")) {
 		t.Fatalf("copied PROOF.md has unexpected content: %q", proofData)
 	}
-	if !containsProductionString(project.ArtifactPaths, proofPath) {
+	if !containsProductionPath(project.ArtifactPaths, proofPath) {
 		t.Fatalf("project artifacts %v missing durable proof path %q", project.ArtifactPaths, proofPath)
 	}
 	var qaPhaseProof bool
 	for _, record := range project.PhaseHistory {
-		if record.Phase == "qa" && containsProductionString(record.ArtifactPaths, proofPath) {
+		if record.Phase == "qa" && containsProductionPath(record.ArtifactPaths, proofPath) {
 			qaPhaseProof = true
 		}
 	}
@@ -175,12 +188,13 @@ func TestProductionCompositionRunsFakeAgentsGitStateAndPersistsAllEvents(t *test
 		"phase_started:development/implementation", "phase_succeeded:development/implementation",
 		"phase_started:development/testing", "phase_succeeded:development/testing",
 		"phase_started:development/review", "phase_succeeded:development/review",
+		"phase_started:rebase/", "phase_succeeded:rebase/",
 		"phase_started:qa/", "phase_failed:qa/", "feedback_created:qa/", "phase_retried:qa/",
 		"phase_started:development/implementation", "phase_succeeded:development/implementation",
 		"phase_started:development/testing", "phase_succeeded:development/testing",
 		"phase_started:development/review", "phase_succeeded:development/review",
-		"phase_started:qa/", "phase_succeeded:qa/",
 		"phase_started:rebase/", "phase_succeeded:rebase/",
+		"phase_started:qa/", "phase_succeeded:qa/",
 		"phase_started:test_document/", "phase_succeeded:test_document/",
 		"phase_started:build_checker/", "phase_succeeded:build_checker/",
 		"phase_started:pr/", "phase_succeeded:pr/",
@@ -190,8 +204,8 @@ func TestProductionCompositionRunsFakeAgentsGitStateAndPersistsAllEvents(t *test
 	if strings.Join(lifecycle, "\n") != strings.Join(wantLifecycle, "\n") {
 		t.Fatalf("durable lifecycle event order:\n got %v\nwant %v", lifecycle, wantLifecycle)
 	}
-	if processCounts["started"] != 16 || processCounts["completed"] != 15 || processCounts["failed"] != 1 || processCounts["canceled"] != 0 {
-		t.Fatalf("agent lifecycle event counts = %v, want 16 started, 15 completed, 1 failed, 0 canceled", processCounts)
+	if processCounts["started"] != 13 || processCounts["completed"] != 12 || processCounts["failed"] != 1 || processCounts["canceled"] != 0 {
+		t.Fatalf("agent lifecycle event counts = %v, want 13 started, 12 completed, 1 failed, 0 canceled", processCounts)
 	}
 	if processCounts["output"] < processCounts["started"] {
 		t.Fatalf("agent output events = %d, want at least one per invocation (%d)", processCounts["output"], processCounts["started"])
@@ -236,7 +250,7 @@ esac
 
 disposition=passed
 exit_code=0
-if [ "$phase" = qa ] && [ ! -f qa-report.md ]; then
+if [ "$phase" = qa ] && [ ! -f .gg/qa-report.md ]; then
 	disposition=failed
 fi
 
@@ -303,6 +317,17 @@ fi
 exit "$exit_code"
 `
 
+const productionFakeGHScript = `#!/bin/sh
+set -eu
+
+case "$*" in
+  pr\ create*) printf '%s\n' 'https://github.com/example/production/pull/1' ;;
+  pr\ checks*) printf '%s\n' '[{"name":"production","state":"SUCCESS","bucket":"pass","link":"https://github.com/example/production/actions/1"}]' ;;
+  pr\ view*) printf '%s\n' '{"url":"https://github.com/example/production/pull/1","state":"MERGED","mergeable":"MERGEABLE","updatedAt":"2026-08-24T00:00:00Z"}' ;;
+  *) printf 'unsupported fake gh command: %s\n' "$*" >&2; exit 64 ;;
+esac
+`
+
 func runProductionGit(t *testing.T, dir string, args ...string) string {
 	t.Helper()
 	command := exec.Command("git", args...)
@@ -321,6 +346,29 @@ func runProductionGit(t *testing.T, dir string, args ...string) string {
 func containsProductionString(values []string, want string) bool {
 	for _, value := range values {
 		if value == want {
+			return true
+		}
+	}
+	return false
+}
+
+func containsProductionBasename(values []string, want string) bool {
+	for _, value := range values {
+		if filepath.Base(filepath.Clean(value)) == want {
+			return true
+		}
+	}
+	return false
+}
+
+func containsProductionPath(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+		resolvedValue, valueErr := filepath.EvalSymlinks(value)
+		resolvedWant, wantErr := filepath.EvalSymlinks(want)
+		if valueErr == nil && wantErr == nil && resolvedValue == resolvedWant {
 			return true
 		}
 	}

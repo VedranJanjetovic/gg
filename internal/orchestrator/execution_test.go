@@ -543,6 +543,163 @@ func pipelineWithQA(t *testing.T) pipeline.ExecutablePipeline {
 	return resolvedPipeline(t, config.PhaseQA)
 }
 
+func snapshotReadyPipelineWithQA(t *testing.T) pipeline.ExecutablePipeline {
+	t.Helper()
+	settings := config.AgentSettings{Agent: config.AgentClaude, Model: "snapshot-model", Effort: config.EffortMedium}
+	phases := map[config.Phase]config.ResolvedPhase{}
+	for _, phase := range config.RemovablePhases() {
+		phases[phase] = config.ResolvedPhase{Enabled: phase == config.PhaseQA, AgentSettings: settings}
+	}
+	plan, err := pipeline.Resolve(pipeline.DefaultPipeline(), config.ResolvedConfig{Defaults: settings, Phases: phases})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return plan
+}
+
+type persistedPhaseFixture struct {
+	ID       pipeline.PhaseID     `json:"id"`
+	Settings config.AgentSettings `json:"settings"`
+}
+
+type persistedPipelineFixture struct {
+	SchemaVersion    int                                    `json:"schemaVersion"`
+	PlanningContract int                                    `json:"planningContractVersion,omitempty"`
+	Phases           []persistedPhaseFixture                `json:"phases"`
+	Subphases        pipeline.DevelopmentSubphaseGeneration `json:"developmentSubphases"`
+	MaxQAAttempts    int                                    `json:"maxQaAttempts"`
+	GitOps           config.GitOpsConfig                    `json:"gitOps"`
+	GitOpsConfigured bool                                   `json:"gitOpsConfigured"`
+}
+
+func legacyPipelineWithQA(t *testing.T) (pipeline.ExecutablePipeline, state.PipelineConfigSnapshot) {
+	t.Helper()
+	current := snapshotReadyPipelineWithQA(t)
+	snapshot, err := pipeline.SnapshotExecution(current, pipeline.DevelopmentSubphaseGeneration{}, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var encoded persistedPipelineFixture
+	if err := json.Unmarshal(snapshot.Data, &encoded); err != nil {
+		t.Fatal(err)
+	}
+	encoded.SchemaVersion = 1
+	encoded.PlanningContract = 0
+	var rebaseIndex, qaIndex int
+	for index, phase := range encoded.Phases {
+		switch phase.ID {
+		case pipeline.PhaseRebase:
+			rebaseIndex = index
+		case pipeline.PhaseQA:
+			qaIndex = index
+		}
+	}
+	encoded.Phases[rebaseIndex], encoded.Phases[qaIndex] = encoded.Phases[qaIndex], encoded.Phases[rebaseIndex]
+	legacyData, err := json.Marshal(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacySnapshot := snapshot
+	legacySnapshot.Data = legacyData
+	legacy, _, _, err := pipeline.RestoreExecution(legacySnapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return legacy, legacySnapshot
+}
+
+func TestRestoredSnapshotsExecuteTheirPersistedOrder(t *testing.T) {
+	current := snapshotReadyPipelineWithQA(t)
+	newSnapshot, err := pipeline.SnapshotExecution(current, pipeline.DevelopmentSubphaseGeneration{}, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newPlan, newSubphases, newMaxAttempts, err := pipeline.RestoreExecution(newSnapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyPlan, legacySnapshot := legacyPipelineWithQA(t)
+
+	tests := []struct {
+		name      string
+		plan      pipeline.ExecutablePipeline
+		snapshot  state.PipelineConfigSnapshot
+		subphases pipeline.DevelopmentSubphaseGeneration
+		max       int
+		want      []pipeline.PhaseID
+	}{
+		{
+			name: "new snapshot uses Rebase before QA",
+			plan: newPlan, snapshot: newSnapshot, subphases: newSubphases, max: newMaxAttempts,
+			want: []pipeline.PhaseID{pipeline.PhaseAcceptanceCriteria, pipeline.PhaseDevelopment, pipeline.PhaseDevelopment, pipeline.PhaseDevelopment, pipeline.PhaseRebase, pipeline.PhaseQA, pipeline.PhaseTestDocument},
+		},
+		{
+			name: "legacy snapshot keeps QA before Rebase",
+			plan: legacyPlan, snapshot: legacySnapshot, subphases: pipeline.DevelopmentSubphaseGeneration{}, max: 3,
+			want: []pipeline.PhaseID{pipeline.PhaseAcceptanceCriteria, pipeline.PhaseDevelopment, pipeline.PhaseDevelopment, pipeline.PhaseDevelopment, pipeline.PhaseQA, pipeline.PhaseRebase, pipeline.PhaseTestDocument},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			runner := &fakeSeqRunner{}
+			req := request(t, test.plan)
+			req.Project.PipelineConfig = test.snapshot
+			req.Subphases = test.subphases
+			req.MaxIterations = test.max
+			req.RunID = test.name
+			if _, err := orchestrator.NewController(
+				orchestrator.WithRunner(runner),
+				orchestrator.WithPhaseState(&fakeState{}),
+				orchestrator.WithPromptBuilder(fakePrompt{}),
+			).Execute(context.Background(), req); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(runner.phases, test.want) {
+				t.Fatalf("executed phases = %v, want persisted order %v", runner.phases, test.want)
+			}
+		})
+	}
+}
+
+func TestLegacyQARetryDoesNotInjectNewRebaseInvariant(t *testing.T) {
+	legacyPlan, legacySnapshot := legacyPipelineWithQA(t)
+	runner := &feedbackRunner{
+		statuses: []state.LifecycleStatus{
+			state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFailed,
+			state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFinished,
+		},
+		artifacts: []string{"qa-feedback.md"},
+	}
+	req := request(t, legacyPlan)
+	req.Project.PipelineConfig = legacySnapshot
+	req.MaxIterations = 2
+	outcomes, err := executeFeedback(t, runner, &feedbackState{}, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(outcomes) != 11 {
+		t.Fatalf("outcomes = %d, want 11 for legacy QA-before-Rebase retry", len(outcomes))
+	}
+	want := []pipeline.PhaseID{
+		pipeline.PhaseAcceptanceCriteria,
+		pipeline.PhaseDevelopment, pipeline.PhaseDevelopment, pipeline.PhaseDevelopment,
+		pipeline.PhaseQA,
+		pipeline.PhaseDevelopment, pipeline.PhaseDevelopment, pipeline.PhaseDevelopment,
+		pipeline.PhaseQA, pipeline.PhaseRebase, pipeline.PhaseTestDocument,
+	}
+	if !reflect.DeepEqual(runnerRequestsPhases(runner.requests), want) {
+		t.Fatalf("legacy retry phases = %v, want %v", runnerRequestsPhases(runner.requests), want)
+	}
+}
+
+func runnerRequestsPhases(requests []agent.RunRequest) []pipeline.PhaseID {
+	phases := make([]pipeline.PhaseID, len(requests))
+	for index, request := range requests {
+		phases[index] = request.Phase
+	}
+	return phases
+}
+
 func executeFeedback(t *testing.T, runner *feedbackRunner, store *feedbackState, request orchestrator.Request) ([]orchestrator.PhaseOutcome, error) {
 	t.Helper()
 	return orchestrator.NewController(orchestrator.WithRunner(runner), orchestrator.WithPhaseState(store), orchestrator.WithEventSink(&fakeEvents{}), orchestrator.WithPromptBuilder(fakePrompt{})).Execute(context.Background(), request)
