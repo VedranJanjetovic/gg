@@ -967,8 +967,16 @@ func (s *LifecycleService) Transition(ctx context.Context, slug string, target L
 				subphase = state.CurrentSubphase
 			}
 		}
+		occurrenceID := ""
+		if target == StatusRunning {
+			var occurrenceErr error
+			occurrenceID, occurrenceErr = newOccurrenceID()
+			if occurrenceErr != nil {
+				return fmt.Errorf("create phase occurrence ID: %w", occurrenceErr)
+			}
+		}
 		state.CurrentPhase, state.CurrentSubphase = phase, subphase
-		state.PhaseHistory = updatePhaseHistory(state.PhaseHistory, phase, subphase, target, now, artifacts, "")
+		state.PhaseHistory = updatePhaseHistory(state.PhaseHistory, phase, subphase, target, now, artifacts, occurrenceID)
 		state.ArtifactPaths = appendUnique(state.ArtifactPaths, artifacts...)
 		if state.Status != target {
 			state.Status, state.StatusChangedAt = target, now

@@ -2,6 +2,7 @@ package state
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 	"time"
@@ -82,6 +83,18 @@ func TestSkipFailedExecutionPersistsExactWaiverAndIsIdempotent(t *testing.T) {
 	if cleanupCalls != 1 || duplicate.PhaseHistory[len(duplicate.PhaseHistory)-1].Skip.ConfirmedAt != confirmedAt {
 		t.Fatalf("duplicate skip was not idempotent: calls=%d state=%#v", cleanupCalls, duplicate)
 	}
+	changedRequest := request
+	changedRequest.NextPhase = "qa"
+	changed, err := service.SkipFailedExecution(context.Background(), failed.Slug, changedRequest, func(context.Context, ProjectState, PhaseRecord) (SkipCleanup, error) {
+		t.Fatal("cleanup ran for an already-resolved occurrence")
+		return SkipCleanup{}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changed.CurrentPhase != "development" || changed.CurrentSubphase != "review" {
+		t.Fatalf("duplicate request changed the durable cursor: %#v", changed)
+	}
 
 	root := service.store.(*FileStore).Root()
 	restartedStore, err := NewFileStore(root)
@@ -134,6 +147,66 @@ func TestSkipFailedExecutionCleanupFailureLeavesFailureUnchanged(t *testing.T) {
 	}
 }
 
+func TestSkipFailedExecutionPersistenceFailureLeavesFailureUnchanged(t *testing.T) {
+	service, failed, occurrence := failedOccurrenceProject(t)
+	store := service.store.(*FileStore)
+	store.replace = func(context.Context, string, []byte) error {
+		return errors.New("state write failed")
+	}
+	_, err := service.SkipFailedExecution(context.Background(), failed.Slug, SkipRequest{
+		OccurrenceID: occurrence.OccurrenceID,
+		NextPhase:    "qa",
+	}, func(context.Context, ProjectState, PhaseRecord) (SkipCleanup, error) {
+		return SkipCleanup{Status: SkipCleanupSucceeded, Evidence: []string{"cleanup completed"}}, nil
+	})
+	if err == nil {
+		t.Fatal("persistence failure unexpectedly succeeded")
+	}
+	unchanged, loadErr := service.Load(context.Background(), failed.Slug)
+	if loadErr != nil {
+		t.Fatal(loadErr)
+	}
+	last := unchanged.PhaseHistory[len(unchanged.PhaseHistory)-1]
+	if last.Skip != nil || unchanged.Status != StatusFailed || unchanged.CurrentPhase != failed.CurrentPhase {
+		t.Fatalf("persistence failure advanced state: %#v", unchanged)
+	}
+}
+
+func TestSkipFailedExecutionRequiresFailedProject(t *testing.T) {
+	for _, status := range []LifecycleStatus{StatusPending, StatusRunning, StatusStopped} {
+		t.Run(string(status), func(t *testing.T) {
+			service, failed, occurrence := failedOccurrenceProject(t)
+			failed.Status = status
+			if err := service.Save(context.Background(), failed); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := service.SkipFailedExecution(context.Background(), failed.Slug, SkipRequest{OccurrenceID: occurrence.OccurrenceID}, nil); !errors.Is(err, ErrSkipNotEligible) {
+				t.Fatalf("status %s error = %v, want ErrSkipNotEligible", status, err)
+			}
+		})
+	}
+}
+
+func TestSkipFailedExecutionRejectsInvalidCleanupResult(t *testing.T) {
+	service, failed, occurrence := failedOccurrenceProject(t)
+	_, err := service.SkipFailedExecution(context.Background(), failed.Slug, SkipRequest{
+		OccurrenceID: occurrence.OccurrenceID,
+		NextPhase:    "qa",
+	}, func(context.Context, ProjectState, PhaseRecord) (SkipCleanup, error) {
+		return SkipCleanup{Status: "rolled_back"}, nil
+	})
+	if !errors.Is(err, ErrSkipCleanup) {
+		t.Fatalf("invalid cleanup result = %v, want ErrSkipCleanup", err)
+	}
+	unchanged, err := service.Load(context.Background(), failed.Slug)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unchanged.PhaseHistory[len(unchanged.PhaseHistory)-1].Skip != nil || unchanged.CurrentPhase != failed.CurrentPhase {
+		t.Fatalf("invalid cleanup result changed state: %#v", unchanged)
+	}
+}
+
 func TestSkipFailedExecutionRejectsStaleAndNonFailedOccurrences(t *testing.T) {
 	service, failed, occurrence := failedOccurrenceProject(t)
 	if _, err := service.SkipFailedExecution(context.Background(), failed.Slug, SkipRequest{OccurrenceID: "missing", NextPhase: "qa"}, nil); !errors.Is(err, ErrStaleSkipOccurrence) {
@@ -157,10 +230,68 @@ func TestSkipFailedExecutionRejectsStaleAndNonFailedOccurrences(t *testing.T) {
 	}
 }
 
+func TestTransitionAssignsOccurrenceBeforeExecutionRecord(t *testing.T) {
+	store, err := NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := NewLifecycleService(store, nil, store.Locker())
+	project := validProjectState()
+	if err := service.Create(context.Background(), project); err != nil {
+		t.Fatal(err)
+	}
+	running, err := service.Transition(context.Background(), project.Slug, StatusRunning, "qa", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(running.PhaseHistory) == 0 || running.PhaseHistory[len(running.PhaseHistory)-1].OccurrenceID == "" {
+		t.Fatalf("running transition did not create an occurrence: %#v", running.PhaseHistory)
+	}
+	occurrenceID := running.PhaseHistory[len(running.PhaseHistory)-1].OccurrenceID
+	completed, err := service.RecordPhase(context.Background(), project.Slug, "qa", "", StatusFailed, &ExecutionOutcome{ExitCode: 1}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	last := completed.PhaseHistory[len(completed.PhaseHistory)-1]
+	if last.OccurrenceID != occurrenceID {
+		t.Fatalf("execution record replaced the start occurrence: got %q want %q", last.OccurrenceID, occurrenceID)
+	}
+}
+
+func TestSkipFailedExecutionRejectsCanceledAndWhitespaceCursor(t *testing.T) {
+	service, failed, occurrence := failedOccurrenceProject(t)
+	failed.PhaseHistory[len(failed.PhaseHistory)-1].Outcome.Canceled = true
+	if err := service.Save(context.Background(), failed); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.SkipFailedExecution(context.Background(), failed.Slug, SkipRequest{
+		OccurrenceID: occurrence.OccurrenceID,
+		NextPhase:    "qa",
+	}, nil); !errors.Is(err, ErrSkipNotEligible) {
+		t.Fatalf("canceled occurrence error = %v, want ErrSkipNotEligible", err)
+	}
+
+	service, failed, occurrence = failedOccurrenceProject(t)
+	if _, err := service.SkipFailedExecution(context.Background(), failed.Slug, SkipRequest{
+		OccurrenceID: occurrence.OccurrenceID,
+		NextPhase:    "   ",
+	}, nil); !errors.Is(err, ErrSkipNotEligible) {
+		t.Fatalf("whitespace cursor error = %v, want ErrSkipNotEligible", err)
+	}
+}
+
 func TestLegacyPhaseRecordWithoutOccurrenceAndSkipFieldsRemainsValid(t *testing.T) {
 	project := validProjectState()
 	project.PhaseHistory = []PhaseRecord{{Phase: "development", Subphase: "testing", Status: StatusFailed, StartedAt: project.CreatedAt}}
-	if _, err := NewProjectState(project); err != nil {
+	document, err := json.Marshal(project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded ProjectState
+	if err := json.Unmarshal(document, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewProjectState(decoded); err != nil {
 		t.Fatalf("legacy phase record rejected: %v", err)
 	}
 }

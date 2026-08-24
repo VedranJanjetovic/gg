@@ -56,6 +56,9 @@ func (s *LifecycleService) SkipFailedExecution(ctx context.Context, slug string,
 	if strings.TrimSpace(request.NextPhase) == "" && strings.TrimSpace(request.NextSubphase) != "" {
 		return ProjectState{}, fmt.Errorf("%w: next subphase requires next phase", ErrSkipNotEligible)
 	}
+	if request.NextPhase != "" && strings.TrimSpace(request.NextPhase) == "" {
+		return ProjectState{}, fmt.Errorf("%w: next phase is empty", ErrSkipNotEligible)
+	}
 
 	var result ProjectState
 	err := s.withProjectLock(ctx, slug, func(locked context.Context) error {

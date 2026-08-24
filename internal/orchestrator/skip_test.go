@@ -4,9 +4,27 @@ import (
 	"testing"
 	"time"
 
+	"github.com/VedranJanjetovic/gg/internal/config"
 	"github.com/VedranJanjetovic/gg/internal/pipeline"
 	"github.com/VedranJanjetovic/gg/internal/state"
 )
+
+func skipTestPipeline(t *testing.T, enabled ...config.Phase) pipeline.ExecutablePipeline {
+	t.Helper()
+	selected := make(map[config.Phase]bool, len(enabled))
+	for _, phase := range enabled {
+		selected[phase] = true
+	}
+	phases := make(map[config.Phase]config.ResolvedPhase)
+	for _, phase := range []config.Phase{config.PhaseGrooming, config.PhasePlanning, config.PhaseQA, config.PhaseBuildChecker, config.PhasePR, config.PhaseCI} {
+		phases[phase] = config.ResolvedPhase{Enabled: selected[phase], AgentSettings: config.AgentSettings{Agent: config.AgentClaude}}
+	}
+	plan, err := pipeline.Resolve(pipeline.DefaultPipeline(), config.ResolvedConfig{Phases: phases})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return plan
+}
 
 func TestSkipPolicyMatrix(t *testing.T) {
 	cases := []struct {
@@ -66,5 +84,72 @@ func TestValidateSkipTargetRequiresDurableCurrentFailure(t *testing.T) {
 	}
 	if err := ValidateSkipTarget(project, pipeline.PhaseQA, "", "stale-occurrence"); err == nil {
 		t.Fatal("stale occurrence was accepted")
+	}
+}
+
+func TestResumeCursorContinuesAfterOnlyTheSkippedOccurrence(t *testing.T) {
+	completedAt := time.Date(2026, time.August, 1, 10, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name         string
+		failedPhase  string
+		failedSub    string
+		currentPhase string
+		currentSub   string
+		nextPhase    string
+		nextSubphase string
+		wantPhase    string
+		wantSubphase string
+		wantFinalize bool
+	}{
+		{
+			name:        "development testing enters review",
+			failedPhase: string(pipeline.PhaseDevelopment), failedSub: string(pipeline.DevelopmentSubphaseTesting),
+			currentPhase: string(pipeline.PhaseDevelopment), currentSub: string(pipeline.DevelopmentSubphaseReview),
+			nextPhase: string(pipeline.PhaseDevelopment), nextSubphase: string(pipeline.DevelopmentSubphaseReview),
+			wantPhase: string(pipeline.PhaseDevelopment), wantSubphase: string(pipeline.DevelopmentSubphaseReview),
+		},
+		{
+			name:         "top level failure enters next phase",
+			failedPhase:  string(pipeline.PhaseQA),
+			currentPhase: string(pipeline.PhaseTestDocument),
+			nextPhase:    string(pipeline.PhaseTestDocument),
+			wantPhase:    string(pipeline.PhaseTestDocument),
+		},
+		{
+			name:         "final failure only finalizes",
+			failedPhase:  string(pipeline.PhaseTestDocument),
+			currentPhase: string(pipeline.PhaseTestDocument),
+			wantFinalize: true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			plan := skipTestPipeline(t, config.PhaseQA)
+			project := state.ProjectState{
+				Status:          state.StatusFailed,
+				CurrentPhase:    test.currentPhase,
+				CurrentSubphase: test.currentSub,
+				PhaseHistory: []state.PhaseRecord{{
+					Phase:        test.failedPhase,
+					Subphase:     test.failedSub,
+					Status:       state.StatusFailed,
+					StartedAt:    completedAt.Add(-time.Minute),
+					CompletedAt:  &completedAt,
+					OccurrenceID: "qa-occurrence",
+					Skip: &state.SkipResolution{
+						ConfirmedAt: completedAt,
+						Cleanup:     state.SkipCleanup{Status: state.SkipCleanupSucceeded},
+						NextPhase:   test.nextPhase, NextSubphase: test.nextSubphase,
+					},
+				}},
+			}
+			phase, subphase, finalize, err := resumeExecutionCursor(project, plan, pipeline.DevelopmentSubphaseGeneration{}, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if phase != test.wantPhase || subphase != test.wantSubphase || finalize != test.wantFinalize {
+				t.Fatalf("cursor = %q/%q finalize=%t, want %q/%q finalize=%t", phase, subphase, finalize, test.wantPhase, test.wantSubphase, test.wantFinalize)
+			}
+		})
 	}
 }
