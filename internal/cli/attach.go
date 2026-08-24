@@ -269,6 +269,9 @@ func skipProjection(project state.ProjectState) (bool, string) {
 		return false, ""
 	}
 	if record.Phase == string(pipeline.PhaseDevelopment) {
+		if planPhase := currentPlanPhase(project); planPhase != "" {
+			return true, "Development / " + planPhase + " / Testing"
+		}
 		return true, "Development / Testing"
 	}
 	for _, definition := range pipeline.DefaultPipeline().Phases() {
@@ -277,6 +280,22 @@ func skipProjection(project state.ProjectState) (bool, string) {
 		}
 	}
 	return false, ""
+}
+
+func currentPlanPhase(project state.ProjectState) string {
+	if project.Plan == nil {
+		return ""
+	}
+	completed := make(map[string]struct{}, len(project.Plan.Completed))
+	for _, phase := range project.Plan.Completed {
+		completed[phase] = struct{}{}
+	}
+	for _, phase := range project.Plan.Phases {
+		if _, ok := completed[phase]; !ok {
+			return phase
+		}
+	}
+	return ""
 }
 
 func (a *App) skipFailedExecution(ctx context.Context, selector string, skipper skipExecutionService) error {

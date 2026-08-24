@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/VedranJanjetovic/gg/internal/git"
 	"github.com/VedranJanjetovic/gg/internal/orchestrator"
@@ -211,6 +212,19 @@ func TestAttachmentLoadReadsLatestDurableState(t *testing.T) {
 
 	if code := app.Run(context.Background(), []string{"Live State"}, &stdout, &stderr); code != 0 {
 		t.Fatalf("attach code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+}
+
+func TestSkipProjectionNamesCurrentDevelopmentPlanPhase(t *testing.T) {
+	now := time.Now()
+	project := state.ProjectState{
+		Status:       state.StatusFailed,
+		Plan:         &state.PlanState{Phases: []string{"Phase 1: done", "Phase 2: docs"}, Completed: []string{"Phase 1: done"}},
+		PhaseHistory: []state.PhaseRecord{{Phase: "development", Subphase: "testing", Status: state.StatusFailed, OccurrenceID: "testing-1", StartedAt: now, CompletedAt: &now}},
+	}
+	available, label := skipProjection(project)
+	if !available || label != "Development / Phase 2: docs / Testing" {
+		t.Fatalf("skip projection = %t/%q, want true/current plan phase", available, label)
 	}
 }
 

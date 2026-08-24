@@ -1043,7 +1043,7 @@ func TestSkipRequiresNamedConfirmationAndStartsOnlyAfterConfirmation(t *testing.
 	if command != nil || !model.skipConfirm || whenSkipped != 0 {
 		t.Fatalf("skip opened confirmation=%t command=%v calls=%d", model.skipConfirm, command, whenSkipped)
 	}
-	if view := model.View(); !strings.Contains(view, "Confirm skip of QA?") || !strings.Contains(view, "y/Enter confirm") {
+	if view := model.View(); !strings.Contains(view, "Confirm skip of QA?") || !strings.Contains(view, "y/Enter confirm") || strings.Contains(view, "s skip") {
 		t.Fatalf("confirmation view missing exact action:\n%s", view)
 	}
 	updated, command = model.Update(key('n'))
@@ -1066,6 +1066,54 @@ func TestSkipRequiresNamedConfirmationAndStartsOnlyAfterConfirmation(t *testing.
 	model = updated.(Model)
 	if model.skipPending || !strings.Contains(model.View(), "continuation started") {
 		t.Fatalf("completed skip state = %#v view=%q", model, model.View())
+	}
+	updated, command = model.Update(key('s'))
+	model = updated.(Model)
+	if command != nil || model.skipConfirm {
+		t.Fatal("completed skip reopened confirmation before durable polling refresh")
+	}
+}
+
+func TestSkipConfirmationUsesPlanPhaseAndPollingCancelsStalePrompt(t *testing.T) {
+	project := testProject(testSnapshot(t), state.StatusFailed, string(pipeline.PhaseDevelopment), "testing", []state.PhaseRecord{{
+		Phase: string(pipeline.PhaseDevelopment), Subphase: "testing", Status: state.StatusFailed, OccurrenceID: "testing-1",
+	}})
+	project.Plan = &state.PlanState{Phases: []string{"Phase 2: docs"}}
+	model, err := NewModel(context.Background(), project, nil, Actions{
+		Skip: func(context.Context) error { t.Fatal("stale skip invoked"); return nil }, SkipAvailable: true,
+		SkipLabel: "Development / Phase 2: docs / Testing",
+	}, WithColor(false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated, _ := model.Update(key('s'))
+	model = updated.(Model)
+	if !strings.Contains(model.View(), "Confirm skip of Development / Phase 2: docs / Testing?") {
+		t.Fatalf("confirmation omitted plan phase:\n%s", model.View())
+	}
+	changed := project
+	changed.PhaseHistory = []state.PhaseRecord{{
+		Phase: string(pipeline.PhaseDevelopment), Subphase: "testing", Status: state.StatusFailed, OccurrenceID: "testing-2",
+	}}
+	updated, _ = model.Update(projectLoadedMsg{project: changed})
+	model = updated.(Model)
+	if model.skipConfirm || !strings.Contains(model.View(), "Skip cancelled because the failed execution changed.") {
+		t.Fatalf("stale confirmation remained active: %#v\n%s", model, model.View())
+	}
+}
+
+func TestSkippedExecutionShowsStickyCountImmediately(t *testing.T) {
+	project := testProject(testConfiguredSnapshot(t), state.StatusFailed, string(pipeline.PhaseQA), "", []state.PhaseRecord{{
+		Phase: string(pipeline.PhaseQA), Status: state.StatusFailed, OccurrenceID: "qa-1",
+		Skip: &state.SkipResolution{Cleanup: state.SkipCleanup{Status: state.SkipCleanupNotRequired}},
+	}})
+	model, err := NewModel(context.Background(), project, nil, Actions{}, WithColor(false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	view := model.View()
+	if !strings.Contains(view, "QA (1 skipped execution)") || !strings.Contains(view, "(skipped)") {
+		t.Fatalf("immediate sticky skip visibility missing:\n%s", view)
 	}
 }
 

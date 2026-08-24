@@ -109,39 +109,41 @@ func (m Model) render(interactive bool) string {
 			}
 			return output.String()
 		}
-		switch m.project.Status {
-		case state.StatusRunning:
-			fmt.Fprintf(&output, "%s stop  %s quit\n", m.styles.key.Render("s"), m.styles.key.Render("q"))
-		case state.StatusStopped:
-			output.WriteString("Type r to continue pipeline\n")
-			fmt.Fprintf(&output, "%s quit\n", m.styles.key.Render("q"))
-		case state.StatusFailed:
-			if m.actions.Skip != nil && skipAvailable {
-				fmt.Fprintf(&output, "%s skip  %s resume  %s quit\n", m.styles.key.Render("s"), m.styles.key.Render("r"), m.styles.key.Render("q"))
-			} else {
-				fmt.Fprintf(&output, "%s resume  %s quit\n", m.styles.key.Render("r"), m.styles.key.Render("q"))
-			}
-		default:
-			fmt.Fprintf(&output, "%s quit\n", m.styles.key.Render("q"))
-		}
 		if m.skipConfirm {
 			output.WriteString("Confirm skip of " + m.skipLabel + "?  y/Enter confirm  n/Esc cancel\n")
-		} else if m.interviewOpen() {
-			keys := "Keys: g answer questions  c code  t terminal  r resume"
-			if m.project.Status == state.StatusRunning {
-				keys += "  s stop"
-			} else if m.project.Status == state.StatusFailed && skipAvailable {
-				keys += "  s skip"
-			}
-			output.WriteString(keys + "  q quit\n")
 		} else {
-			keys := "Keys: i interactive  c code  t terminal  r resume"
-			if m.project.Status == state.StatusRunning {
-				keys += "  s stop"
-			} else if m.project.Status == state.StatusFailed && m.actions.Skip != nil && skipAvailable {
-				keys += "  s skip"
+			switch m.project.Status {
+			case state.StatusRunning:
+				fmt.Fprintf(&output, "%s stop  %s quit\n", m.styles.key.Render("s"), m.styles.key.Render("q"))
+			case state.StatusStopped:
+				output.WriteString("Type r to continue pipeline\n")
+				fmt.Fprintf(&output, "%s quit\n", m.styles.key.Render("q"))
+			case state.StatusFailed:
+				if m.actions.Skip != nil && skipAvailable {
+					fmt.Fprintf(&output, "%s skip  %s resume  %s quit\n", m.styles.key.Render("s"), m.styles.key.Render("r"), m.styles.key.Render("q"))
+				} else {
+					fmt.Fprintf(&output, "%s resume  %s quit\n", m.styles.key.Render("r"), m.styles.key.Render("q"))
+				}
+			default:
+				fmt.Fprintf(&output, "%s quit\n", m.styles.key.Render("q"))
 			}
-			output.WriteString(keys + "  q quit\n")
+			if m.interviewOpen() {
+				keys := "Keys: g answer questions  c code  t terminal  r resume"
+				if m.project.Status == state.StatusRunning {
+					keys += "  s stop"
+				} else if m.project.Status == state.StatusFailed && skipAvailable {
+					keys += "  s skip"
+				}
+				output.WriteString(keys + "  q quit\n")
+			} else {
+				keys := "Keys: i interactive  c code  t terminal  r resume"
+				if m.project.Status == state.StatusRunning {
+					keys += "  s stop"
+				} else if m.project.Status == state.StatusFailed && m.actions.Skip != nil && skipAvailable {
+					keys += "  s skip"
+				}
+				output.WriteString(keys + "  q quit\n")
+			}
 		}
 	}
 	return output.String()
@@ -315,7 +317,7 @@ func (m Model) interviewLine() string {
 
 func (m Model) phaseLine(phase PhaseView, interactive bool) string {
 	name := phase.Name
-	if phase.SkipCount > 0 && phase.Status == PhaseSucceeded {
+	if phase.SkipCount > 0 {
 		suffix := " skipped execution"
 		if phase.SkipCount != 1 {
 			suffix += "s"

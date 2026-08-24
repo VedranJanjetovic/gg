@@ -97,8 +97,9 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				return m, actionCmd(m.ctx, actionStop, m.actions.Stop)
 			}
 			available, label := m.skipTarget()
-			if m.project.Status == state.StatusFailed && m.actions.Skip != nil && available && !m.skipPending {
+			if m.project.Status == state.StatusFailed && m.actions.Skip != nil && available && label != "" && skipOccurrenceID(m.project) != "" && !m.skipPending {
 				m.skipLabel = label
+				m.skipOccurrenceID = skipOccurrenceID(m.project)
 				m.skipConfirm = true
 				m.notice = "Confirm skip of " + m.skipLabel + "?"
 				return m, nil
@@ -149,9 +150,20 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			if err != nil {
 				m.lastErr = err
 			} else {
+				occurrenceID := skipOccurrenceID(message.project)
 				m.project = message.project
 				m.definitions = definitions
 				m.phases = projectPhases(message.project, definitions)
+				if m.skipConfirm && occurrenceID != m.skipOccurrenceID {
+					m.skipConfirm = false
+					m.skipLabel = ""
+					m.skipOccurrenceID = ""
+					m.notice = "Skip cancelled because the failed execution changed."
+				}
+				if m.skipResolved && occurrenceID != m.skipOccurrenceID {
+					m.skipResolved = false
+					m.skipOccurrenceID = occurrenceID
+				}
 				m.lastErr = nil
 			}
 		}
@@ -168,6 +180,9 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.resumePending = false
 		case actionSkip:
 			m.skipPending = false
+			if message.err == nil {
+				m.skipResolved = true
+			}
 		case actionCode:
 			m.codePending = false
 		case actionTerminal:
@@ -219,10 +234,20 @@ func (m Model) foregroundOwned() bool {
 func (m Model) actionPending() bool { return m.foregroundOwned() || m.stopPending }
 
 func (m Model) skipTarget() (bool, string) {
+	if m.skipResolved {
+		return false, ""
+	}
 	if m.actions.SkipTarget != nil {
 		return m.actions.SkipTarget(m.project)
 	}
 	return m.actions.SkipAvailable, m.actions.SkipLabel
+}
+
+func skipOccurrenceID(project state.ProjectState) string {
+	if len(project.PhaseHistory) == 0 {
+		return ""
+	}
+	return project.PhaseHistory[len(project.PhaseHistory)-1].OccurrenceID
 }
 
 // launchPending reports whether an external tool launch (editor, terminal) is

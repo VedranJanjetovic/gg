@@ -183,7 +183,9 @@ type Model struct {
 	resumePending        bool
 	skipPending          bool
 	skipConfirm          bool
+	skipResolved         bool
 	skipLabel            string
+	skipOccurrenceID     string
 	codePending          bool
 	terminalPending      bool
 }
@@ -351,10 +353,14 @@ func projectPhases(project state.ProjectState, definitions []phaseDefinition) []
 		if phases[index].ID != project.CurrentPhase {
 			continue
 		}
-		phases[index].Status = statusFromLifecycle(project.Status)
+		if phases[index].Status != PhaseSkipped {
+			phases[index].Status = statusFromLifecycle(project.Status)
+		}
 		for subphase := range phases[index].Subphases {
 			if phases[index].Subphases[subphase].ID == project.CurrentSubphase {
-				phases[index].Subphases[subphase].Status = statusFromLifecycle(project.Status)
+				if phases[index].Subphases[subphase].Status != PhaseSkipped {
+					phases[index].Subphases[subphase].Status = statusFromLifecycle(project.Status)
+				}
 			}
 		}
 		break
