@@ -20,6 +20,29 @@ func TestGeneratedQAContractMatchesCanonicalSource(t *testing.T) {
 	}
 }
 
+func TestGeneratedPrePRContractsMatchCanonicalSources(t *testing.T) {
+	tests := []struct {
+		phase, directory, file string
+	}{
+		{string(PhaseDevelopment), "development", "development.md"},
+		{string(PhaseQA), "qa", "qa.md"},
+		{string(PhaseTestDocument), "test-document", "test-document.md"},
+		{string(PhaseBuildChecker), "build-checker", "build-checker.md"},
+	}
+	for _, test := range tests {
+		t.Run(test.directory, func(t *testing.T) {
+			source, err := os.ReadFile(filepath.Join("..", "..", "skills", "canonical", test.directory, test.file))
+			if err != nil {
+				t.Fatal(err)
+			}
+			generated, ok := PhaseContract(PhaseID(test.phase))
+			if !ok || generated != string(source) {
+				t.Fatalf("generated %s contract is out of sync", test.phase)
+			}
+		})
+	}
+}
+
 func TestGeneratedQAContractContainsRequiredStrategies(t *testing.T) {
 	contract, ok := PhaseContract(PhaseQA)
 	if !ok {

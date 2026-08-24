@@ -10,6 +10,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/VedranJanjetovic/gg/internal/proof"
 )
 
 type AgentStatus struct{ Name, Status string }
@@ -1053,7 +1055,10 @@ func (s *LifecycleService) RecordPhase(ctx context.Context, slug, phase, subphas
 		current.ArtifactPaths = appendUnique(current.ArtifactPaths, artifacts...)
 		if outcome != nil && len(current.PhaseHistory) > 0 {
 			copy := *outcome
+			copy.DeferredChecks = append([]proof.DeferredCheck(nil), outcome.DeferredChecks...)
 			current.PhaseHistory[len(current.PhaseHistory)-1].Outcome = &copy
+			current.PhaseHistory[len(current.PhaseHistory)-1].DeferredChecks = appendUniqueDeferredChecks(current.PhaseHistory[len(current.PhaseHistory)-1].DeferredChecks, outcome.DeferredChecks...)
+			current.DeferredChecks = appendUniqueDeferredChecks(current.DeferredChecks, outcome.DeferredChecks...)
 		}
 		current.UpdatedAt = now
 		current.RunReservationToken = ""
@@ -1172,6 +1177,23 @@ func appendUnique(existing []string, additions ...string) []string {
 		found := false
 		for _, value := range result {
 			if value == addition {
+				found = true
+				break
+			}
+		}
+		if !found {
+			result = append(result, addition)
+		}
+	}
+	return result
+}
+
+func appendUniqueDeferredChecks(existing []proof.DeferredCheck, additions ...proof.DeferredCheck) []proof.DeferredCheck {
+	result := append([]proof.DeferredCheck(nil), existing...)
+	for _, addition := range additions {
+		found := false
+		for _, current := range result {
+			if current == addition {
 				found = true
 				break
 			}

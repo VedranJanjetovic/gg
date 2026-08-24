@@ -1531,6 +1531,7 @@ func executionOutcome(result agent.RunResult, developmentBaseCommit string) *sta
 		TokensUsed:            result.TokensUsed,
 		CostUSD:               result.CostUSD,
 		Error:                 result.Error,
+		DeferredChecks:        result.DeferredChecks,
 	}
 }
 func isCancellation(err error) bool {

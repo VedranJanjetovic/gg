@@ -19,6 +19,10 @@ Use only the assigned brief, current repository/worktree state, and artifacts ex
 - Declared behavior, changed worktree state, test strategy, and documentation audience.
 - Explicit QA, rebase, or development artifacts when supplied.
 
+## Pre-PR Verification Boundary
+
+Test/Document owns final test and documentation gaps. Follow repository conventions, including adding established end-to-end coverage even when execution is deferred to CI. Perform ordinary local setup, including local dependencies, services, and containers, and run every applicable check that is locally runnable. Do not connect to AWS or any other remote environment, and do not use remote credentials or endpoints. A check may be deferred only when repository evidence shows that it requires a remote credential or external endpoint; an ordinary local setup or test failure is a failure and must not be reclassified as deferred. Record each valid deferral with its location, check name, flow and expected behavior, exact remote-only reason, repository evidence, and CI/manual run instructions without claiming that it passed. A valid deferral does not block the phase, even when PR or CI is disabled.
+
 ## Outputs and Artifacts
 
 - Tests covering declared changed behavior and required documentation updates.

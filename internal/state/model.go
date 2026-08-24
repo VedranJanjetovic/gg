@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/VedranJanjetovic/gg/internal/proof"
 )
 
 // CurrentSchemaVersion is the version of ProjectState understood by this package.
@@ -58,6 +60,9 @@ type PhaseRecord struct {
 	StartedAt     time.Time       `json:"startedAt"`
 	CompletedAt   *time.Time      `json:"completedAt,omitempty"`
 	ArtifactPaths []string        `json:"artifactPaths,omitempty"`
+	// DeferredChecks contains validated remote-only checks from this execution.
+	// They are informational and do not claim that the checks passed.
+	DeferredChecks []proof.DeferredCheck `json:"deferredChecks,omitempty"`
 	// OccurrenceID identifies one execution occurrence. It is assigned when a
 	// new execution starts and is intentionally never reused by a retry.
 	OccurrenceID string `json:"occurrenceId,omitempty"`
@@ -148,6 +153,8 @@ type ExecutionOutcome struct {
 	// Error is the human-readable failure reason for a failed execution, so
 	// attached screens can explain the failure without reading log files.
 	Error string `json:"error,omitempty"`
+	// DeferredChecks carries validated remote-only checks into durable history.
+	DeferredChecks []proof.DeferredCheck `json:"deferredChecks,omitempty"`
 }
 
 // InterviewQA is one answered grooming question.
@@ -203,6 +210,8 @@ type ProjectState struct {
 	GitDisabled   bool          `json:"gitDisabled,omitempty"`
 	PhaseHistory  []PhaseRecord `json:"phaseHistory,omitempty"`
 	ArtifactPaths []string      `json:"artifactPaths,omitempty"`
+	// DeferredChecks is the normalized project handoff for later PR disclosure.
+	DeferredChecks []proof.DeferredCheck `json:"deferredChecks,omitempty"`
 	// PullRequestURL is the created PR identity used by later GitOps phases.
 	// It is optional so legacy state continues to use branch fallback.
 	PullRequestURL  string    `json:"pullRequestUrl,omitempty"`
@@ -272,6 +281,7 @@ func NewProjectState(input ProjectState) (ProjectState, error) {
 	state.AcceptanceCriteria = append([]string(nil), input.AcceptanceCriteria...)
 	state.PhaseHistory = append([]PhaseRecord(nil), input.PhaseHistory...)
 	state.ArtifactPaths = append([]string(nil), input.ArtifactPaths...)
+	state.DeferredChecks = append([]proof.DeferredCheck(nil), input.DeferredChecks...)
 	state.QAFeedbackArtifactPaths = append([]string(nil), input.QAFeedbackArtifactPaths...)
 	state.RebaseConflictArtifactPaths = append([]string(nil), input.RebaseConflictArtifactPaths...)
 	state.PipelineConfig.Data = append(json.RawMessage(nil), input.PipelineConfig.Data...)
@@ -295,14 +305,16 @@ func NewProjectState(input ProjectState) (ProjectState, error) {
 	}
 	for i := range state.PhaseHistory {
 		state.PhaseHistory[i].ArtifactPaths = append([]string(nil), input.PhaseHistory[i].ArtifactPaths...)
+		state.PhaseHistory[i].DeferredChecks = append([]proof.DeferredCheck(nil), input.PhaseHistory[i].DeferredChecks...)
+		if input.PhaseHistory[i].Outcome != nil {
+			outcome := *input.PhaseHistory[i].Outcome
+			outcome.DeferredChecks = append([]proof.DeferredCheck(nil), input.PhaseHistory[i].Outcome.DeferredChecks...)
+			state.PhaseHistory[i].Outcome = &outcome
+		}
 		if input.PhaseHistory[i].Skip != nil {
 			skip := *input.PhaseHistory[i].Skip
 			skip.Cleanup.Evidence = append([]string(nil), input.PhaseHistory[i].Skip.Cleanup.Evidence...)
 			state.PhaseHistory[i].Skip = &skip
-		}
-		if input.PhaseHistory[i].Outcome != nil {
-			outcome := *input.PhaseHistory[i].Outcome
-			state.PhaseHistory[i].Outcome = &outcome
 		}
 	}
 	if state.SchemaVersion == 0 {
@@ -394,6 +406,23 @@ func (state ProjectState) Validate() error {
 			if phase.Skip.NextPhase == "" && phase.Skip.NextSubphase != "" {
 				return fmt.Errorf("skip resolution entry %d has a subphase without a phase", i)
 			}
+		}
+		for j, check := range phase.DeferredChecks {
+			if err := check.Validate(); err != nil {
+				return fmt.Errorf("invalid deferred check %d in phase history entry %d: %w", j+1, i, err)
+			}
+		}
+		if phase.Outcome != nil {
+			for j, check := range phase.Outcome.DeferredChecks {
+				if err := check.Validate(); err != nil {
+					return fmt.Errorf("invalid deferred check %d in phase outcome %d: %w", j+1, i, err)
+				}
+			}
+		}
+	}
+	for i, check := range state.DeferredChecks {
+		if err := check.Validate(); err != nil {
+			return fmt.Errorf("invalid project deferred check %d: %w", i+1, err)
 		}
 	}
 	if state.MaxQAAttempts < 0 || state.QACompletedAttempts < 0 {

@@ -339,6 +339,7 @@ func (r *AgentRunner) Run(ctx context.Context, req RunRequest) (RunResult, error
 			status, et = state.StatusFailed, EventFailed
 			waitErr = errors.Join(waitErr, fmt.Errorf("validate QA proof: %w", proofErr))
 		} else {
+			result.DeferredChecks = append([]proof.DeferredCheck(nil), artifact.DeferredChecks...)
 			result.ArtifactPaths = appendUniquePath(result.ArtifactPaths, artifact.Path)
 			switch artifact.Classification {
 			case proof.ClassificationPass:
@@ -394,6 +395,7 @@ func (r *AgentRunner) Run(ctx context.Context, req RunRequest) (RunResult, error
 	}
 	metadataPath := log.Path() + ".json"
 	out := state.ExecutionOutcome{Runtime: string(req.Settings.Agent), Model: req.Settings.Model, Effort: string(req.Settings.Effort), ExitCode: result.ExitCode, StartedAt: result.StartedAt, FinishedAt: result.FinishedAt, Duration: result.Duration, LogPath: log.Path(), MetadataPath: metadataPath, Canceled: et == EventCanceled, TokensUsed: result.TokensUsed, CostUSD: result.CostUSD}
+	out.DeferredChecks = append([]proof.DeferredCheck(nil), result.DeferredChecks...)
 	if status == state.StatusFailed && waitErr != nil {
 		// Persist the failure reason so attached screens can answer "why did
 		// this phase fail" without digging through log files. The result

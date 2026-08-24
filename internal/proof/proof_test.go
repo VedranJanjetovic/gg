@@ -7,6 +7,63 @@ import (
 
 const validProof = "# PROOF\n\n## Validation: API request\n- Status: pass\n- Test location: internal/api/handler_test.go\n- Test name: TestCreateWidgetThroughHTTP\n- Flow/scenario: create a widget through the local HTTP API\n- What it verifies: the request is validated and persisted\n- Proof it passed: `go test ./internal/api -run TestCreateWidgetThroughHTTP -count=1` exited 0\n- Manual run instructions: start the service and run the curl request from the test.\n"
 
+const deferredProof = "# PROOF\n\n## Validation: AWS-backed flow\n- Status: deferred\n- Test location: internal/aws/handler_test.go\n- Test name: TestCreateWidgetAgainstAWS\n- Flow/scenario: create a widget through the deployed API\n- What it verifies: the deployed API persists and returns the created widget\n- Remote-only reason: the test requires AWS credentials and the deployed API endpoint\n- Repository evidence: internal/aws/handler_test.go configures AWS_ENDPOINT and the README documents the required credentials\n- Manual run instructions: run `go test ./internal/aws -run TestCreateWidgetAgainstAWS` in CI with the AWS secrets.\n"
+
+func TestDeferredProofClassificationAndNormalization(t *testing.T) {
+	parsed, err := Parse([]byte(deferredProof))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := parsed.Classify(); got != ClassificationPass {
+		t.Fatalf("classification = %q, want passed", got)
+	}
+	checks := parsed.DeferredChecks()
+	if len(checks) != 1 || checks[0].CheckName != "TestCreateWidgetAgainstAWS" || checks[0].RemoteOnlyReason == "" || checks[0].RepositoryEvidence == "" {
+		t.Fatalf("deferred checks = %#v", checks)
+	}
+}
+
+func TestDeferredProofValidationTable(t *testing.T) {
+	tests := []struct {
+		name, old, replacement, wantErr string
+	}{
+		{"missing location", "- Test location: internal/aws/handler_test.go", "- Test location:   ", "test location"},
+		{"missing check name", "- Test name: TestCreateWidgetAgainstAWS", "- Test name:   ", "check name"},
+		{"missing flow", "- Flow/scenario: create a widget through the deployed API", "- Flow/scenario:   ", "flow/scenario"},
+		{"missing expected behavior", "- What it verifies: the deployed API persists and returns the created widget", "- What it verifies:   ", "expected behavior"},
+		{"missing remote reason", "- Remote-only reason: the test requires AWS credentials and the deployed API endpoint", "- Remote-only reason:   ", "remote-only reason"},
+		{"missing repository evidence", "- Repository evidence: internal/aws/handler_test.go configures AWS_ENDPOINT and the README documents the required credentials", "- Repository evidence:   ", "repository evidence"},
+		{"missing run instructions", "- Manual run instructions: run `go test ./internal/aws -run TestCreateWidgetAgainstAWS` in CI with the AWS secrets.", "- Manual run instructions:   ", "run instructions"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := Parse([]byte(strings.Replace(deferredProof, test.old, test.replacement, 1)))
+			if err == nil || !strings.Contains(err.Error(), test.wantErr) {
+				t.Fatalf("error = %v, want %q", err, test.wantErr)
+			}
+		})
+	}
+	withPassClaim := strings.Replace(deferredProof, "- Remote-only reason:", "- Proof it passed: $ go test ./... exited 0\n- Remote-only reason:", 1)
+	if _, err := Parse([]byte(withPassClaim)); err == nil || !strings.Contains(err.Error(), "must not include proof it passed") {
+		t.Fatalf("deferred pass claim error = %v", err)
+	}
+}
+
+func TestDeferredProofMixedAndAllDeferredCollectionsPass(t *testing.T) {
+	allDeferred := deferredProof + strings.Replace(deferredProof, "## Validation: AWS-backed flow", "## Validation: second AWS-backed flow", 1)
+	if got, err := ClassifyMarkdown([]byte(allDeferred)); err != nil || got != ClassificationPass {
+		t.Fatalf("all-deferred classification = %q, error = %v", got, err)
+	}
+	mixed := validProof + "\n" + deferredProof
+	if got, err := ClassifyMarkdown([]byte(mixed)); err != nil || got != ClassificationPass {
+		t.Fatalf("mixed classification = %q, error = %v", got, err)
+	}
+	failedLocal := strings.Replace(deferredProof, "Status: deferred", "Status: fail", 1)
+	if got, err := ClassifyMarkdown([]byte(failedLocal)); err == nil || got != ClassificationFail {
+		t.Fatalf("local failure classification = %q, error = %v", got, err)
+	}
+}
+
 func TestParseAndClassifyTable(t *testing.T) {
 	tests := []struct {
 		name, input string

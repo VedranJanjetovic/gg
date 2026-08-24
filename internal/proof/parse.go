@@ -92,15 +92,19 @@ func Parse(data []byte) (Proof, error) {
 			current.Status = Status(strings.ToLower(value))
 		case "testlocation":
 			current.TestLocation = value
-		case "testname":
+		case "testname", "checkname":
 			current.TestName = value
 		case "flowscenario":
 			current.FlowScenario = value
-		case "whatitverifies":
+		case "whatitverifies", "expectedbehavior":
 			current.WhatItVerifies = value
 		case "proofitpassed":
 			current.ProofItPassed = value
-		case "manualruninstructions":
+		case "remoteonlyreason", "deferredreason":
+			current.RemoteOnlyReason = value
+		case "repositoryevidence":
+			current.RepositoryEvidence = value
+		case "manualruninstructions", "deferredruninstructions", "cimanualinstructions":
 			current.ManualRunInstructions = value
 		default:
 			return Proof{}, fmt.Errorf("line %d: unknown validation field %q", lineNumber+1, strings.TrimSpace(key))
@@ -124,15 +128,19 @@ func appendFieldContinuation(current *Validation, lastKey, text string) bool {
 	switch lastKey {
 	case "testlocation":
 		target = &current.TestLocation
-	case "testname":
+	case "testname", "checkname":
 		target = &current.TestName
 	case "flowscenario":
 		target = &current.FlowScenario
-	case "whatitverifies":
+	case "whatitverifies", "expectedbehavior":
 		target = &current.WhatItVerifies
 	case "proofitpassed":
 		target = &current.ProofItPassed
-	case "manualruninstructions":
+	case "remoteonlyreason", "deferredreason":
+		target = &current.RemoteOnlyReason
+	case "repositoryevidence":
+		target = &current.RepositoryEvidence
+	case "manualruninstructions", "deferredruninstructions", "cimanualinstructions":
 		target = &current.ManualRunInstructions
 	default:
 		return false
@@ -149,6 +157,8 @@ func normalizeKey(key string) string {
 	key = strings.ToLower(strings.TrimSpace(key))
 	key = strings.ReplaceAll(key, "/", "")
 	key = strings.ReplaceAll(key, " ", "")
+	key = strings.ReplaceAll(key, "-", "")
+	key = strings.ReplaceAll(key, "_", "")
 	return key
 }
 

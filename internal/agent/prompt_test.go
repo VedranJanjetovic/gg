@@ -125,6 +125,38 @@ func TestQAPromptRequiresProofRunIDFrontmatter(t *testing.T) {
 	}
 }
 
+func TestPrePRPromptsShareLocalOnlyVerificationBoundary(t *testing.T) {
+	for _, phase := range []pipeline.PhaseID{pipeline.PhaseDevelopment, pipeline.PhaseQA, pipeline.PhaseTestDocument, pipeline.PhaseBuildChecker} {
+		got, err := BuildPrompt(PromptInput{
+			ProjectGoal: "ship it", AcceptanceCriteria: []string{"tests pass"}, Phase: phase,
+			Subphase: "testing", PhaseContract: "verify", WorkingDirectory: "/worktree", RunID: "run",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, want := range []string{
+			"## Pre-PR verification boundary", "local dependencies, services, and containers",
+			"every applicable check that is locally runnable", "Do not connect to AWS or any other remote environment",
+			"ordinary local setup or test failure is a failure", "repository evidence",
+			"PR or CI is disabled",
+		} {
+			if !strings.Contains(got, want) {
+				t.Errorf("%s prompt missing %q", phase, want)
+			}
+		}
+	}
+	got, err := BuildPrompt(PromptInput{
+		ProjectGoal: "ship it", AcceptanceCriteria: []string{"tests pass"}, Phase: pipeline.PhasePlanning,
+		PhaseContract: "plan", WorkingDirectory: "/worktree", RunID: "run",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(got, "## Pre-PR verification boundary") {
+		t.Fatal("planning prompt unexpectedly carries pre-PR verification boundary")
+	}
+}
+
 func TestBuildPromptScopesDevelopmentToOnePlanPhase(t *testing.T) {
 	base := PromptInput{
 		Project: state.ProjectState{OriginalGoal: "ship it", AcceptanceCriteria: []string{"tests pass"}},

@@ -2,8 +2,11 @@ package state
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/VedranJanjetovic/gg/internal/proof"
 )
 
 func validProjectState() ProjectState {
@@ -114,5 +117,31 @@ func TestProjectStateRejectsInconsistentQALoopCursor(t *testing.T) {
 				t.Fatal("NewProjectState() accepted inconsistent QA loop cursor")
 			}
 		})
+	}
+}
+
+func TestProjectStateCarriesNormalizedDeferredChecks(t *testing.T) {
+	check := proof.DeferredCheck{
+		TestLocation: "internal/aws/handler_test.go", CheckName: "TestRemoteFlow",
+		FlowScenario: "exercise the deployed API", ExpectedBehavior: "the API persists the request",
+		RemoteOnlyReason: "requires AWS credentials", RepositoryEvidence: "config/aws.go uses AWS_ENDPOINT",
+		RunInstructions: "run in CI with AWS secrets",
+	}
+	project := validProjectState()
+	project.DeferredChecks = []proof.DeferredCheck{check}
+	project.PhaseHistory = []PhaseRecord{{Phase: "qa", Status: StatusFinished, StartedAt: project.CreatedAt, DeferredChecks: []proof.DeferredCheck{check}, Outcome: &ExecutionOutcome{DeferredChecks: []proof.DeferredCheck{check}}}}
+	got, err := NewProjectState(project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got.DeferredChecks[0].CheckName = "mutated"
+	got.PhaseHistory[0].DeferredChecks[0].CheckName = "mutated"
+	got.PhaseHistory[0].Outcome.DeferredChecks[0].CheckName = "mutated"
+	if project.DeferredChecks[0].CheckName != "TestRemoteFlow" || project.PhaseHistory[0].DeferredChecks[0].CheckName != "TestRemoteFlow" || project.PhaseHistory[0].Outcome.DeferredChecks[0].CheckName != "TestRemoteFlow" {
+		t.Fatal("NewProjectState did not copy deferred check slices")
+	}
+	encoded, err := json.Marshal(got)
+	if err != nil || !strings.Contains(string(encoded), "deferredChecks") {
+		t.Fatalf("encoded project = %s, error = %v", encoded, err)
 	}
 }

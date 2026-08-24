@@ -7,6 +7,7 @@ import (
 
 	"github.com/VedranJanjetovic/gg/internal/config"
 	"github.com/VedranJanjetovic/gg/internal/pipeline"
+	"github.com/VedranJanjetovic/gg/internal/proof"
 	"github.com/VedranJanjetovic/gg/internal/state"
 )
 
@@ -134,6 +135,9 @@ type RunResult struct {
 	// CostUSD is the agent-reported cost of this run in US dollars; zero
 	// when the agent does not report cost.
 	CostUSD float64
+	// DeferredChecks contains validated remote-only checks reported by a
+	// structured proof artifact. It never claims that a check passed.
+	DeferredChecks []proof.DeferredCheck
 }
 
 // ProcessSpec describes an executable invocation. Args are passed directly

@@ -165,6 +165,21 @@ func BuildPrompt(input PromptInput) (string, error) {
 		writeQuotedValue(&b, input.RunID)
 		b.WriteString("\n---\n")
 	}
+	if prePRVerificationPhase(input.Phase) {
+		b.WriteString("\n## Pre-PR verification boundary\n")
+		b.WriteString("This is a pre-PR verification phase. Perform ordinary local setup, including local dependencies, services, and containers, and run every applicable check that is locally runnable. Do not connect to AWS or any other remote environment, and do not use remote credentials or endpoints.\n")
+		b.WriteString("A check may be deferred only when repository evidence shows that it requires remote credentials or an external endpoint; an ordinary local setup or test failure is a failure and must not be reclassified as deferred. If a check is deferred, record its location, name, flow and expected behavior, exact remote-only reason, repository evidence, and CI/manual run instructions without claiming that it passed. A valid deferral does not block the phase, even when PR or CI is disabled.\n")
+		switch input.Phase {
+		case pipeline.PhaseDevelopment:
+			b.WriteString("Development Testing owns focused tests for this plan phase: add and run them, plus every other locally runnable check relevant to the implementation.\n")
+		case pipeline.PhaseQA:
+			b.WriteString("QA independently validates the acceptance criteria and records every exercised validation in PROOF.md.\n")
+		case pipeline.PhaseTestDocument:
+			b.WriteString("Test/Document owns final test and documentation gaps. Follow repository conventions, including adding established end-to-end coverage even when its execution is deferred to CI.\n")
+		case pipeline.PhaseBuildChecker:
+			b.WriteString("Build checker owns the declared build, lint, format, static-analysis, and packaging gates.\n")
+		}
+	}
 
 	b.WriteString("\n\n## Acceptance criteria\n")
 	for _, criterion := range criteria {
@@ -278,6 +293,15 @@ func phaseSkillName(phase pipeline.PhaseID) string {
 // codeTouchingPhase reports whether the phase writes, tests, or reviews code
 // and therefore must follow the coding patterns reference.
 func codeTouchingPhase(phase pipeline.PhaseID) bool {
+	switch phase {
+	case pipeline.PhaseDevelopment, pipeline.PhaseQA, pipeline.PhaseTestDocument, pipeline.PhaseBuildChecker:
+		return true
+	default:
+		return false
+	}
+}
+
+func prePRVerificationPhase(phase pipeline.PhaseID) bool {
 	switch phase {
 	case pipeline.PhaseDevelopment, pipeline.PhaseQA, pipeline.PhaseTestDocument, pipeline.PhaseBuildChecker:
 		return true
