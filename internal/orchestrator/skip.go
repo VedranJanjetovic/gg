@@ -25,16 +25,7 @@ const (
 // durable skip operation. Development implementation/review and all phases
 // before Development are deliberately excluded.
 func SkipAllowed(phase pipeline.PhaseID, subphase string) bool {
-	if phase == pipeline.PhaseDevelopment {
-		return subphase == string(pipeline.DevelopmentSubphaseTesting)
-	}
-	switch phase {
-	case pipeline.PhaseRebase, pipeline.PhaseQA, pipeline.PhaseTestDocument,
-		pipeline.PhaseBuildChecker, pipeline.PhasePR, pipeline.PhaseCI:
-		return subphase == ""
-	default:
-		return false
-	}
+	return state.IsSkipEligible(string(phase), subphase)
 }
 
 // SkipCleanupFor returns the phase-specific cleanup policy for an eligible
@@ -65,12 +56,18 @@ func ValidateSkipTarget(project state.ProjectState, phase pipeline.PhaseID, subp
 	if project.Status != state.StatusFailed {
 		return fmt.Errorf("%w: project status is %s", ErrSkipNotAllowed, project.Status)
 	}
+	if occurrenceID == "" {
+		return fmt.Errorf("%w: occurrence ID is required", ErrSkipNotAllowed)
+	}
 	if !SkipAllowed(phase, subphase) {
 		return fmt.Errorf("%w: %s/%s", ErrSkipNotAllowed, phase, subphase)
 	}
-	for _, record := range project.PhaseHistory {
+	for index, record := range project.PhaseHistory {
 		if record.OccurrenceID != occurrenceID {
 			continue
+		}
+		if index != len(project.PhaseHistory)-1 {
+			return fmt.Errorf("%w: occurrence %q is not the current failure", ErrSkipNotAllowed, occurrenceID)
 		}
 		if record.Phase != string(phase) || record.Subphase != subphase {
 			return fmt.Errorf("%w: occurrence belongs to %s/%s", ErrSkipNotAllowed, record.Phase, record.Subphase)

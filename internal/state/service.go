@@ -1143,8 +1143,10 @@ func updatePhaseHistory(history []PhaseRecord, phase, subphase string, status Li
 	}
 	last := &history[len(history)-1]
 	if last.Phase != phase || last.Subphase != subphase || last.CompletedAt != nil {
-		completed := now
-		last.CompletedAt = &completed
+		if last.CompletedAt == nil {
+			completed := now
+			last.CompletedAt = &completed
+		}
 		return append(history, PhaseRecord{Phase: phase, Subphase: subphase, Status: status, StartedAt: now, CompletedAt: completionTime(status, now), ArtifactPaths: appendUnique(nil, artifacts...), OccurrenceID: occurrenceID})
 	}
 	last.Status, last.ArtifactPaths = status, appendUnique(last.ArtifactPaths, artifacts...)

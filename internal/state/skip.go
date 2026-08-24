@@ -38,6 +38,22 @@ type SkipRequest struct {
 // error leaves the failed record unchanged and prevents continuation.
 type SkipCleanupFunc func(context.Context, ProjectState, PhaseRecord) (SkipCleanup, error)
 
+// IsSkipEligible reports whether a phase/subphase is one of the execution
+// units that the product permits users to waive. It lives at the durable
+// state boundary so callers cannot bypass the policy by skipping a higher
+// level presentation or orchestration helper.
+func IsSkipEligible(phase, subphase string) bool {
+	if phase == "development" {
+		return subphase == "testing"
+	}
+	switch phase {
+	case "rebase", "qa", "test_document", "build_checker", "pr", "ci":
+		return subphase == ""
+	default:
+		return false
+	}
+}
+
 // SkipFailedExecution atomically confirms one failed execution, records its
 // cleanup and continuation cursor, and leaves the project in its ordinary
 // failed lifecycle status. A later Resume/continuation can claim the project
@@ -81,17 +97,23 @@ func (s *LifecycleService) SkipFailedExecution(ctx context.Context, slug string,
 			return fmt.Errorf("%w: occurrence %q was not found", ErrStaleSkipOccurrence, request.OccurrenceID)
 		}
 		record := project.PhaseHistory[index]
+		if index != len(project.PhaseHistory)-1 {
+			return fmt.Errorf("%w: occurrence %q is not the current failure", ErrStaleSkipOccurrence, request.OccurrenceID)
+		}
 		if record.Skip != nil {
 			// A confirmed resolution is the durable idempotency key. Do not
 			// rerun cleanup or let a repeated key change the original waiver.
 			result = project
 			return nil
 		}
-		if index != len(project.PhaseHistory)-1 {
-			return fmt.Errorf("%w: occurrence %q is not the current failure", ErrStaleSkipOccurrence, request.OccurrenceID)
-		}
 		if record.Status != StatusFailed || record.CompletedAt == nil || (record.Outcome != nil && record.Outcome.Canceled) {
 			return fmt.Errorf("%w: occurrence %q has status %s", ErrSkipNotEligible, request.OccurrenceID, record.Status)
+		}
+		if !IsSkipEligible(record.Phase, record.Subphase) {
+			return fmt.Errorf("%w: phase %s/%s cannot be skipped", ErrSkipNotEligible, record.Phase, record.Subphase)
+		}
+		if err := validateSkipCursor(record, request); err != nil {
+			return err
 		}
 
 		cleanupResult := SkipCleanup{Status: SkipCleanupNotRequired}
@@ -128,6 +150,19 @@ func (s *LifecycleService) SkipFailedExecution(ctx context.Context, slug string,
 		return nil
 	})
 	return result, err
+}
+
+func validateSkipCursor(record PhaseRecord, request SkipRequest) error {
+	if record.Phase == "development" && record.Subphase == "testing" {
+		if request.NextPhase != "development" || request.NextSubphase != "review" {
+			return fmt.Errorf("%w: Development Testing must continue at Development Review", ErrSkipNotEligible)
+		}
+		return nil
+	}
+	if request.NextSubphase != "" {
+		return fmt.Errorf("%w: top-level skip continuation cannot select subphase %q", ErrSkipNotEligible, request.NextSubphase)
+	}
+	return nil
 }
 
 func newOccurrenceID() (string, error) {
