@@ -16,6 +16,7 @@ import (
 	"github.com/VedranJanjetovic/gg/internal/git"
 	"github.com/VedranJanjetovic/gg/internal/pipeline"
 	"github.com/VedranJanjetovic/gg/internal/pr"
+	"github.com/VedranJanjetovic/gg/internal/proof"
 	"github.com/VedranJanjetovic/gg/internal/state"
 )
 
@@ -952,6 +953,9 @@ func (c *sequentialController) executePhase(ctx context.Context, request Request
 	artifacts := appendUnique(request.Project.ArtifactPaths, feedback...)
 	invocationID := phaseInvocationID(request.RunID, phase, subphase, iteration)
 	promptInput := agent.PromptInput{Project: request.Project, Phase: phase, Subphase: subphase, PhaseContract: request.PhaseContracts[phase], ArtifactPaths: artifacts, WorkingDirectory: request.Project.WorktreePath, RunID: invocationID, Development: phase == pipeline.PhaseDevelopment}
+	if phase == pipeline.PhaseDevelopment && subphase == string(pipeline.DevelopmentSubphaseReview) {
+		promptInput.SkippedTestingEvidence = skippedTestingEvidence(request.Project)
+	}
 	if request.PlanningRetry != nil && phase == pipeline.PhasePlanning {
 		promptInput.PlanningAttempt = request.PlanningRetry.Attempt
 		promptInput.RejectedPlanningArtifact = request.PlanningRetry.Artifact
@@ -1340,7 +1344,21 @@ func (c *sequentialController) runPullRequest(ctx context.Context, request Reque
 			break
 		}
 	}
-	created, err := c.pullRequests.Create(ctx, pr.Request{GitOps: request.GitOps, Worktree: request.Project.WorktreePath, Remote: "origin", Branch: request.Project.BranchName, Title: "chore: update project", Why: request.Project.OriginalGoal, What: "Execute the configured gg pipeline", Push: true, ProofRequired: proofRequired})
+	qaProofWaived := proofRequired && qaWasExplicitlySkipped(request.Project)
+	created, err := c.pullRequests.Create(ctx, pr.Request{
+		GitOps:            request.GitOps,
+		Worktree:          request.Project.WorktreePath,
+		Remote:            "origin",
+		Branch:            request.Project.BranchName,
+		Title:             "chore: update project",
+		Why:               request.Project.OriginalGoal,
+		What:              "Execute the configured gg pipeline",
+		Push:              true,
+		ProofRequired:     proofRequired && !qaProofWaived,
+		ProofWaived:       qaProofWaived,
+		SkippedExecutions: skippedExecutionHandoff(request.Project),
+		DeferredChecks:    deferredChecksHandoff(request.Project),
+	})
 	if err != nil {
 		result.Status = state.StatusFailed
 		return result, err
@@ -1359,6 +1377,7 @@ func (c *sequentialController) runCI(ctx context.Context, request Request) (agen
 	if identity == "" {
 		identity = request.Project.BranchName
 	}
+	result.ExternalIdentity = identity
 	ciResult, err := c.checks.Monitor(ctx, ci.Config{Enabled: request.GitOps.EnableCI, Identity: identity, Worktree: request.Project.WorktreePath, ArtifactRoot: request.ArtifactRoot, ProjectSlug: request.Project.Slug, RunID: request.RunID, MaxPolls: 3})
 	result.ArtifactPaths = append(result.ArtifactPaths, ciResult.ReportPath, ciResult.FeedbackPath)
 	if err != nil {
@@ -1530,9 +1549,105 @@ func executionOutcome(result agent.RunResult, developmentBaseCommit string) *sta
 		DevelopmentBaseCommit: developmentBaseCommit,
 		TokensUsed:            result.TokensUsed,
 		CostUSD:               result.CostUSD,
+		ExternalIdentity:      result.ExternalIdentity,
 		Error:                 result.Error,
 		DeferredChecks:        result.DeferredChecks,
 	}
+}
+
+func skippedTestingEvidence(project state.ProjectState) *state.PhaseRecord {
+	for index := len(project.PhaseHistory) - 1; index >= 0; index-- {
+		record := project.PhaseHistory[index]
+		if record.Phase != string(pipeline.PhaseDevelopment) || record.Subphase != string(pipeline.DevelopmentSubphaseTesting) {
+			continue
+		}
+		if record.Skip == nil || record.Status != state.StatusFailed {
+			return nil
+		}
+		copy := record
+		copy.ArtifactPaths = append([]string(nil), record.ArtifactPaths...)
+		if record.Outcome != nil {
+			outcome := *record.Outcome
+			outcome.DeferredChecks = append([]proof.DeferredCheck(nil), record.Outcome.DeferredChecks...)
+			copy.Outcome = &outcome
+		}
+		return &copy
+	}
+	return nil
+}
+
+func qaWasExplicitlySkipped(project state.ProjectState) bool {
+	for index := len(project.PhaseHistory) - 1; index >= 0; index-- {
+		record := project.PhaseHistory[index]
+		if record.Phase != string(pipeline.PhaseQA) || record.Subphase != "" {
+			continue
+		}
+		return record.Status == state.StatusFailed && record.Skip != nil
+	}
+	return false
+}
+
+func skippedExecutionHandoff(project state.ProjectState) []pr.SkippedExecution {
+	result := make([]pr.SkippedExecution, 0)
+	for _, record := range project.PhaseHistory {
+		if record.Skip == nil || !prePRSkippedPhase(record.Phase, record.Subphase) {
+			continue
+		}
+		failure := ""
+		externalIdentity := record.Skip.ExternalIdentity
+		if record.Outcome != nil {
+			failure = record.Outcome.Error
+			if externalIdentity == "" {
+				externalIdentity = record.Outcome.ExternalIdentity
+			}
+		}
+		result = append(result, pr.SkippedExecution{
+			Phase:            record.Phase,
+			Subphase:         record.Subphase,
+			OccurrenceID:     record.OccurrenceID,
+			Failure:          failure,
+			ExternalIdentity: externalIdentity,
+		})
+	}
+	return result
+}
+
+func prePRSkippedPhase(phase, subphase string) bool {
+	return state.IsSkipEligible(phase, subphase) && phase != string(pipeline.PhasePR) && phase != string(pipeline.PhaseCI)
+}
+
+func deferredChecksHandoff(project state.ProjectState) []proof.DeferredCheck {
+	if len(project.DeferredChecks) > 0 {
+		return append([]proof.DeferredCheck(nil), project.DeferredChecks...)
+	}
+	result := make([]proof.DeferredCheck, 0)
+	for _, record := range project.PhaseHistory {
+		result = appendUniqueDeferredChecks(result, record.DeferredChecks...)
+		if record.Outcome != nil {
+			result = appendUniqueDeferredChecks(result, record.Outcome.DeferredChecks...)
+		}
+	}
+	return result
+}
+
+func appendUniqueDeferredChecks(existing []proof.DeferredCheck, additions ...proof.DeferredCheck) []proof.DeferredCheck {
+	result := append([]proof.DeferredCheck(nil), existing...)
+	for _, addition := range additions {
+		if err := addition.Validate(); err != nil {
+			continue
+		}
+		found := false
+		for _, current := range result {
+			if current == addition {
+				found = true
+				break
+			}
+		}
+		if !found {
+			result = append(result, addition)
+		}
+	}
+	return result
 }
 func isCancellation(err error) bool {
 	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)

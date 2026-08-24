@@ -201,6 +201,8 @@ The attached project view renders the persisted configured phases and Developmen
 
 The explicit `gg run`, `gg resume`, and `gg stop` commands remain available for scripting and direct lifecycle control.
 
+While a pipeline is running, `s` stops it. When a project is failed on a genuinely completed eligible execution, `s` instead opens a confirmation naming that exact execution; after confirmation gg records it as skipped and immediately starts the next unit. Skip is available only for Development Testing and the post-Development Rebase, QA, Test/Document, Build checker, PR, and CI units. It is TUI-only: there is no `gg skip` command. Stopped or interrupted work remains resumable with `r`, and ineligible failures cannot be skipped. Skipped failures retain their original evidence and a sticky count even if a later occurrence passes; the final project status remains the ordinary finished status.
+
 ## Developer workflow
 
 From this directory:
@@ -277,9 +279,11 @@ A bare `gg` creates a project and attaches to it. `gg <project>` attaches to an 
 
 ### Pipeline phases and QA feedback
 
-The executable pipeline uses the canonical contracts from the repository's root `skills/` directory rather than CLI-specific copies. The default order is acceptance criteria, grooming, planning, development (implementation/testing/review subphases), rebase, QA, test/document, build checker, PR, and CI; PR and CI can be disabled by effective configuration. The persisted phase history and attached view show the actual enabled phases and development subphases.
+The executable pipeline uses the canonical contracts from the repository's root `skills/` directory rather than CLI-specific copies. New pipeline snapshots use the order acceptance criteria, grooming, planning, development (implementation/testing/review subphases), rebase, QA, test/document, build checker, PR, and CI; PR and CI can be disabled by effective configuration. Older unfinished snapshots keep their persisted order when resumed. The persisted phase history and attached view show the actual enabled phases and development subphases.
 
-QA must produce a structured `PROOF.md` validation artifact. A pass advances to the next phase. QA feedback routes the workflow back through Development, Rebase, and then QA again, up to `--max-iterations` total QA attempts (default `3`). Exhaustion leaves the project failed with the attempt count persisted. For example:
+Planning classifies the complete request as Trivial, Simple, Moderate, or Complex before selecting phases. Trivial work is one cohesive localized outcome and uses exactly one phase; Simple work usually uses one or two, Moderate two to four, and Complex five to ten. Those bands are advisory except for Trivial, while ten phases is a hard maximum for new plans. An invalid plan is rejected and replanned with a fresh agent, for at most three total Planning attempts; gg never truncates scope itself. README-only wording is the representative Trivial case. Legacy unfinished projects retain their accepted plans, including plans above ten phases.
+
+QA must produce a structured `PROOF.md` validation artifact. A pass advances to the next phase. Development Testing, QA, Test/Document, and Build checker run every check available in the local worktree after ordinary local setup. Checks requiring AWS credentials or another remote endpoint are deferred only with repository evidence and are disclosed for CI; local failures remain failures. A deferred check does not block the configured pipeline even when PR or CI is disabled. PR handoffs disclose every skipped pre-PR execution, its original failure, and each deferred validation. An explicitly confirmed QA skip waives `PROOF.md` only for that exact QA occurrence; a later QA execution must provide proof or receive its own confirmation. QA feedback routes the workflow back through Development, Rebase, and then QA again, up to `--max-iterations` total QA attempts (default `3`). Exhaustion leaves the project failed with the attempt count persisted. For example:
 
 ```bash
 gg run dashboard --max-iterations 2 --disable-pr --disable-ci

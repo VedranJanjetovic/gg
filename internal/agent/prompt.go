@@ -40,6 +40,10 @@ type PromptInput struct {
 	PlanningAttempt          int
 	RejectedPlanningArtifact string
 	PlanningValidationErrors []string
+	// SkippedTestingEvidence carries the exact failed Testing occurrence into
+	// the Review subphase. Review must inspect the evidence, but an explicit
+	// user waiver is not itself a review failure.
+	SkippedTestingEvidence *state.PhaseRecord
 	// CodingPatternsPath is the absolute path of the installed
 	// gg-coding-patterns reference; code-touching phases are told to follow
 	// it. Empty omits the instruction.
@@ -178,6 +182,26 @@ func BuildPrompt(input PromptInput) (string, error) {
 			b.WriteString("Test/Document owns final test and documentation gaps. Follow repository conventions, including adding established end-to-end coverage even when its execution is deferred to CI.\n")
 		case pipeline.PhaseBuildChecker:
 			b.WriteString("Build checker owns the declared build, lint, format, static-analysis, and packaging gates.\n")
+		}
+	}
+	if input.Phase == pipeline.PhaseDevelopment && input.Subphase == string(pipeline.DevelopmentSubphaseReview) && input.SkippedTestingEvidence != nil {
+		evidence := input.SkippedTestingEvidence
+		b.WriteString("\n## Explicitly waived Development Testing evidence\n")
+		b.WriteString("The user explicitly confirmed skipping this exact failed Testing occurrence. Inspect the retained failure and fix any concrete defect it reveals, but do not fail Review solely because the waived check remains failed or was unavailable.\n")
+		fmt.Fprintf(&b, "- Occurrence: %s\n", strconv.Quote(evidence.OccurrenceID))
+		if evidence.Outcome != nil {
+			fmt.Fprintf(&b, "- Original failure: %s\n", strconv.Quote(evidence.Outcome.Error))
+		}
+		if len(evidence.ArtifactPaths) > 0 {
+			b.WriteString("- Evidence artifacts:\n")
+			for _, path := range evidence.ArtifactPaths {
+				if strings.TrimSpace(path) == "" {
+					continue
+				}
+				b.WriteString("  - ")
+				writeQuotedValue(&b, path)
+				b.WriteByte('\n')
+			}
 		}
 	}
 

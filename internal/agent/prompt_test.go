@@ -3,6 +3,7 @@ package agent
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/VedranJanjetovic/gg/internal/pipeline"
 	"github.com/VedranJanjetovic/gg/internal/state"
@@ -198,6 +199,38 @@ func TestBuildPromptScopesDevelopmentToOnePlanPhase(t *testing.T) {
 				t.Fatal("scoped runs must not carry the agent-reported completion instruction (completion is orchestrator-owned)")
 			}
 		})
+	}
+}
+
+func TestReviewPromptCarriesExplicitlySkippedTestingEvidence(t *testing.T) {
+	when := time.Date(2026, time.August, 24, 12, 0, 0, 0, time.UTC)
+	record := state.PhaseRecord{
+		Phase: "development", Subphase: "testing", Status: state.StatusFailed,
+		OccurrenceID: "testing-occurrence", ArtifactPaths: []string{".gg/testing.md"},
+		CompletedAt: &when,
+		Outcome:     &state.ExecutionOutcome{Error: "focused test failed: expected 2, got 1"},
+		Skip:        &state.SkipResolution{ConfirmedAt: when, Cleanup: state.SkipCleanup{Status: state.SkipCleanupSucceeded}},
+	}
+	got, err := BuildPrompt(PromptInput{
+		Project: state.ProjectState{OriginalGoal: "ship it", AcceptanceCriteria: []string{"review the change"}},
+		Phase:   pipeline.PhaseDevelopment, Subphase: string(pipeline.DevelopmentSubphaseReview),
+		PhaseContract: "review", WorkingDirectory: "/worktree", RunID: "run/development/review/iteration-0",
+		SkippedTestingEvidence: &record,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"## Explicitly waived Development Testing evidence",
+		`"testing-occurrence"`,
+		`"focused test failed: expected 2, got 1"`,
+		`".gg/testing.md"`,
+		"fix any concrete defect it reveals",
+		"do not fail Review solely",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("review prompt missing %q:\n%s", want, got)
+		}
 	}
 }
 

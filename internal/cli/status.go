@@ -116,7 +116,11 @@ func writeProjectDetail(output io.Writer, project state.ProjectState) error {
 		if continuation == "" {
 			continuation = "-"
 		}
-		if _, err := fmt.Fprintf(output, "Skipped: %s\n  Occurrence: %s\n  Failure: %s\n  Confirmed: %s\n  Cleanup: %s\n  Cleanup evidence: %s\n  Continuation: %s\n", label, displayValue(record.OccurrenceID), skippedFailureSummary(record), formatUpdated(record.Skip.ConfirmedAt), record.Skip.Cleanup.Status, evidence, continuation); err != nil {
+		externalIdentity := record.Skip.ExternalIdentity
+		if externalIdentity == "" && record.Outcome != nil {
+			externalIdentity = record.Outcome.ExternalIdentity
+		}
+		if _, err := fmt.Fprintf(output, "Skipped: %s\n  Occurrence: %s\n  Failure: %s\n  Confirmed: %s\n  Cleanup: %s\n  Cleanup evidence: %s\n  External identity: %s\n  Continuation: %s\n", label, displayValue(record.OccurrenceID), skippedFailureSummary(record), formatUpdated(record.Skip.ConfirmedAt), record.Skip.Cleanup.Status, evidence, displayValue(externalIdentity), continuation); err != nil {
 			return err
 		}
 	}

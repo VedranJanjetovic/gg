@@ -315,10 +315,18 @@ func (a *App) skipFailedExecution(ctx context.Context, selector string, skipper 
 	if err != nil {
 		return err
 	}
+	externalIdentity := ""
+	if last.Outcome != nil {
+		externalIdentity = last.Outcome.ExternalIdentity
+	}
+	if externalIdentity == "" {
+		externalIdentity = current.PullRequestURL
+	}
 	if _, err := skipper.SkipFailedExecution(ctx, selector, state.SkipRequest{
-		OccurrenceID: last.OccurrenceID,
-		NextPhase:    nextPhase,
-		NextSubphase: nextSubphase,
+		OccurrenceID:     last.OccurrenceID,
+		NextPhase:        nextPhase,
+		NextSubphase:     nextSubphase,
+		ExternalIdentity: externalIdentity,
 	}, nil); err != nil {
 		return fmt.Errorf("skip %s/%s: %w", last.Phase, last.Subphase, err)
 	}

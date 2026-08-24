@@ -153,6 +153,9 @@ type ExecutionOutcome struct {
 	// Error is the human-readable failure reason for a failed execution, so
 	// attached screens can explain the failure without reading log files.
 	Error string `json:"error,omitempty"`
+	// ExternalIdentity retains an unavoidable GitOps resource identity, such as
+	// a pull request URL, when the execution later fails or is skipped.
+	ExternalIdentity string `json:"externalIdentity,omitempty"`
 	// DeferredChecks carries validated remote-only checks into durable history.
 	DeferredChecks []proof.DeferredCheck `json:"deferredChecks,omitempty"`
 }
