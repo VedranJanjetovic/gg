@@ -46,9 +46,95 @@ func ClassifyProjectConfig(cfg ProjectConfig) ProjectConfigClassification {
 		return ProjectConfigMalformed
 	}
 	if err := ValidateCompleteProjectConfig(cfg); err != nil {
+		if isMigrationShape(cfg) {
+			return ProjectConfigMigrationRequired
+		}
 		return ProjectConfigMalformed
 	}
 	return ProjectConfigComplete
+}
+
+// isMigrationShape identifies older complete-shaped data that is structurally
+// understandable but cannot be used as a self-contained configuration yet.
+// It deliberately rejects invalid values and invalid required-phase state so a
+// malformed file is not given a migration escape hatch.
+func isMigrationShape(cfg ProjectConfig) bool {
+	if cfg.Version > CompleteSchemaVersion {
+		return false
+	}
+	if err := validateGitOpsOverride(cfg.GitOps, "gitops"); err != nil {
+		return false
+	}
+	if cfg.PhaseOverrides != nil {
+		if !validPartialSettingsOverride(cfg.Defaults) || validatePhaseOverrides(cfg.PhaseOverrides) != nil {
+			return false
+		}
+		return true
+	}
+	if completeSettingsShape(cfg.Defaults) {
+		if err := validateCompleteSettings(cfg.Defaults, "defaults"); err != nil {
+			return false
+		}
+	} else if !validPartialSettingsOverride(cfg.Defaults) {
+		return false
+	}
+	order := CompletePhaseOrder()
+	if len(cfg.Phases) > len(order) {
+		return false
+	}
+	for index, entry := range cfg.Phases {
+		if index >= len(order) || entry.Phase != order[index] || !isSupportedPhase(entry.Phase) {
+			return false
+		}
+		if entry.Required != isRequiredPhase(entry.Phase) {
+			return false
+		}
+		if entry.Required && !entry.Enabled {
+			return false
+		}
+		if completeAgentSettingsShape(entry.AgentSettings) {
+			if err := validateCompleteAgentSettings(entry.AgentSettings, "phase.settings"); err != nil {
+				return false
+			}
+		} else if !validPartialAgentSettings(entry.AgentSettings) {
+			return false
+		}
+	}
+	return len(cfg.Phases) < len(order) || len(cfg.Phases) > 0
+}
+
+func completeSettingsShape(settings AgentSettingsOverride) bool {
+	return settings.Agent != "" && settings.Model != "" && settings.Effort != "" && settings.Provenance != ""
+}
+
+func completeAgentSettingsShape(settings AgentSettings) bool {
+	return settings.Agent != "" && settings.Model != "" && settings.Effort != "" && settings.Provenance != ""
+}
+
+func validPartialAgentSettings(settings AgentSettings) bool {
+	if settings.Agent != "" && settings.Agent != AgentClaude && settings.Agent != AgentCodex {
+		return false
+	}
+	if settings.Effort != "" && settings.Effort != EffortLow && settings.Effort != EffortMedium && settings.Effort != EffortHigh {
+		return false
+	}
+	if settings.Provenance != "" && settings.Provenance != ModelProvenanceCatalog && settings.Provenance != ModelProvenanceManual {
+		return false
+	}
+	return true
+}
+
+func validPartialSettingsOverride(settings AgentSettingsOverride) bool {
+	if settings.Agent != "" && settings.Agent != AgentClaude && settings.Agent != AgentCodex {
+		return false
+	}
+	if settings.Effort != "" && settings.Effort != EffortLow && settings.Effort != EffortMedium && settings.Effort != EffortHigh {
+		return false
+	}
+	if settings.Provenance != "" && settings.Provenance != ModelProvenanceCatalog && settings.Provenance != ModelProvenanceManual {
+		return false
+	}
+	return true
 }
 
 // Store persists global and project configuration as YAML.

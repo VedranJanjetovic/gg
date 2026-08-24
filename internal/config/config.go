@@ -248,18 +248,50 @@ func CompleteProjectConfig(version SchemaVersion, defaults AgentSettings, phases
 // an explicit configure/save boundary. It does not write anything and never
 // mutates the input configuration.
 func MaterializeCompleteProjectConfig(global GlobalConfig, project *ProjectConfig) (ProjectConfig, error) {
-	resolved, err := Resolve(global, project, RunOverrides{})
+	classification := ProjectConfigMigrationRequired
+	if project != nil {
+		classification = ClassifyProjectConfig(*project)
+		if classification == ProjectConfigMalformed {
+			return ProjectConfig{}, errors.New("cannot materialize malformed project configuration")
+		}
+	}
+	legacy := classification == ProjectConfigMigrationRequired
+	resolutionProject := project
+	if project != nil && project.Phases != nil {
+		converted := project.Clone()
+		converted.PhaseOverrides = NormalizePhaseOverrides(converted.PhaseOverrides)
+		if converted.PhaseOverrides == nil {
+			converted.PhaseOverrides = make(map[Phase]PhaseOverride, len(converted.Phases))
+		}
+		for _, entry := range converted.Phases {
+			override := converted.PhaseOverrides[entry.Phase]
+			if !IsFixedPhase(entry.Phase) {
+				enabled := entry.Enabled
+				override.Enabled = &enabled
+			}
+			override.AgentSettingsOverride = AgentSettingsOverride{
+				Agent:      entry.AgentSettings.Agent,
+				Model:      entry.AgentSettings.Model,
+				Effort:     entry.AgentSettings.Effort,
+				Provenance: entry.AgentSettings.Provenance,
+			}
+			converted.PhaseOverrides[entry.Phase] = override
+		}
+		converted.Phases = nil
+		resolutionProject = &converted
+	}
+	resolved, err := Resolve(global, resolutionProject, RunOverrides{})
 	if err != nil {
 		return ProjectConfig{}, err
 	}
 	defaults := resolved.Defaults
-	if defaults.Provenance == "" {
+	if legacy || defaults.Provenance == "" {
 		defaults.Provenance = ModelProvenanceManual
 	}
 	phases := make([]PhaseConfig, 0, len(CompletePhaseOrder()))
 	for _, phase := range CompletePhaseOrder() {
 		settings := resolved.Phases[phase].AgentSettings
-		if settings.Provenance == "" {
+		if legacy || settings.Provenance == "" {
 			settings.Provenance = ModelProvenanceManual
 		}
 		phases = append(phases, PhaseConfig{

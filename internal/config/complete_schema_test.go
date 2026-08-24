@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/VedranJanjetovic/gg/internal/config"
+	"gopkg.in/yaml.v3"
 )
 
 func completeProject() config.ProjectConfig {
@@ -148,6 +149,85 @@ func TestSparseProjectRequiresMigrationWithoutRewriteAndCanBePrefilled(t *testin
 	}
 }
 
+func TestSparseCompleteShapeRequiresMigrationAndPrefillsMissingNewerPhase(t *testing.T) {
+	t.Parallel()
+
+	store := config.NewStore()
+	root := t.TempDir()
+	project := completeProject()
+	project.Version = config.CompleteSchemaVersion - 1
+	project.Phases = project.Phases[:len(project.Phases)-1]
+	if err := os.MkdirAll(root+"/.gg", 0700); err != nil {
+		t.Fatal(err)
+	}
+	data, err := yaml.Marshal(project)
+	if err != nil {
+		t.Fatalf("marshal legacy complete shape: %v", err)
+	}
+	if err := os.WriteFile(store.ProjectConfigPath(root), data, 0600); err != nil {
+		t.Fatalf("write legacy complete shape: %v", err)
+	}
+	before, err := os.ReadFile(store.ProjectConfigPath(root))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	loaded, err := store.LoadProjectClassified(root)
+	if err != nil {
+		t.Fatalf("LoadProjectClassified: %v", err)
+	}
+	if loaded.Classification != config.ProjectConfigMigrationRequired {
+		t.Fatalf("classification = %q, want migration_required", loaded.Classification)
+	}
+
+	global := config.GlobalConfig{
+		Version:  config.CurrentSchemaVersion,
+		Defaults: config.AgentSettings{Agent: config.AgentClaude, Model: "global-model", Effort: config.EffortMedium},
+	}
+	prefilled, err := config.MaterializeCompleteProjectConfig(global, &loaded.Config)
+	if err != nil {
+		t.Fatalf("MaterializeCompleteProjectConfig: %v", err)
+	}
+	if err := config.ValidateCompleteProjectConfig(prefilled); err != nil {
+		t.Fatalf("prefilled config invalid: %v", err)
+	}
+	if got := prefilled.Phases[len(prefilled.Phases)-1].Phase; got != config.PhaseCI {
+		t.Fatalf("prefilled final phase = %q, want %q", got, config.PhaseCI)
+	}
+	after, err := os.ReadFile(store.ProjectConfigPath(root))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(after, before) {
+		t.Fatal("loading or prefilling sparse config rewrote the legacy file")
+	}
+}
+
+func TestPartialPhaseTupleRequiresMigrationAndInvalidPhaseDataIsMalformed(t *testing.T) {
+	t.Parallel()
+
+	partial := completeProject()
+	partial.Version = config.CompleteSchemaVersion - 1
+	partial.Phases[0].AgentSettings.Model = ""
+	if got := config.ClassifyProjectConfig(partial); got != config.ProjectConfigMigrationRequired {
+		t.Fatalf("partial tuple classification = %q, want migration_required", got)
+	}
+
+	malformed := completeProject()
+	malformed.Phases[0].AgentSettings.Agent = config.Agent("unsupported")
+	if got := config.ClassifyProjectConfig(malformed); got != config.ProjectConfigMalformed {
+		t.Fatalf("invalid agent classification = %q, want malformed", got)
+	}
+
+	legacyWithBadOverride := config.ProjectConfig{
+		Version:        config.CurrentSchemaVersion,
+		PhaseOverrides: map[config.Phase]config.PhaseOverride{config.Phase("unknown"): {}},
+	}
+	if got := config.ClassifyProjectConfig(legacyWithBadOverride); got != config.ProjectConfigMalformed {
+		t.Fatalf("invalid sparse override classification = %q, want malformed", got)
+	}
+}
+
 func TestCompleteResolutionIsSelfContainedAndCloneIsolated(t *testing.T) {
 	t.Parallel()
 
@@ -168,6 +248,35 @@ func TestCompleteResolutionIsSelfContainedAndCloneIsolated(t *testing.T) {
 	clone.Phases[0].AgentSettings.Model = "changed"
 	if project.Phases[0].AgentSettings.Model == "changed" {
 		t.Fatal("ProjectConfig.Clone aliases phase settings")
+	}
+}
+
+func TestCompleteResolutionPreservesOptionalPhaseStateAgainstAmbientGitOps(t *testing.T) {
+	t.Parallel()
+
+	project := completeProject()
+	project.Phases[8].Enabled = false // PR is optional in the complete schema.
+	project.Phases[9].Enabled = false // CI is optional in the complete schema.
+	global := config.GlobalConfig{
+		Version:  config.CurrentSchemaVersion,
+		Defaults: config.AgentSettings{Agent: config.AgentClaude, Model: "changed-global", Effort: config.EffortLow},
+		GitOps:   config.GitOpsOverride{EnablePR: boolPtr(true), EnableCI: boolPtr(true)},
+	}
+
+	resolved, err := config.Resolve(global, &project, config.RunOverrides{})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if resolved.Phases[config.PhasePR].Enabled || resolved.Phases[config.PhaseCI].Enabled {
+		t.Fatalf("complete optional phase state was overwritten: PR=%v CI=%v", resolved.Phases[config.PhasePR].Enabled, resolved.Phases[config.PhaseCI].Enabled)
+	}
+
+	resolved, err = config.Resolve(global, &project, config.RunOverrides{GitOps: config.GitOpsOverride{EnablePR: boolPtr(true)}})
+	if err != nil {
+		t.Fatalf("Resolve with run override: %v", err)
+	}
+	if !resolved.Phases[config.PhasePR].Enabled || resolved.Phases[config.PhaseCI].Enabled {
+		t.Fatalf("run GitOps override was not applied: PR=%v CI=%v", resolved.Phases[config.PhasePR].Enabled, resolved.Phases[config.PhaseCI].Enabled)
 	}
 }
 

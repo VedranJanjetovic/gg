@@ -44,15 +44,16 @@ func Resolve(global GlobalConfig, project *ProjectConfig, run RunOverrides) (Res
 		gitops.Configured = gitops.Configured || hasGitOpsOverride(project.GitOps)
 		gitops = mergeGitOps(gitops, project.GitOps)
 	}
-	defaults = mergeAgentSettings(defaults, run.Defaults)
-	gitops.Configured = gitops.Configured || hasGitOpsOverride(run.GitOps)
-	gitops = mergeGitOps(gitops, run.GitOps)
-
 	phases := builtInPhaseDefaults()
 	if project != nil && project.Phases != nil {
 		for _, entry := range project.Phases {
 			phases[entry.Phase] = ResolvedPhase{Enabled: entry.Enabled, AgentSettings: entry.AgentSettings}
 		}
+		// A complete project owns its phase structure. Persisted PR/CI state
+		// therefore takes precedence over ambient global GitOps defaults.
+		// One-run GitOps overrides are applied below.
+		gitops.EnablePR = phases[PhasePR].Enabled
+		gitops.EnableCI = phases[PhaseCI].Enabled
 	} else {
 		applyDefaults(phases, AgentSettingsOverride{
 			Agent:      global.Defaults.Agent,
@@ -61,6 +62,9 @@ func Resolve(global GlobalConfig, project *ProjectConfig, run RunOverrides) (Res
 			Provenance: global.Defaults.Provenance,
 		})
 	}
+	defaults = mergeAgentSettings(defaults, run.Defaults)
+	gitops.Configured = gitops.Configured || hasGitOpsOverride(run.GitOps)
+	gitops = mergeGitOps(gitops, run.GitOps)
 	phases[PhasePR] = withEnabled(phases[PhasePR], gitops.EnablePR)
 	phases[PhaseCI] = withEnabled(phases[PhaseCI], gitops.EnableCI)
 
