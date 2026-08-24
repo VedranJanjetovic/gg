@@ -11,7 +11,9 @@ import (
 	"github.com/VedranJanjetovic/gg/internal/state"
 )
 
-const executionSnapshotSchemaVersion = 1
+const pipelineSnapshotWrapperVersion = 1
+const legacyExecutionSnapshotSchemaVersion = 1
+const executionSnapshotSchemaVersion = 2
 
 // PlanningContractVersion identifies snapshots created after the strict
 // Planning artifact contract became enforceable. A missing marker means the
@@ -67,14 +69,14 @@ func SnapshotExecution(plan ExecutablePipeline, subphases DevelopmentSubphaseGen
 	if err != nil {
 		return state.PipelineConfigSnapshot{}, fmt.Errorf("encode pipeline execution snapshot: %w", err)
 	}
-	return state.PipelineConfigSnapshot{SchemaVersion: executionSnapshotSchemaVersion, Data: data}, nil
+	return state.PipelineConfigSnapshot{SchemaVersion: pipelineSnapshotWrapperVersion, Data: data}, nil
 }
 
 // PlanningContractEnforced reports whether a persisted execution snapshot was
 // created under the strict Planning contract. Legacy snapshots intentionally
 // return false so accepted plans remain resumable and updateable unchanged.
 func PlanningContractEnforced(snapshot state.PipelineConfigSnapshot) bool {
-	if snapshot.SchemaVersion != executionSnapshotSchemaVersion || len(bytes.TrimSpace(snapshot.Data)) == 0 {
+	if snapshot.SchemaVersion != pipelineSnapshotWrapperVersion || len(bytes.TrimSpace(snapshot.Data)) == 0 {
 		return false
 	}
 	var persisted executionSnapshot
@@ -87,7 +89,7 @@ func PlanningContractEnforced(snapshot state.PipelineConfigSnapshot) bool {
 // RestoreExecution restores only persisted execution data. Ambient
 // configuration is deliberately not consulted.
 func RestoreExecution(snapshot state.PipelineConfigSnapshot) (ExecutablePipeline, DevelopmentSubphaseGeneration, int, error) {
-	if snapshot.SchemaVersion != executionSnapshotSchemaVersion {
+	if snapshot.SchemaVersion != pipelineSnapshotWrapperVersion {
 		return ExecutablePipeline{}, DevelopmentSubphaseGeneration{}, 0, fmt.Errorf("unsupported pipeline snapshot wrapper version %d", snapshot.SchemaVersion)
 	}
 	if len(bytes.TrimSpace(snapshot.Data)) == 0 || bytes.Equal(bytes.TrimSpace(snapshot.Data), []byte("{}")) {
@@ -120,7 +122,8 @@ func RestoreExecution(snapshot state.PipelineConfigSnapshot) (ExecutablePipeline
 }
 
 func validateExecutionSnapshot(snapshot executionSnapshot) error {
-	if snapshot.SchemaVersion != executionSnapshotSchemaVersion {
+	phaseOrder, err := executionPhaseOrder(snapshot.SchemaVersion)
+	if err != nil {
 		return fmt.Errorf("unsupported pipeline execution snapshot version %d", snapshot.SchemaVersion)
 	}
 	if snapshot.MaxQAAttempts <= 0 {
@@ -135,13 +138,12 @@ func validateExecutionSnapshot(snapshot executionSnapshot) error {
 	if len(snapshot.Phases) == 0 {
 		return errors.New("pipeline execution snapshot has no enabled phases")
 	}
-	canonical := DefaultPipeline().Phases()
-	indexes := make(map[PhaseID]int, len(canonical))
+	indexes := make(map[PhaseID]int, len(phaseOrder))
 	mandatory := make(map[PhaseID]bool)
-	for index, phase := range canonical {
-		indexes[phase.ID()] = index
-		if !phase.Metadata().Optional {
-			mandatory[phase.ID()] = false
+	for index, id := range phaseOrder {
+		indexes[id] = index
+		if !isOptionalPhase(id) {
+			mandatory[id] = false
 		}
 	}
 	previous := -1
@@ -151,7 +153,7 @@ func validateExecutionSnapshot(snapshot executionSnapshot) error {
 			return fmt.Errorf("pipeline execution snapshot phase %d has unknown ID %q", index, phase.ID)
 		}
 		if canonicalIndex <= previous {
-			return fmt.Errorf("pipeline execution snapshot phases are not in canonical increasing order at %q", phase.ID)
+			return fmt.Errorf("pipeline execution snapshot phases are not in schema-%d order at %q", snapshot.SchemaVersion, phase.ID)
 		}
 		if err := config.ValidateAgentSettings(phase.Settings); err != nil {
 			return fmt.Errorf("pipeline execution snapshot phase %q: %w", phase.ID, err)
@@ -176,6 +178,32 @@ func validateExecutionSnapshot(snapshot executionSnapshot) error {
 	return nil
 }
 
+func executionPhaseOrder(version int) ([]PhaseID, error) {
+	switch version {
+	case legacyExecutionSnapshotSchemaVersion:
+		return []PhaseID{
+			PhaseAcceptanceCriteria, PhaseGrooming, PhasePlanning, PhaseDevelopment,
+			PhaseQA, PhaseRebase, PhaseTestDocument, PhaseBuildChecker, PhasePR, PhaseCI,
+		}, nil
+	case executionSnapshotSchemaVersion:
+		return []PhaseID{
+			PhaseAcceptanceCriteria, PhaseGrooming, PhasePlanning, PhaseDevelopment,
+			PhaseRebase, PhaseQA, PhaseTestDocument, PhaseBuildChecker, PhasePR, PhaseCI,
+		}, nil
+	default:
+		return nil, fmt.Errorf("unsupported pipeline execution snapshot version %d", version)
+	}
+}
+
+func isOptionalPhase(id PhaseID) bool {
+	switch id {
+	case PhaseGrooming, PhasePlanning, PhaseQA, PhaseBuildChecker, PhasePR, PhaseCI:
+		return true
+	default:
+		return false
+	}
+}
+
 func cloneSubphaseGeneration(generation DevelopmentSubphaseGeneration) DevelopmentSubphaseGeneration {
 	generation.Subphases = append([]DevelopmentSubphaseDefinition(nil), generation.Subphases...)
 	return generation
@@ -183,7 +211,7 @@ func cloneSubphaseGeneration(generation DevelopmentSubphaseGeneration) Developme
 
 // SnapshotGitOps returns the GitOps settings persisted with an execution snapshot.
 func SnapshotGitOps(snapshot state.PipelineConfigSnapshot) (config.GitOpsConfig, error) {
-	if snapshot.SchemaVersion != executionSnapshotSchemaVersion {
+	if snapshot.SchemaVersion != pipelineSnapshotWrapperVersion {
 		return config.GitOpsConfig{}, fmt.Errorf("unsupported pipeline snapshot wrapper version %d", snapshot.SchemaVersion)
 	}
 	var persisted executionSnapshot

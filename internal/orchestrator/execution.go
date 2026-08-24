@@ -275,7 +275,11 @@ func (c *sequentialController) execute(ctx context.Context, request Request, res
 		if err != nil {
 			return outcomes, err
 		}
-		resumePhase, resumeSubphase = nextResumePhase(request.Pipeline, string(pipeline.PhaseRebase))
+		continuationTarget := pipeline.PhaseRebase
+		if _, rebaseBeforeQA := rebaseBeforeQAExecutable(request.Pipeline); rebaseBeforeQA {
+			continuationTarget = pipeline.PhaseQA
+		}
+		resumePhase, resumeSubphase = nextResumePhase(request.Pipeline, string(continuationTarget))
 		if resumePhase == "" {
 			return outcomes, errors.New("resolved rebase conflict has no phase after Rebase")
 		}
@@ -564,6 +568,13 @@ func (c *sequentialController) executeQAFeedbackLoop(ctx context.Context, reques
 		if resuming {
 			return fmt.Errorf("resume Development fix subphase %q is not configured", cursor)
 		}
+		rebaseOutcome, rebaseErr := c.executeRebaseBeforeQA(ctx, request, iteration, feedback)
+		if rebaseOutcome.Result.Phase != "" {
+			outcomes = append(outcomes, rebaseOutcome)
+		}
+		if rebaseErr != nil {
+			return rebaseErr
+		}
 		stage = "qa"
 		return c.persistQALoop(context.WithoutCancel(ctx), request, completed, stage, "", feedback)
 	}
@@ -681,6 +692,32 @@ func qaExecutable(plan pipeline.ExecutablePipeline) (pipeline.ExecutablePhase, b
 	return pipeline.ExecutablePhase{}, false
 }
 
+// executeRebaseBeforeQA preserves the new pipeline invariant for feedback
+// loops while leaving legacy snapshots with QA-before-Rebase semantics alone.
+func (c *sequentialController) executeRebaseBeforeQA(ctx context.Context, request *Request, iteration int, feedback []string) (PhaseOutcome, error) {
+	rebase, ok := rebaseBeforeQAExecutable(request.Pipeline)
+	if !ok {
+		return PhaseOutcome{}, nil
+	}
+	outcome, err := c.executePhase(ctx, *request, rebase, "", iteration, feedback)
+	request.Project.ArtifactPaths = appendUnique(request.Project.ArtifactPaths, outcome.Result.ArtifactPaths...)
+	return outcome, err
+}
+
+func rebaseBeforeQAExecutable(plan pipeline.ExecutablePipeline) (pipeline.ExecutablePhase, bool) {
+	phases := plan.Phases()
+	for index, executable := range phases {
+		if executable.Phase().ID() != pipeline.PhaseQA || index == 0 {
+			continue
+		}
+		previous := phases[index-1]
+		if previous.Phase().ID() == pipeline.PhaseRebase {
+			return previous, true
+		}
+	}
+	return pipeline.ExecutablePhase{}, false
+}
+
 func (c *sequentialController) routeConflict(ctx context.Context, request Request, outcome PhaseOutcome, phaseErr error) (bool, error) {
 	conflict := Conflict{
 		Phase:         pipeline.PhaseRebase,
@@ -738,6 +775,13 @@ func (c *sequentialController) retryCIFailure(ctx context.Context, request *Requ
 			if fixErr != nil {
 				return outcomes, PhaseOutcome{}, fixErr
 			}
+		}
+		rebaseOutcome, rebaseErr := c.executeRebaseBeforeQA(ctx, request, attempt, feedback)
+		if rebaseOutcome.Result.Phase != "" {
+			outcomes = append(outcomes, rebaseOutcome)
+		}
+		if rebaseErr != nil {
+			return outcomes, PhaseOutcome{}, rebaseErr
 		}
 		qaOutcome, qaErr := c.executePhase(ctx, *request, qa, "", attempt, feedback)
 		outcomes = append(outcomes, qaOutcome)

@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/VedranJanjetovic/gg/internal/agent"
+	"github.com/VedranJanjetovic/gg/internal/ci"
 	"github.com/VedranJanjetovic/gg/internal/config"
 	"github.com/VedranJanjetovic/gg/internal/orchestrator"
 	"github.com/VedranJanjetovic/gg/internal/pipeline"
@@ -309,7 +310,7 @@ func TestExecuteRunsEnabledPhasesInCanonicalOrderAndPersistsEvents(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []pipeline.PhaseID{pipeline.PhaseAcceptanceCriteria, pipeline.PhaseDevelopment, pipeline.PhaseDevelopment, pipeline.PhaseDevelopment, pipeline.PhaseQA, pipeline.PhaseRebase, pipeline.PhaseTestDocument, pipeline.PhasePR}
+	want := []pipeline.PhaseID{pipeline.PhaseAcceptanceCriteria, pipeline.PhaseDevelopment, pipeline.PhaseDevelopment, pipeline.PhaseDevelopment, pipeline.PhaseRebase, pipeline.PhaseQA, pipeline.PhaseTestDocument, pipeline.PhasePR}
 	if !reflect.DeepEqual(runner.phases, want) {
 		t.Fatalf("runner order=%v want=%v", runner.phases, want)
 	}
@@ -397,7 +398,7 @@ func TestExecuteSkipsDisabledPhases(t *testing.T) {
 	}
 }
 func TestExecuteStopsAfterFailureAndPersistsFailure(t *testing.T) {
-	runner := &fakeSeqRunner{err: errors.New("boom"), failAt: 5}
+	runner := &fakeSeqRunner{err: errors.New("boom"), failAt: 6}
 	store := &fakeState{}
 	events := &fakeEvents{}
 	req := request(t, resolvedPipeline(t, config.PhaseQA))
@@ -406,7 +407,7 @@ func TestExecuteStopsAfterFailureAndPersistsFailure(t *testing.T) {
 	if err == nil || !errors.Is(err, runner.err) {
 		t.Fatalf("err=%v", err)
 	}
-	if len(runner.phases) != 5 {
+	if len(runner.phases) != 6 {
 		t.Fatalf("dispatches=%v", runner.phases)
 	}
 	if store.calls[len(store.calls)-1].status != state.StatusFailed {
@@ -568,7 +569,7 @@ func TestExecuteQAPassesOnFirstAttemptWithoutFeedbackDispatch(t *testing.T) {
 }
 
 func TestExecuteQAFailThenFixDevelopmentThenPass(t *testing.T) {
-	runner := &feedbackRunner{statuses: []state.LifecycleStatus{state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFailed, state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFinished}, artifacts: []string{"qa-feedback.md"}}
+	runner := &feedbackRunner{statuses: []state.LifecycleStatus{state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFailed, state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFinished}, artifacts: []string{"qa-feedback.md"}}
 	store := &feedbackState{}
 	req := request(t, pipelineWithQA(t))
 	req.MaxIterations = 2
@@ -576,18 +577,21 @@ func TestExecuteQAFailThenFixDevelopmentThenPass(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(outcomes) != 11 {
-		t.Fatalf("outcomes=%d, want 11", len(outcomes))
+	if len(outcomes) != 12 {
+		t.Fatalf("outcomes=%d, want 12", len(outcomes))
 	}
-	if got := runner.calls; got != 11 {
-		t.Fatalf("dispatches=%d, want 11", got)
+	if got := runner.calls; got != 12 {
+		t.Fatalf("dispatches=%d, want 12", got)
 	}
-	for _, call := range runner.requests[5:8] {
+	for _, call := range runner.requests[6:9] {
 		if call.Phase != pipeline.PhaseDevelopment || len(call.ArtifactPaths) != 1 || call.ArtifactPaths[0] != "qa-feedback.md" {
 			t.Fatalf("fix request=%#v", call)
 		}
 	}
-	if got := runner.requests[8].ArtifactPaths; len(got) != 1 || got[0] != "qa-feedback.md" {
+	if runner.requests[9].Phase != pipeline.PhaseRebase || runner.requests[10].Phase != pipeline.PhaseQA {
+		t.Fatalf("feedback loop phases = %v, want Rebase then QA", []pipeline.PhaseID{runner.requests[9].Phase, runner.requests[10].Phase})
+	}
+	if got := runner.requests[10].ArtifactPaths; len(got) != 1 || got[0] != "qa-feedback.md" {
 		t.Fatalf("rerun QA artifacts=%v", got)
 	}
 	found := false
@@ -598,6 +602,52 @@ func TestExecuteQAFailThenFixDevelopmentThenPass(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("feedback artifact was not persisted: %#v", store.artifacts)
+	}
+}
+
+type retryPRService struct{}
+
+func (retryPRService) Create(context.Context, pr.Request) (pr.Result, error) {
+	return pr.Result{Created: true, URL: "https://github.com/example/repo/pull/1"}, nil
+}
+
+type retryCIService struct{ calls int }
+
+func (s *retryCIService) Monitor(context.Context, ci.Config) (ci.Result, error) {
+	s.calls++
+	if s.calls == 1 {
+		return ci.Result{Outcome: ci.OutcomeFailed}, nil
+	}
+	return ci.Result{Outcome: ci.OutcomePassed}, nil
+}
+
+func TestExecuteCIFailureRemediationRebasesBeforeQA(t *testing.T) {
+	runner := &fakeSeqRunner{}
+	checks := &retryCIService{}
+	req := request(t, resolvedPipeline(t, config.PhaseQA, config.PhasePR, config.PhaseCI))
+	req.ArtifactRoot = t.TempDir()
+	req.GitOps = config.GitOpsConfig{Configured: true, ParentBranch: "main", BaseRef: "origin/main", EnablePR: true, EnableCI: true}
+	req.MaxIterations = 2
+	if _, err := orchestrator.NewController(
+		orchestrator.WithRunner(runner),
+		orchestrator.WithPhaseState(&fakeState{}),
+		orchestrator.WithGitOpsServices(nil, retryPRService{}, checks),
+		orchestrator.WithPromptBuilder(fakePrompt{}),
+	).Execute(context.Background(), req); err != nil {
+		t.Fatal(err)
+	}
+	want := []pipeline.PhaseID{
+		pipeline.PhaseAcceptanceCriteria,
+		pipeline.PhaseDevelopment, pipeline.PhaseDevelopment, pipeline.PhaseDevelopment,
+		pipeline.PhaseRebase, pipeline.PhaseQA, pipeline.PhaseTestDocument,
+		pipeline.PhaseDevelopment, pipeline.PhaseDevelopment, pipeline.PhaseDevelopment,
+		pipeline.PhaseRebase, pipeline.PhaseQA,
+	}
+	if !reflect.DeepEqual(runner.phases, want) {
+		t.Fatalf("CI remediation phases = %v, want %v", runner.phases, want)
+	}
+	if checks.calls != 2 {
+		t.Fatalf("CI checks = %d, want initial failure plus remediation pass", checks.calls)
 	}
 }
 
@@ -622,7 +672,7 @@ func TestLifecycleBackedQAFailureKeepsDispatchClaimThroughFixAndPass(t *testing.
 		t.Fatal(err)
 	}
 	runner := &feedbackRunner{
-		statuses:  []state.LifecycleStatus{state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFailed},
+		statuses:  []state.LifecycleStatus{state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFailed},
 		artifacts: []string{"qa-report.md"},
 	}
 	req := request(t, pipelineWithQA(t))
@@ -659,7 +709,7 @@ func TestLifecycleBackedQAFailureKeepsDispatchClaimThroughFixAndPass(t *testing.
 }
 
 func TestExecuteQARepeatedFailureStopsAtMaxIterationsWithoutExtraDispatch(t *testing.T) {
-	statuses := []state.LifecycleStatus{state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFailed, state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFailed}
+	statuses := []state.LifecycleStatus{state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFailed, state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFailed}
 	runner := &feedbackRunner{statuses: statuses, artifacts: []string{"feedback.md"}}
 	store := &feedbackState{}
 	req := request(t, pipelineWithQA(t))
@@ -668,8 +718,8 @@ func TestExecuteQARepeatedFailureStopsAtMaxIterationsWithoutExtraDispatch(t *tes
 	if err == nil {
 		t.Fatal("expected max-iteration error")
 	}
-	if len(outcomes) != 9 || runner.calls != 9 {
-		t.Fatalf("outcomes=%d dispatches=%d, want 9", len(outcomes), runner.calls)
+	if len(outcomes) != 11 || runner.calls != 11 {
+		t.Fatalf("outcomes=%d dispatches=%d, want 11", len(outcomes), runner.calls)
 	}
 	if runner.requests[len(runner.requests)-1].Phase != pipeline.PhaseQA {
 		t.Fatalf("last request=%#v", runner.requests[len(runner.requests)-1])
@@ -677,7 +727,7 @@ func TestExecuteQARepeatedFailureStopsAtMaxIterationsWithoutExtraDispatch(t *tes
 }
 
 func TestExecuteQACancellationDoesNotStartFixDevelopment(t *testing.T) {
-	runner := &feedbackRunner{statuses: []state.LifecycleStatus{state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusStopped}}
+	runner := &feedbackRunner{statuses: []state.LifecycleStatus{state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusStopped}}
 	store := &feedbackState{}
 	req := request(t, pipelineWithQA(t))
 	req.MaxIterations = 3
@@ -685,15 +735,15 @@ func TestExecuteQACancellationDoesNotStartFixDevelopment(t *testing.T) {
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("err=%v, want cancellation", err)
 	}
-	if len(outcomes) != 5 || runner.calls != 5 {
-		t.Fatalf("outcomes=%d dispatches=%d, want 5", len(outcomes), runner.calls)
+	if len(outcomes) != 6 || runner.calls != 6 {
+		t.Fatalf("outcomes=%d dispatches=%d, want 6", len(outcomes), runner.calls)
 	}
 }
 
 func TestExecuteQABlockedDispositionIsTerminalWithoutFixDispatch(t *testing.T) {
 	runner := &feedbackRunner{
-		statuses:     []state.LifecycleStatus{state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFailed},
-		dispositions: []agent.Disposition{"", "", "", "", agent.DispositionBlocked},
+		statuses:     []state.LifecycleStatus{state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFailed},
+		dispositions: []agent.Disposition{"", "", "", "", "", agent.DispositionBlocked},
 		artifacts:    []string{"qa-report.md"},
 	}
 	store := &feedbackState{}
@@ -703,15 +753,15 @@ func TestExecuteQABlockedDispositionIsTerminalWithoutFixDispatch(t *testing.T) {
 	if err == nil {
 		t.Fatal("blocked QA unexpectedly entered the fix loop")
 	}
-	if len(outcomes) != 5 || runner.calls != 5 {
+	if len(outcomes) != 6 || runner.calls != 6 {
 		t.Fatalf("blocked QA outcomes=%d dispatches=%d, want exactly the initial QA boundary", len(outcomes), runner.calls)
 	}
 }
 
 func TestExecuteQATransportFailureIsTerminalWithoutFixDispatch(t *testing.T) {
 	runner := &feedbackRunner{
-		statuses:  []state.LifecycleStatus{state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFailed},
-		exitCodes: []int{0, 0, 0, 0, 9},
+		statuses:  []state.LifecycleStatus{state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFailed},
+		exitCodes: []int{0, 0, 0, 0, 0, 9},
 		artifacts: []string{"qa-report.md"},
 	}
 	store := &feedbackState{}
@@ -721,7 +771,7 @@ func TestExecuteQATransportFailureIsTerminalWithoutFixDispatch(t *testing.T) {
 	if err == nil {
 		t.Fatal("transport-failed QA unexpectedly entered the fix loop")
 	}
-	if len(outcomes) != 5 || runner.calls != 5 {
+	if len(outcomes) != 6 || runner.calls != 6 {
 		t.Fatalf("transport failure outcomes=%d dispatches=%d, want exactly the initial QA boundary", len(outcomes), runner.calls)
 	}
 }
@@ -739,7 +789,7 @@ func (r *conflictRouter) Route(_ context.Context, conflict orchestrator.Conflict
 
 func TestExecuteRebaseConflictPersistsFailureAndStopsTerminalRoute(t *testing.T) {
 	runner := &feedbackRunner{
-		statuses:  []state.LifecycleStatus{state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFailed},
+		statuses:  []state.LifecycleStatus{state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFailed},
 		artifacts: []string{"rebase-conflict.txt"},
 	}
 	store := &feedbackState{}
@@ -753,8 +803,8 @@ func TestExecuteRebaseConflictPersistsFailureAndStopsTerminalRoute(t *testing.T)
 	if err == nil {
 		t.Fatal("expected unresolved conflict error")
 	}
-	if runner.calls != 6 {
-		t.Fatalf("dispatches=%d, want 6 (no dispatch after terminal conflict)", runner.calls)
+	if runner.calls != 5 {
+		t.Fatalf("dispatches=%d, want 5 (no dispatch after terminal conflict)", runner.calls)
 	}
 	last := store.calls[len(store.calls)-1]
 	if last.phase != string(pipeline.PhaseRebase) || last.status != state.StatusFailed {
@@ -768,7 +818,7 @@ func TestExecuteRebaseConflictPersistsFailureAndStopsTerminalRoute(t *testing.T)
 func TestExecuteRebaseConflictRouterErrorPreservesFailureContext(t *testing.T) {
 	routerErr := errors.New("resolver unavailable")
 	runner := &feedbackRunner{
-		statuses:  []state.LifecycleStatus{state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFailed},
+		statuses:  []state.LifecycleStatus{state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFailed},
 		artifacts: []string{"rebase-conflict.txt"},
 	}
 	store := &feedbackState{}
@@ -792,7 +842,7 @@ func TestExecuteRebaseConflictRouterErrorPreservesFailureContext(t *testing.T) {
 
 func TestExecuteDoesNotTreatRouterApprovalAsConflictResolutionInSameRun(t *testing.T) {
 	runner := &feedbackRunner{
-		statuses:  []state.LifecycleStatus{state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFailed, state.StatusFinished, state.StatusFinished},
+		statuses:  []state.LifecycleStatus{state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFailed, state.StatusFinished, state.StatusFinished},
 		artifacts: []string{"rebase-conflict.txt"},
 	}
 	store := &feedbackState{}
@@ -808,8 +858,8 @@ func TestExecuteDoesNotTreatRouterApprovalAsConflictResolutionInSameRun(t *testi
 	if err == nil {
 		t.Fatal("failed Rebase unexpectedly continued in the same run")
 	}
-	if runner.calls != 6 || len(outcomes) != 6 {
-		t.Fatalf("dispatches=%d outcomes=%d, want 6", runner.calls, len(outcomes))
+	if runner.calls != 5 || len(outcomes) != 5 {
+		t.Fatalf("dispatches=%d outcomes=%d, want 5", runner.calls, len(outcomes))
 	}
 	if len(router.seen) != 1 || !reflect.DeepEqual(router.seen[0].ArtifactPaths, []string{"rebase-conflict.txt"}) {
 		t.Fatalf("router conflicts=%#v", router.seen)
@@ -836,7 +886,7 @@ func TestExecuteDoesNotTreatRouterApprovalAsConflictResolutionInSameRun(t *testi
 }
 
 func TestExecuteRebaseCancellationDoesNotRouteConflict(t *testing.T) {
-	runner := &feedbackRunner{statuses: []state.LifecycleStatus{state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusStopped}}
+	runner := &feedbackRunner{statuses: []state.LifecycleStatus{state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusStopped}}
 	store := &feedbackState{}
 	events := &fakeEvents{}
 	router := &conflictRouter{route: orchestrator.ConflictRouteQA}
@@ -867,7 +917,7 @@ func (r productionConflictReader) HasUnresolvedConflicts(context.Context, string
 }
 
 func TestProductionControllerTreatsCleanIndexRebaseFailureAsOrdinaryFailure(t *testing.T) {
-	runner := &feedbackRunner{statuses: []state.LifecycleStatus{state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFailed, state.StatusFinished, state.StatusFinished}, artifacts: []string{"rebase-conflict.txt"}}
+	runner := &feedbackRunner{statuses: []state.LifecycleStatus{state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFailed, state.StatusFinished, state.StatusFinished}, artifacts: []string{"rebase-conflict.txt"}}
 	store := &feedbackState{}
 	req := request(t, pipelineWithQA(t))
 	req.Project.WorktreePath = "/worktree"
@@ -875,13 +925,13 @@ func TestProductionControllerTreatsCleanIndexRebaseFailureAsOrdinaryFailure(t *t
 	if err == nil {
 		t.Fatal("ordinary clean-index Rebase failure unexpectedly continued")
 	}
-	if runner.calls != 6 {
+	if runner.calls != 5 {
 		t.Fatalf("calls=%d requests=%#v", runner.calls, runner.requests)
 	}
 }
 
 func TestProductionControllerKeepsUnresolvedGitConflictTerminal(t *testing.T) {
-	runner := &feedbackRunner{statuses: []state.LifecycleStatus{state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFailed}, artifacts: []string{"rebase-conflict.txt"}}
+	runner := &feedbackRunner{statuses: []state.LifecycleStatus{state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFailed}, artifacts: []string{"rebase-conflict.txt"}}
 	store := &feedbackState{}
 	req := request(t, pipelineWithQA(t))
 	req.Project.WorktreePath = "/worktree"
@@ -889,8 +939,8 @@ func TestProductionControllerKeepsUnresolvedGitConflictTerminal(t *testing.T) {
 	if err == nil {
 		t.Fatal("unresolved conflict unexpectedly succeeded")
 	}
-	if runner.calls != 6 {
-		t.Fatalf("calls=%d, want 6", runner.calls)
+	if runner.calls != 5 {
+		t.Fatalf("calls=%d, want 5", runner.calls)
 	}
 }
 

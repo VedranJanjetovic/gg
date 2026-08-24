@@ -157,7 +157,7 @@ func TestProjectionUsesPersistedEnabledPhaseOrderAndDevelopmentSubphases(t *test
 		t.Fatal(err)
 	}
 	phases := model.Phases()
-	wantIDs := []string{"acceptance_criteria", "grooming", "development", "qa", "rebase", "test_document"}
+	wantIDs := []string{"acceptance_criteria", "grooming", "development", "rebase", "qa", "test_document"}
 	if len(phases) != len(wantIDs) {
 		t.Fatalf("phase count = %d, want %d: %#v", len(phases), len(wantIDs), phases)
 	}

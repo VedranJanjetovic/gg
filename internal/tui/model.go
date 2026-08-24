@@ -253,14 +253,17 @@ func definitionsFromExecution(plan pipeline.ExecutablePipeline, generation pipel
 	for _, phase := range plan.Phases() {
 		ids = append(ids, phase.Phase().ID())
 	}
-	return definitions(ids, generation)
+	// RestoreExecution has already validated the persisted schema-specific
+	// order. Do not compare it with the ambient canonical order: legacy
+	// snapshots intentionally retain QA before Rebase.
+	return definitions(ids, generation, false)
 }
 
 func definitionsFromPending(pending PendingPipeline) ([]phaseDefinition, error) {
-	return definitions(pending.Phases, pending.DevelopmentSubphases)
+	return definitions(pending.Phases, pending.DevelopmentSubphases, true)
 }
 
-func definitions(ids []pipeline.PhaseID, generation pipeline.DevelopmentSubphaseGeneration) ([]phaseDefinition, error) {
+func definitions(ids []pipeline.PhaseID, generation pipeline.DevelopmentSubphaseGeneration, validateCanonicalOrder bool) ([]phaseDefinition, error) {
 	canonical := pipeline.DefaultPipeline().Phases()
 	byID := make(map[pipeline.PhaseID]pipeline.Phase, len(canonical))
 	indexes := make(map[pipeline.PhaseID]int, len(canonical))
@@ -278,7 +281,7 @@ func definitions(ids []pipeline.PhaseID, generation pipeline.DevelopmentSubphase
 		if !ok {
 			return nil, fmt.Errorf("display pipeline contains unknown phase %q", id)
 		}
-		if indexes[id] <= previous {
+		if validateCanonicalOrder && indexes[id] <= previous {
 			return nil, fmt.Errorf("display pipeline phases are not in canonical order at %q", id)
 		}
 		previous = indexes[id]

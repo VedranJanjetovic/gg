@@ -337,7 +337,7 @@ func TestProductionControllerThroughCLIStopsOnOrdinaryRebaseFailure(t *testing.T
 			qaCount++
 		}
 	}
-	if qaCount != 1 || phases[len(phases)-1] != pipeline.PhaseRebase {
-		t.Fatalf("phases=%v, want one QA and terminal Rebase", phases)
+	if qaCount != 0 || phases[len(phases)-1] != pipeline.PhaseRebase {
+		t.Fatalf("phases=%v, want Rebase to fail before QA", phases)
 	}
 }
