@@ -49,6 +49,21 @@ func TestRebaseRejectsUnsafeBranchBeforeInvokingGit(t *testing.T) {
 	}
 }
 
+func TestRebaseRequiresConfiguredParentEvenWhenBaseRefIsPresent(t *testing.T) {
+	f := &remoteExecutor{outputs: []string{"unexpected"}}
+	_, err := git.NewClient("/repo", f).RebaseProject(context.Background(), git.RebaseRequest{
+		WorktreePath: "/repo/project",
+		Branch:       "gg/project",
+		BaseRef:      "origin/main",
+	})
+	if err == nil || !strings.Contains(err.Error(), "parent branch is required") {
+		t.Fatalf("error = %v, want configured-parent rejection", err)
+	}
+	if len(f.calls) != 0 {
+		t.Fatalf("git calls = %#v, want none", f.calls)
+	}
+}
+
 func TestRebaseCheckpointCommandsRestoreCleanBranchState(t *testing.T) {
 	f := &remoteExecutor{
 		outputs: []string{"gg/project\n", "0123456789abcdef\n", "", "", "", "", "", "", "gg/project\n", "0123456789abcdef\n", ""},
@@ -108,7 +123,7 @@ func TestCaptureRebaseCheckpointRejectsDirtyWorktree(t *testing.T) {
 func TestRebaseConflictPreservesOutputAndPaths(t *testing.T) {
 	cause := errors.New("rebase failed")
 	f := &remoteExecutor{outputs: []string{"CONFLICT (content): Merge conflict in app.go\n", "app.go\nREADME.md\napp.go\n"}, errs: []error{cause}}
-	got, err := git.NewClient("/repo", f).RebaseProject(context.Background(), git.RebaseRequest{WorktreePath: "/repo/project", Branch: "gg/project", BaseRef: "main"})
+	got, err := git.NewClient("/repo", f).RebaseProject(context.Background(), git.RebaseRequest{WorktreePath: "/repo/project", Branch: "gg/project", ParentBranch: "main", BaseRef: "stale/base"})
 	if !errors.Is(err, git.ErrRebaseConflict) || got.Conflict == nil {
 		t.Fatalf("result=%#v err=%v", got, err)
 	}
@@ -127,7 +142,7 @@ func TestRebaseMalformedConflictOutputRemainsOrdinaryError(t *testing.T) {
 	cause := errors.New("bad rebase")
 	inspect := errors.New("status unavailable")
 	f := &remoteExecutor{outputs: []string{"rebase output\n"}, errs: []error{cause, inspect}}
-	got, err := git.NewClient("/repo", f).RebaseProject(context.Background(), git.RebaseRequest{WorktreePath: "/repo/project", Branch: "gg/project", BaseRef: "main"})
+	got, err := git.NewClient("/repo", f).RebaseProject(context.Background(), git.RebaseRequest{WorktreePath: "/repo/project", Branch: "gg/project", ParentBranch: "main", BaseRef: "stale/base"})
 	if errors.Is(err, git.ErrRebaseConflict) || err == nil || !strings.Contains(err.Error(), "inspect conflicts") {
 		t.Fatalf("result=%#v err=%v", got, err)
 	}

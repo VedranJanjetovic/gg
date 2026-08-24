@@ -222,3 +222,31 @@ func TestRunRebaseUsesThreeAttemptsForOrdinaryFailuresAndRestoresFinalCheckpoint
 		t.Fatalf("attempt counts fetch=%d rebase=%d restore=%d", rebaser.fetches, rebaser.rebases, rebaser.restores)
 	}
 }
+
+type cancelingRebaser struct {
+	retryRebaser
+	cancel context.CancelFunc
+}
+
+func (r *cancelingRebaser) FetchParent(ctx context.Context, parent string) (git.FetchResult, error) {
+	r.cancel()
+	r.fetches++
+	return git.FetchResult{}, ctx.Err()
+}
+
+func TestRunRebaseStopsAndRestoresAfterCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	rebaser := &cancelingRebaser{cancel: cancel}
+	controller := &sequentialController{rebaser: rebaser, prompts: retryRebasePrompt{}}
+	request := Request{
+		Project: state.ProjectState{Slug: "demo", WorktreePath: "/worktree", BranchName: "feature"},
+		GitOps:  config.GitOpsConfig{ParentBranch: "main"},
+	}
+	result, err := controller.runRebase(ctx, request, config.AgentSettings{})
+	if !errors.Is(err, context.Canceled) || result.Status != state.StatusStopped {
+		t.Fatalf("result=%#v err=%v, want stopped cancellation", result, err)
+	}
+	if rebaser.fetches != 1 || rebaser.rebases != 0 || rebaser.restores != 2 {
+		t.Fatalf("attempt counts fetch=%d rebase=%d restore=%d, want one fetch and cleanup restore", rebaser.fetches, rebaser.rebases, rebaser.restores)
+	}
+}

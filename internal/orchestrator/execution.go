@@ -1147,14 +1147,35 @@ func (c *sequentialController) runRebase(ctx context.Context, request Request, s
 	evidence := make([]string, 0, maxRebaseAttempts)
 	var lastResult git.RebaseResult
 	var lastErr error
+	restoreCheckpoint := func() error {
+		if !hasCheckpoint {
+			return nil
+		}
+		restoreContext := ctx
+		if ctx.Err() != nil {
+			// A canceled run still needs to leave Git safe for a later resume or
+			// confirmed skip. Do not let the canceled phase context prevent abort
+			// and checkpoint restoration.
+			restoreContext = context.WithoutCancel(ctx)
+		}
+		return manager.RestoreRebaseCheckpoint(restoreContext, checkpoint)
+	}
 	for attempt := 1; attempt <= maxRebaseAttempts; attempt++ {
+		if err := ctx.Err(); err != nil {
+			result.Status = state.StatusStopped
+			if restoreErr := restoreCheckpoint(); restoreErr != nil {
+				return result, errors.Join(err, fmt.Errorf("restore Rebase checkpoint after cancellation: %w", restoreErr))
+			}
+			return result, err
+		}
 		if hasCheckpoint {
-			if err := manager.RestoreRebaseCheckpoint(ctx, checkpoint); err != nil {
+			if err := restoreCheckpoint(); err != nil {
 				result.Status = state.StatusFailed
 				return result, fmt.Errorf("restore Rebase checkpoint before attempt %d: %w", attempt, err)
 			}
 		}
 
+		lastResult = git.RebaseResult{}
 		if _, err := c.rebaser.FetchParent(ctx, parent); err != nil {
 			lastErr = fmt.Errorf("Rebase attempt %d fetch parent %q: %w", attempt, parent, err)
 			evidence = append(evidence, lastErr.Error())
@@ -1206,6 +1227,13 @@ func (c *sequentialController) runRebase(ctx context.Context, request Request, s
 				}
 			}
 		}
+		if err := ctx.Err(); err != nil {
+			result.Status = state.StatusStopped
+			if restoreErr := restoreCheckpoint(); restoreErr != nil {
+				return result, errors.Join(err, fmt.Errorf("restore Rebase checkpoint after cancellation: %w", restoreErr))
+			}
+			return result, err
+		}
 
 		if lastErr == nil {
 			result.Status = state.StatusFinished
@@ -1218,7 +1246,7 @@ func (c *sequentialController) runRebase(ctx context.Context, request Request, s
 		}
 
 		if attempt == maxRebaseAttempts && hasCheckpoint {
-			if restoreErr := manager.RestoreRebaseCheckpoint(ctx, checkpoint); restoreErr != nil {
+			if restoreErr := restoreCheckpoint(); restoreErr != nil {
 				result.Status = state.StatusFailed
 				return result, errors.Join(lastErr, fmt.Errorf("restore Rebase checkpoint after attempt %d: %w", attempt, restoreErr))
 			}

@@ -232,11 +232,6 @@ func (c *Client) RebaseProject(ctx context.Context, request RebaseRequest) (Reba
 		return RebaseResult{}, err
 	}
 	parentBranch := request.ParentBranch
-	if parentBranch == "" {
-		// Keep direct adapter callers compatible while the orchestrator always
-		// supplies the configured parent explicitly.
-		parentBranch = strings.TrimPrefix(request.BaseRef, "origin/")
-	}
 	if err := validateRef(parentBranch, "parent branch"); err != nil {
 		return RebaseResult{}, err
 	}
