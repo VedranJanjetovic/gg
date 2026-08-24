@@ -17,6 +17,40 @@ const (
 	projectsDirectory   = "projects"
 )
 
+// ProjectConfigClassification describes the persisted folder schema without
+// changing the legacy LoadProject API used by existing pipeline snapshots.
+type ProjectConfigClassification string
+
+const (
+	ProjectConfigComplete          ProjectConfigClassification = "complete"
+	ProjectConfigMigrationRequired ProjectConfigClassification = "migration_required"
+	ProjectConfigMalformed         ProjectConfigClassification = "malformed"
+)
+
+// ProjectConfigLoad is the explicit migration-gate result for folder config.
+// A migration-required result is readable for wizard prefilling but must not
+// be used as the source of a new project until it is saved in complete form.
+type ProjectConfigLoad struct {
+	Config         ProjectConfig
+	Classification ProjectConfigClassification
+	ValidationErr  error
+}
+
+// ClassifyProjectConfig identifies complete, legacy sparse, and malformed
+// in-memory folder configurations without rewriting or resolving them.
+func ClassifyProjectConfig(cfg ProjectConfig) ProjectConfigClassification {
+	if cfg.Phases == nil {
+		if err := ValidateProjectConfig(cfg); err == nil {
+			return ProjectConfigMigrationRequired
+		}
+		return ProjectConfigMalformed
+	}
+	if err := ValidateCompleteProjectConfig(cfg); err != nil {
+		return ProjectConfigMalformed
+	}
+	return ProjectConfigComplete
+}
+
 // Store persists global and project configuration as YAML.
 type Store struct{ userConfigDir func() (string, error) }
 
@@ -101,18 +135,41 @@ func (s *Store) SaveGlobal(cfg GlobalConfig) error {
 
 // LoadProject loads and validates configuration for projectRoot.
 func (s *Store) LoadProject(root string) (ProjectConfig, error) {
+	loaded, err := s.LoadProjectClassified(root)
+	if err != nil {
+		return ProjectConfig{}, err
+	}
+	if loaded.ValidationErr != nil {
+		return ProjectConfig{}, fmt.Errorf("validate project configuration: %w", loaded.ValidationErr)
+	}
+	loaded.Config.PhaseOverrides = NormalizePhaseOverrides(loaded.Config.PhaseOverrides)
+	return loaded.Config, nil
+}
+
+// LoadProjectClassified loads folder configuration and reports whether it is
+// complete or requires explicit reconfiguration. Sparse data is returned
+// unchanged, so callers can resolve it only for wizard prefilling.
+func (s *Store) LoadProjectClassified(root string) (ProjectConfigLoad, error) {
 	var cfg ProjectConfig
 	if err := readYAML(s.ProjectConfigPath(root), &cfg); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return ProjectConfig{}, ErrProjectNotConfigured
+			return ProjectConfigLoad{}, ErrProjectNotConfigured
 		}
-		return ProjectConfig{}, fmt.Errorf("load project configuration: %w", err)
+		if strings.Contains(err.Error(), "decode ") {
+			return ProjectConfigLoad{Classification: ProjectConfigMalformed, ValidationErr: err}, nil
+		}
+		return ProjectConfigLoad{}, fmt.Errorf("load project configuration: %w", err)
 	}
-	if err := ValidateProjectConfig(cfg); err != nil {
-		return ProjectConfig{}, fmt.Errorf("validate project configuration: %w", err)
+	classification := ClassifyProjectConfig(cfg)
+	var validationErr error
+	if classification == ProjectConfigMalformed {
+		if cfg.Phases != nil {
+			validationErr = ValidateCompleteProjectConfig(cfg)
+		} else {
+			validationErr = ValidateProjectConfig(cfg)
+		}
 	}
-	cfg.PhaseOverrides = NormalizePhaseOverrides(cfg.PhaseOverrides)
-	return cfg, nil
+	return ProjectConfigLoad{Config: cfg, Classification: classification, ValidationErr: validationErr}, nil
 }
 
 // SaveProject validates and atomically persists project configuration and creates its runtime directory.
@@ -135,6 +192,7 @@ func (s *Store) SaveProject(root string, cfg ProjectConfig) error {
 // save fails, the previous global file is restored byte-for-byte (or removed
 // when this was a first-time configuration).
 func (s *Store) SaveConfiguration(root string, global GlobalConfig, project ProjectConfig) error {
+	global = global.Clone()
 	if err := ValidateGlobalConfig(global); err != nil {
 		return fmt.Errorf("validate global configuration: %w", err)
 	}
@@ -170,6 +228,23 @@ func (s *Store) SaveConfiguration(root string, global GlobalConfig, project Proj
 		return err
 	}
 	return nil
+}
+
+// SaveCompleteConfiguration materializes a legacy sparse folder only at an
+// explicit configure/save boundary, then persists the complete schema
+// atomically with the global configuration. Ordinary loads never call this
+// method, so migration remains an explicit user action.
+func (s *Store) SaveCompleteConfiguration(root string, global GlobalConfig, project ProjectConfig) error {
+	if project.Phases == nil {
+		materialized, err := MaterializeCompleteProjectConfig(global, &project)
+		if err != nil {
+			return fmt.Errorf("materialize complete project configuration: %w", err)
+		}
+		project = materialized
+	} else if err := ValidateCompleteProjectConfig(project); err != nil {
+		return fmt.Errorf("validate complete project configuration: %w", err)
+	}
+	return s.SaveConfiguration(root, global, project)
 }
 
 func (s *Store) preflightConfigurationPaths(root, globalPath string) error {

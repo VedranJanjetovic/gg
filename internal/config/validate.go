@@ -16,6 +16,16 @@ func ValidateGlobalConfig(config GlobalConfig) error {
 	return validateGitOpsOverride(config.GitOps, "gitops")
 }
 
+// ValidateCompleteGlobalConfig validates the whole-tuple global contract.
+// Legacy global files may omit provenance; newly saved complete folders use
+// this stricter check for their copied default.
+func ValidateCompleteGlobalConfig(config GlobalConfig) error {
+	if err := ValidateGlobalConfig(config); err != nil {
+		return err
+	}
+	return validateProvenance(config.Defaults.Provenance, "defaults.provenance")
+}
+
 // ValidateAgentSettings validates one complete effective agent selection.
 // Persisted execution snapshots use this to fail closed when restoring a run.
 func ValidateAgentSettings(settings AgentSettings) error {
@@ -25,6 +35,9 @@ func ValidateAgentSettings(settings AgentSettings) error {
 // ValidateProjectConfig validates persisted project overrides. The linting
 // phase alias is accepted and can be canonicalized with NormalizePhaseOverrides.
 func ValidateProjectConfig(config ProjectConfig) error {
+	if config.Phases != nil {
+		return validateCompleteProjectConfig(config)
+	}
 	if err := validateVersion(config.Version); err != nil {
 		return err
 	}
@@ -35,6 +48,65 @@ func ValidateProjectConfig(config ProjectConfig) error {
 		return err
 	}
 	return validatePhaseOverrides(config.PhaseOverrides)
+}
+
+// ValidateCompleteProjectConfig validates a self-contained folder
+// configuration. It intentionally rejects the sparse override shape.
+func ValidateCompleteProjectConfig(config ProjectConfig) error {
+	return validateCompleteProjectConfig(config)
+}
+
+func validateCompleteProjectConfig(config ProjectConfig) error {
+	if config.Version != CompleteSchemaVersion {
+		return fmt.Errorf("version: unsupported complete schema version %d; expected %d", config.Version, CompleteSchemaVersion)
+	}
+	if err := validateCompleteSettings(config.Defaults, "defaults"); err != nil {
+		return err
+	}
+	if config.PhaseOverrides != nil {
+		return fmt.Errorf("phase_overrides: sparse overrides are not allowed in complete configuration")
+	}
+	if err := validateGitOpsOverride(config.GitOps, "gitops"); err != nil {
+		return err
+	}
+	if len(config.Phases) == 0 {
+		return fmt.Errorf("phases: complete configuration must contain phase entries")
+	}
+	seen := make(map[Phase]struct{}, len(config.Phases))
+	order := CompletePhaseOrder()
+	for index, entry := range config.Phases {
+		field := fmt.Sprintf("phases[%d]", index)
+		if !isSupportedPhase(entry.Phase) {
+			return fmt.Errorf("%s.phase: unsupported phase %q", field, entry.Phase)
+		}
+		if _, ok := seen[entry.Phase]; ok {
+			return fmt.Errorf("%s.phase: duplicate phase %q", field, entry.Phase)
+		}
+		if index >= len(order) || entry.Phase != order[index] {
+			want := ""
+			if index < len(order) {
+				want = string(order[index])
+			}
+			return fmt.Errorf("%s.phase: expected ordered phase %q, got %q", field, want, entry.Phase)
+		}
+		seen[entry.Phase] = struct{}{}
+		required := isRequiredPhase(entry.Phase)
+		if entry.Required != required {
+			return fmt.Errorf("%s.required: must be %t for phase %q", field, required, entry.Phase)
+		}
+		if required && !entry.Enabled {
+			return fmt.Errorf("%s.enabled: required phase %q must be enabled", field, entry.Phase)
+		}
+		if err := validateCompleteAgentSettings(entry.AgentSettings, field+".settings"); err != nil {
+			return err
+		}
+	}
+	for _, phase := range append(RequiredPhases(), OptionalPhases()...) {
+		if _, ok := seen[phase]; !ok {
+			return fmt.Errorf("phases: missing phase %q", phase)
+		}
+	}
+	return nil
 }
 
 // ValidateRunOverrides validates ephemeral overrides for one invocation.
@@ -106,6 +178,32 @@ func validateAgentSettings(settings AgentSettings, field string) error {
 	return validateEffort(settings.Effort, field+".effort", false)
 }
 
+func validateCompleteSettings(settings AgentSettingsOverride, field string) error {
+	if err := validateAgentSettingsOverride(settings, field); err != nil {
+		return err
+	}
+	if err := validateProvenance(settings.Provenance, field+".provenance"); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateCompleteAgentSettings(settings AgentSettings, field string) error {
+	if err := validateAgentSettings(settings, field); err != nil {
+		return err
+	}
+	return validateProvenance(settings.Provenance, field+".provenance")
+}
+
+func validateProvenance(provenance ModelProvenance, field string) error {
+	switch provenance {
+	case ModelProvenanceCatalog, ModelProvenanceManual:
+		return nil
+	default:
+		return fmt.Errorf("%s: must be %q or %q", field, ModelProvenanceCatalog, ModelProvenanceManual)
+	}
+}
+
 func validateAgentSettingsOverride(settings AgentSettingsOverride, field string) error {
 	if err := validateAgent(settings.Agent, field+".agent", true); err != nil {
 		return err
@@ -114,6 +212,15 @@ func validateAgentSettingsOverride(settings AgentSettingsOverride, field string)
 		return err
 	}
 	return validateEffort(settings.Effort, field+".effort", true)
+}
+
+func isRequiredPhase(phase Phase) bool {
+	for _, required := range RequiredPhases() {
+		if required == phase {
+			return true
+		}
+	}
+	return false
 }
 
 func validateAgent(agent Agent, field string, optional bool) error {

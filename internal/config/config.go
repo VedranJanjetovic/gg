@@ -8,6 +8,19 @@ type SchemaVersion uint
 // CurrentSchemaVersion is the schema version written by this release.
 const CurrentSchemaVersion SchemaVersion = 1
 
+// CompleteSchemaVersion is the version of the self-contained folder
+// configuration introduced after the original sparse override format.
+const CompleteSchemaVersion SchemaVersion = 2
+
+// ModelProvenance records how a model was selected. Empty provenance is kept
+// for legacy configurations whose origin was not persisted.
+type ModelProvenance string
+
+const (
+	ModelProvenanceCatalog ModelProvenance = "catalog"
+	ModelProvenanceManual  ModelProvenance = "manual"
+)
+
 // Agent identifies a supported agent runtime.
 type Agent string
 
@@ -92,17 +105,28 @@ func IsFixedPhase(phase Phase) bool {
 
 // AgentSettings contains a complete agent selection.
 type AgentSettings struct {
-	Agent  Agent  `json:"agent" yaml:"agent"`
-	Model  string `json:"model" yaml:"model"`
-	Effort Effort `json:"effort" yaml:"effort"`
+	Agent      Agent           `json:"agent" yaml:"agent"`
+	Model      string          `json:"model" yaml:"model"`
+	Effort     Effort          `json:"effort" yaml:"effort"`
+	Provenance ModelProvenance `json:"provenance,omitempty" yaml:"provenance,omitempty"`
 }
 
 // AgentSettingsOverride contains optional agent setting replacements. A zero
 // value means the corresponding setting is inherited.
 type AgentSettingsOverride struct {
-	Agent  Agent  `json:"agent,omitempty" yaml:"agent,omitempty"`
-	Model  string `json:"model,omitempty" yaml:"model,omitempty"`
-	Effort Effort `json:"effort,omitempty" yaml:"effort,omitempty"`
+	Agent      Agent           `json:"agent,omitempty" yaml:"agent,omitempty"`
+	Model      string          `json:"model,omitempty" yaml:"model,omitempty"`
+	Effort     Effort          `json:"effort,omitempty" yaml:"effort,omitempty"`
+	Provenance ModelProvenance `json:"provenance,omitempty" yaml:"provenance,omitempty"`
+}
+
+// PhaseConfig is one complete, ordered folder configuration entry. Required
+// phases must be enabled and cannot be removed from a complete configuration.
+type PhaseConfig struct {
+	Phase         Phase         `json:"phase" yaml:"phase"`
+	Enabled       bool          `json:"enabled" yaml:"enabled"`
+	Required      bool          `json:"required" yaml:"required"`
+	AgentSettings AgentSettings `json:"settings" yaml:"settings"`
 }
 
 // PhaseOverride contains project- or run-specific settings for one phase.
@@ -146,12 +170,23 @@ type GlobalConfig struct {
 	Folders []string `json:"folders,omitempty" yaml:"folders,omitempty"`
 }
 
+// Clone returns a defensive copy of global configuration, including the
+// folder registry slice.
+func (config GlobalConfig) Clone() GlobalConfig {
+	clone := config
+	clone.Folders = append([]string(nil), config.Folders...)
+	return clone
+}
+
 // ProjectConfig is the versioned configuration persisted for a project folder.
 type ProjectConfig struct {
 	Version        SchemaVersion           `json:"version" yaml:"version"`
 	Defaults       AgentSettingsOverride   `json:"defaults,omitempty" yaml:"defaults,omitempty"`
 	PhaseOverrides map[Phase]PhaseOverride `json:"phase_overrides,omitempty" yaml:"phase_overrides,omitempty"`
-	GitOps         GitOpsOverride          `json:"gitops,omitempty" yaml:"gitops,omitempty"`
+	// Phases is non-nil for the complete self-contained schema. A nil value is
+	// the legacy sparse format and is never silently expanded by a load.
+	Phases []PhaseConfig  `json:"phases,omitempty" yaml:"phases,omitempty"`
+	GitOps GitOpsOverride `json:"gitops,omitempty" yaml:"gitops,omitempty"`
 }
 
 // RunOverrides contains ephemeral overrides for one invocation. It is kept
@@ -170,3 +205,73 @@ var (
 	// ErrProjectNotConfigured indicates that the current project folder has no gg configuration.
 	ErrProjectNotConfigured = errors.New(`current project is not configured; run "gg configure" in the project folder`)
 )
+
+// RequiredPhases returns the phases that must be present and enabled in a
+// newly saved complete configuration.
+func RequiredPhases() []Phase {
+	return []Phase{PhaseAcceptanceCriteria, PhaseGrooming, PhasePlanning, PhaseDevelopment, PhaseRebase, PhaseTestDocument}
+}
+
+// OptionalPhases returns the phases whose enabled state may be changed.
+func OptionalPhases() []Phase {
+	return []Phase{PhaseQA, PhaseBuildChecker, PhasePR, PhaseCI}
+}
+
+// CompletePhaseOrder returns the current folder-schema order. It is kept in
+// config rather than inferred from map iteration so persistence is stable.
+func CompletePhaseOrder() []Phase {
+	return []Phase{PhaseAcceptanceCriteria, PhaseGrooming, PhasePlanning, PhaseDevelopment, PhaseRebase, PhaseQA, PhaseTestDocument, PhaseBuildChecker, PhasePR, PhaseCI}
+}
+
+// Clone returns a defensive copy of the project configuration.
+func (config ProjectConfig) Clone() ProjectConfig {
+	clone := config
+	clone.PhaseOverrides = NormalizePhaseOverrides(config.PhaseOverrides)
+	if config.Phases != nil {
+		clone.Phases = append([]PhaseConfig(nil), config.Phases...)
+	}
+	return clone
+}
+
+// CompleteProjectConfig constructs a self-contained folder configuration.
+// The input phase order and values are copied before being stored.
+func CompleteProjectConfig(version SchemaVersion, defaults AgentSettings, phases []PhaseConfig, gitops GitOpsOverride) ProjectConfig {
+	return ProjectConfig{
+		Version:  version,
+		Defaults: AgentSettingsOverride{Agent: defaults.Agent, Model: defaults.Model, Effort: defaults.Effort, Provenance: defaults.Provenance},
+		Phases:   append([]PhaseConfig(nil), phases...),
+		GitOps:   gitops,
+	}
+}
+
+// MaterializeCompleteProjectConfig resolves a legacy sparse folder only for
+// an explicit configure/save boundary. It does not write anything and never
+// mutates the input configuration.
+func MaterializeCompleteProjectConfig(global GlobalConfig, project *ProjectConfig) (ProjectConfig, error) {
+	resolved, err := Resolve(global, project, RunOverrides{})
+	if err != nil {
+		return ProjectConfig{}, err
+	}
+	defaults := resolved.Defaults
+	if defaults.Provenance == "" {
+		defaults.Provenance = ModelProvenanceManual
+	}
+	phases := make([]PhaseConfig, 0, len(CompletePhaseOrder()))
+	for _, phase := range CompletePhaseOrder() {
+		settings := resolved.Phases[phase].AgentSettings
+		if settings.Provenance == "" {
+			settings.Provenance = ModelProvenanceManual
+		}
+		phases = append(phases, PhaseConfig{
+			Phase:         phase,
+			Enabled:       resolved.Phases[phase].Enabled,
+			Required:      isRequiredPhase(phase),
+			AgentSettings: settings,
+		})
+	}
+	var gitops GitOpsOverride
+	if project != nil {
+		gitops = project.GitOps
+	}
+	return CompleteProjectConfig(CompleteSchemaVersion, defaults, phases, gitops), nil
+}
