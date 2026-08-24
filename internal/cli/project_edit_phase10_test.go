@@ -262,3 +262,23 @@ func TestConfigureExistingProjectCancellationLeavesSnapshotUnchanged(t *testing.
 		t.Fatal("cancelled project configuration changed persisted state")
 	}
 }
+
+func TestWizardDefaultsForExistingProjectLockAllStructureControls(t *testing.T) {
+	configuration := pipeline.ProjectExecutionConfiguration{
+		Default: config.AgentSettings{Agent: config.AgentCodex, Model: "gpt-5", Effort: config.EffortHigh, Provenance: config.ModelProvenanceCatalog},
+		Phases: []pipeline.ProjectPhaseConfiguration{
+			{ID: pipeline.PhaseAcceptanceCriteria, Enabled: true, Required: true},
+			{ID: pipeline.PhaseQA, Enabled: false, Required: false},
+		},
+	}
+
+	defaults := wizardDefaultsFromExecution(configuration)
+	if len(defaults.Phases) != len(configuration.Phases) {
+		t.Fatalf("phase defaults = %d, want %d", len(defaults.Phases), len(configuration.Phases))
+	}
+	for _, phase := range defaults.Phases {
+		if !phase.Locked {
+			t.Fatalf("phase %q is not locked for existing-project editing", phase.Phase)
+		}
+	}
+}

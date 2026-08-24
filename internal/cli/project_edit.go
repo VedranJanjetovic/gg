@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 
 	"github.com/VedranJanjetovic/gg/internal/config"
@@ -102,7 +103,7 @@ func wizardDefaultsFromExecution(configuration pipeline.ProjectExecutionConfigur
 	}
 	for _, phase := range configuration.Phases {
 		defaults.Phases = append(defaults.Phases, tui.PhaseState{
-			Phase: config.Phase(phase.ID), Name: string(phase.ID), Enabled: phase.Enabled, Locked: phase.Required,
+			Phase: config.Phase(phase.ID), Name: string(phase.ID), Enabled: phase.Enabled, Locked: true,
 			Agent: phase.Settings.Agent, Model: phase.Settings.Model, Effort: phase.Settings.Effort,
 			Manual: phase.Settings.Provenance == config.ModelProvenanceManual,
 		})
@@ -207,7 +208,7 @@ func (a *App) repairCurrentPhaseConfiguration(ctx context.Context, selector stri
 		return project, errors.New("project service does not support resume configuration repair")
 	}
 	updated, err := atomic.CompareAndUpdateProjectSnapshot(ctx, selector, project.PipelineConfig, func(current *state.ProjectState) error {
-		if current.Status != state.StatusFailed || len(current.PhaseHistory) == 0 || current.PhaseHistory[len(current.PhaseHistory)-1].OccurrenceID != record.OccurrenceID {
+		if current.Status != state.StatusFailed || current.CurrentPhase != record.Phase || current.CurrentSubphase != record.Subphase || len(current.PhaseHistory) == 0 || !sameFailedExecutionOccurrence(current.PhaseHistory[len(current.PhaseHistory)-1], record) {
 			return errors.New("failed execution changed while preparing resume")
 		}
 		current.PipelineConfig = updatedSnapshot
@@ -221,6 +222,13 @@ func (a *App) repairCurrentPhaseConfiguration(ctx context.Context, selector stri
 		return project, fmt.Errorf("persist resume configuration repair: %w", err)
 	}
 	return updated, nil
+}
+
+func sameFailedExecutionOccurrence(current, expected state.PhaseRecord) bool {
+	if expected.OccurrenceID != "" {
+		return current.OccurrenceID == expected.OccurrenceID
+	}
+	return reflect.DeepEqual(current, expected)
 }
 
 type repairFallback struct {
