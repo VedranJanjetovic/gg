@@ -2,11 +2,17 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"io"
+	"os"
+	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/VedranJanjetovic/gg/internal/config"
+	"github.com/VedranJanjetovic/gg/internal/orchestrator"
+	"github.com/VedranJanjetovic/gg/internal/pipeline"
 	"github.com/VedranJanjetovic/gg/internal/tui"
 )
 
@@ -72,4 +78,101 @@ func TestChooseNewProjectConfigurationInheritsWithoutWritingFolder(t *testing.T)
 	if store.savedProject != nil || store.savedGlobal != nil {
 		t.Fatal("inherit wrote folder configuration")
 	}
+}
+
+func TestChooseNewProjectConfigurationPickIsolatedAndSnapshotsAllTuples(t *testing.T) {
+	folder := phase9CompleteConfig()
+	store := &memoryConfigureStore{
+		global:  config.GlobalConfig{Version: config.CurrentSchemaVersion, Defaults: config.AgentSettings{Agent: config.AgentClaude, Model: "global", Effort: config.EffortLow, Provenance: config.ModelProvenanceCatalog}},
+		project: folder,
+	}
+	var gotDefaults tui.WizardDefaults
+	app := New(
+		WithConfigStore(store),
+		WithRootResolver(fixedRoot{root: t.TempDir()}),
+		WithProjectConfigurationChooser(func(context.Context, io.Reader, io.Writer) (int, error) { return 1, nil }),
+		WithAgentCatalogSource(config.NewStaticAgentCatalogSource(config.NewAgentCatalog(
+			config.AgentCatalogEntry{Agent: config.AgentCodex, Models: []string{"gpt-5"}, ModelListStatus: config.ModelListAvailable},
+		))),
+		WithConfigurePicker(func(_ context.Context, _ config.AgentCatalog, defaults tui.WizardDefaults, _ io.Reader, _ io.Writer) (tui.PickerResult, error) {
+			gotDefaults = defaults
+			return tui.PickerResult{
+				Agent: config.AgentCodex, Model: "custom-manual-model", Effort: config.EffortHigh, Manual: true,
+				Phases: []tui.PhaseState{{
+					Phase: config.PhaseQA, Enabled: true, Agent: config.AgentCodex, Model: "gpt-5", Effort: config.EffortLow,
+				}},
+			}, nil
+		}),
+	)
+
+	chosen, err := app.chooseNewProjectConfiguration(context.Background(), io.Discard, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(gotDefaults.Phases) != len(config.CompletePhaseOrder()) || !gotDefaults.FullTuples {
+		t.Fatalf("wizard defaults = %#v, want complete full-tuple phase list", gotDefaults)
+	}
+	if chosen.project.Defaults.Agent != config.AgentCodex || chosen.project.Defaults.Model != "custom-manual-model" || chosen.project.Defaults.Effort != config.EffortHigh || chosen.project.Defaults.Provenance != config.ModelProvenanceManual {
+		t.Fatalf("project defaults = %#v", chosen.project.Defaults)
+	}
+	if chosen.project.Phases[5].AgentSettings.Model != "gpt-5" || chosen.project.Phases[5].AgentSettings.Effort != config.EffortLow {
+		t.Fatalf("QA settings = %#v", chosen.project.Phases[5].AgentSettings)
+	}
+	if store.savedProject != nil || store.savedGlobal != nil {
+		t.Fatal("project-only selection wrote folder configuration")
+	}
+
+	resolved, err := pipeline.RestoreResolvedConfiguration(chosen.snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantDefaults := config.AgentSettings{
+		Agent: chosen.project.Defaults.Agent, Model: chosen.project.Defaults.Model,
+		Effort: chosen.project.Defaults.Effort, Provenance: chosen.project.Defaults.Provenance,
+	}
+	if resolved.Defaults != wantDefaults || resolved.Defaults.Provenance != config.ModelProvenanceManual || resolved.Phases[config.PhaseQA].AgentSettings != chosen.project.Phases[5].AgentSettings {
+		t.Fatalf("snapshot configuration = %#v, want project configuration", resolved)
+	}
+	if resolved.Phases[config.PhaseQA].Enabled != chosen.project.Phases[5].Enabled {
+		t.Fatal("snapshot did not preserve optional phase enabled state")
+	}
+}
+
+func TestCreateProjectChoosesConfigurationBeforeDescriptionAndDoesNotCreateOnCancel(t *testing.T) {
+	folder := phase9CompleteConfig()
+	root := t.TempDir()
+	store := &memoryConfigureStore{
+		global:  config.GlobalConfig{Version: config.CurrentSchemaVersion, Defaults: config.AgentSettings{Agent: config.AgentClaude, Model: "sonnet", Effort: config.EffortMedium, Provenance: config.ModelProvenanceCatalog}},
+		project: folder,
+	}
+	var order []string
+	app := New(
+		WithConfigStore(store),
+		WithRootResolver(fixedRoot{root: root}),
+		WithProjectConfigurationChooser(func(context.Context, io.Reader, io.Writer) (int, error) {
+			order = append(order, "choice")
+			return 0, nil
+		}),
+		WithProjectPrompter(projectPromptFunc(func(context.Context, io.Writer) (orchestrator.ProjectInput, error) {
+			order = append(order, "description")
+			return orchestrator.ProjectInput{}, errors.New("description cancelled")
+		})),
+	)
+
+	_, err := app.createProject(context.Background(), io.Discard, 3)
+	if err == nil || !strings.Contains(err.Error(), "description cancelled") {
+		t.Fatalf("createProject error = %v, want description cancellation", err)
+	}
+	if !reflect.DeepEqual(order, []string{"choice", "description"}) {
+		t.Fatalf("interaction order = %v", order)
+	}
+	if entries, readErr := os.ReadDir(filepath.Join(root, ".gg", "projects")); readErr == nil && len(entries) != 0 {
+		t.Fatalf("project state was created before description confirmation: %v", entries)
+	}
+}
+
+type projectPromptFunc func(context.Context, io.Writer) (orchestrator.ProjectInput, error)
+
+func (f projectPromptFunc) Prompt(ctx context.Context, output io.Writer) (orchestrator.ProjectInput, error) {
+	return f(ctx, output)
 }

@@ -31,7 +31,11 @@ func (a *App) chooseNewProjectConfiguration(ctx context.Context, output io.Write
 		return projectCreationConfiguration{}, err
 	}
 	selected := folder
-	if tui.InteractiveTerminal(a.input, output) {
+	// An injected chooser is a deliberate composition boundary (used by
+	// alternate frontends and deterministic tests), so it must not depend on
+	// the process streams being attached to a TTY. The production chooser still
+	// uses the TUI only when the terminal is interactive.
+	if a.projectConfigChooser != nil || tui.InteractiveTerminal(a.input, output) {
 		choice, choiceErr := a.chooseProjectConfig(ctx, output)
 		if choiceErr != nil {
 			return projectCreationConfiguration{}, choiceErr
