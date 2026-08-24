@@ -311,7 +311,7 @@ func MaterializeCompleteProjectConfig(global GlobalConfig, project *ProjectConfi
 		}
 		phases = append(phases, PhaseConfig{
 			Phase:         phase,
-			Enabled:       resolved.Phases[phase].Enabled,
+			Enabled:       isRequiredPhase(phase) || resolved.Phases[phase].Enabled,
 			Required:      isRequiredPhase(phase),
 			AgentSettings: settings,
 		})

@@ -48,8 +48,8 @@ func TestRealCLIConfigureCreatesProjectAndDisposableWorktree(t *testing.T) {
 	if err := yaml.Unmarshal(projectConfig, &projectSettings); err != nil {
 		t.Fatalf("decode persisted project config: %v", err)
 	}
-	if projectSettings.Version != config.CurrentSchemaVersion {
-		t.Fatalf("project config version = %d, want %d", projectSettings.Version, config.CurrentSchemaVersion)
+	if projectSettings.Version != config.CompleteSchemaVersion {
+		t.Fatalf("project config version = %d, want %d", projectSettings.Version, config.CompleteSchemaVersion)
 	}
 
 	created := RunWithInputTimeout(t, repo.Root, processEnv,
@@ -65,7 +65,7 @@ func TestRealCLIConfigureCreatesProjectAndDisposableWorktree(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	project, err := store.Load(t.Context(), "build-a-release-dashboard")
+	project, err := store.Load(t.Context(), "release-dashboard")
 	if err != nil {
 		t.Fatalf("load persisted project state: %v", err)
 	}
@@ -73,7 +73,7 @@ func TestRealCLIConfigureCreatesProjectAndDisposableWorktree(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if project.Name != "Build a release dashboard" || project.OriginalGoal != "Build a release dashboard." {
+	if project.Name != "release_dashboard" || project.OriginalGoal != "Build a release dashboard.\nPersist the project state." {
 		t.Fatalf("project identity = %#v", project)
 	}
 	if project.WorktreePath != naming.WorktreePath || project.BranchName != naming.BranchName {

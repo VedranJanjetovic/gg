@@ -74,7 +74,7 @@ func (a *App) createAndAttach(ctx context.Context, stdout io.Writer) error {
 // attaches the live TUI; the pipeline starts through the attachment's Start
 // action so progress is visible instead of running headless.
 func (a *App) createAndAttachWithOptions(ctx context.Context, stdout io.Writer, options runOptions) error {
-	selector, err := a.createProject(ctx, stdout)
+	selector, err := a.createProject(ctx, stdout, options.maxIterations)
 	if err != nil {
 		return fmt.Errorf("create project: %w", err)
 	}

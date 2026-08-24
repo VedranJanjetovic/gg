@@ -60,6 +60,7 @@ type PhaseState struct {
 	Agent       config.Agent
 	Model       string
 	Effort      config.Effort
+	Manual      bool
 }
 
 func (s PhaseState) displayName() string {
@@ -113,10 +114,12 @@ func (m ConfigureWizard) phaseSettingsLine(phase PhaseState) string {
 // values so pressing Enter through every screen keeps the configuration.
 // An empty Phases slice skips the phase-toggle screen entirely.
 type WizardDefaults struct {
-	Agent  config.Agent
-	Model  string
-	Effort config.Effort
-	Phases []PhaseState
+	Agent      config.Agent
+	Model      string
+	Effort     config.Effort
+	FullTuples bool
+	Manual     bool
+	Phases     []PhaseState
 }
 
 type PickerResult struct {
@@ -527,7 +530,7 @@ func (m *ConfigureWizard) selectCurrent() {
 			return
 		}
 		if m.overridePhase >= 0 {
-			m.setPhaseAgentModelPin(m.selected, m.models[m.cursor])
+			m.setPhaseAgentModelPin(m.selected, m.models[m.cursor], false)
 		} else {
 			m.result.Agent, m.result.Model, m.result.Manual = m.selected, m.models[m.cursor], false
 		}
@@ -535,7 +538,7 @@ func (m *ConfigureWizard) selectCurrent() {
 	case EffortPickerScreen:
 		if m.overridePhase >= 0 {
 			effort := wizardEfforts[m.cursor]
-			if effort == m.result.Effort {
+			if effort == m.result.Effort && !m.defaults.FullTuples {
 				effort = "" // matches the global default: inherit
 			}
 			m.phases[m.overridePhase].Effort = effort
@@ -564,15 +567,19 @@ func (m *ConfigureWizard) selectCurrent() {
 // Choices matching the wizard's global selection are stored as empty pins so
 // the phase keeps inheriting; a different agent pins the model with it
 // because a model name is only meaningful for its agent.
-func (m *ConfigureWizard) setPhaseAgentModelPin(agent config.Agent, model string) {
+func (m *ConfigureWizard) setPhaseAgentModelPin(agent config.Agent, model string, manual bool) {
 	phase := &m.phases[m.overridePhase]
+	if m.defaults.FullTuples {
+		phase.Agent, phase.Model, phase.Manual = agent, model, manual
+		return
+	}
 	switch {
 	case agent == m.result.Agent && model == m.result.Model:
-		phase.Agent, phase.Model = "", ""
+		phase.Agent, phase.Model, phase.Manual = "", "", false
 	case agent == m.result.Agent:
-		phase.Agent, phase.Model = "", model
+		phase.Agent, phase.Model, phase.Manual = "", model, manual
 	default:
-		phase.Agent, phase.Model = agent, model
+		phase.Agent, phase.Model, phase.Manual = agent, model, manual
 	}
 }
 
@@ -614,7 +621,7 @@ func (m *ConfigureWizard) handleInputKey(message tea.KeyMsg) {
 			return
 		}
 		if m.overridePhase >= 0 {
-			m.setPhaseAgentModelPin(m.selected, model)
+			m.setPhaseAgentModelPin(m.selected, model, true)
 		} else {
 			m.result.Agent, m.result.Model, m.result.Manual = m.selected, model, true
 		}

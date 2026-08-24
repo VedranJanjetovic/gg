@@ -198,7 +198,19 @@ func TestNewAppWithIOWiresBareProjectAttachment(t *testing.T) {
 	}
 	runProductionGit(t, repo, "add", "README.md")
 	runProductionGit(t, repo, "-c", "commit.gpgsign=false", "commit", "-qm", "initial")
-	if err := config.NewStore().SaveProject(repo, config.ProjectConfig{Version: config.CurrentSchemaVersion}); err != nil {
+	defaults := config.AgentSettings{Agent: config.AgentCodex, Model: "gpt-5.6-sol", Effort: config.EffortHigh, Provenance: config.ModelProvenanceCatalog}
+	phases := make([]config.PhaseConfig, 0, len(config.CompletePhaseOrder()))
+	for _, phase := range config.CompletePhaseOrder() {
+		required := false
+		for _, candidate := range config.RequiredPhases() {
+			if candidate == phase {
+				required = true
+				break
+			}
+		}
+		phases = append(phases, config.PhaseConfig{Phase: phase, Enabled: true, Required: required, AgentSettings: defaults})
+	}
+	if err := config.NewStore().SaveProject(repo, config.CompleteProjectConfig(config.CompleteSchemaVersion, defaults, phases, config.GitOpsOverride{})); err != nil {
 		t.Fatal(err)
 	}
 	previous, err := os.Getwd()

@@ -1,67 +1,25 @@
 ---
-gg_run_id: "gg-tool-generally-great-but-1787575707310868000/development/review/iteration-0"
+gg_run_id: "gg-tool-generally-great-but-1787575707310868000/development/implementation/iteration-0"
 gg_disposition: passed
 ---
 
-# Development review
+# Development
 
-## Scope
+## Phase 9: Isolated new-project configuration flow
 
-Phase 8: Complete configuration schema and migration gate.
+Implemented the new-project configuration boundary for interactive `gg run`:
 
-## Generated subphases
-
-### Implementation
-
-Reviewed the complete-schema and migration-gate implementation, then fixed
-three boundary defects:
-
-- explicit complete saves now materialize any classified migration shape,
-  including partial complete-shaped phase data rather than only nil `Phases`;
-- mixed sparse/complete data validates its phase entries before receiving a
-  migration classification, and whitespace-only partial models are malformed;
-- global and project configuration clones, plus complete constructors, deep
-  copy pointer-valued GitOps toggles.
-
-### Testing
-
-Added regression coverage for partial complete-shape save/migration,
-malformed mixed data, whitespace-only partial models, and GitOps pointer copy
-isolation in `internal/config/complete_schema_test.go`.
-
-### Review
-
-Reviewed version and phase classification, required/optional phase invariants,
-whole-tuple resolution, provenance handling, migration no-write behavior,
-GitOps precedence, catalog validation boundaries, defensive copies, and
-compatibility with existing config, pipeline, CLI, TUI, orchestrator, and
-command tests. No actionable findings remain within Phase 8 scope.
-
-## Changed files
-
-- `internal/config/config.go`
-- `internal/config/store.go`
-- `internal/config/complete_schema_test.go`
-- `.gg/development.md`
-
-The Phase 8 implementation also includes the previously completed changes in
-`internal/config/catalog.go`, `internal/config/resolve.go`, and
-`internal/config/validate.go`.
+- New projects choose `Inherit folder configuration` or `Pick configuration for this project` before the project description prompt.
+- The Pick flow receives complete folder defaults, lets the user configure full project and per-phase tuples, and does not write folder configuration.
+- Sparse legacy folder configuration is routed through `gg configure` and materialized as a complete self-contained configuration before project creation.
+- New projects persist a version 3 immutable execution snapshot containing project defaults, complete phase structure, enabled/required state, per-phase tuples, GitOps settings, development subphases, and QA retry limit.
+- Removed per-run configuration flags now fail as unknown flags; retained operational run controls remain available.
+- Required pipeline phases are locked on while their complete agent/model/effort tuples remain editable.
 
 ## Verification
 
-- `go test ./internal/config ./internal/pipeline ./internal/cli ./internal/tui ./internal/orchestrator ./cmd/gg` — passed.
-- `go test -race ./internal/config ./internal/pipeline ./internal/cli ./internal/tui` — passed.
-- `go vet ./internal/config` — passed.
 - `git diff --check` — passed.
-- `go test ./...` — all packages passed except the pre-existing
-  `internal/e2e.TestRealCLIConfigureCreatesProjectAndDisposableWorktree`
-  failure, which cannot find persisted state under the test's asserted
-  temporary root. No new package failures occurred.
+- `go test ./internal/config ./internal/pipeline ./internal/state ./internal/cli ./internal/tui ./cmd/gg` — passed.
+- `go test ./...` — all packages passed except the existing macOS-only E2E path spelling assertion, where `/private/var/...` and `/var/...` refer to the same temporary path. This is the known local baseline recorded by the plan and is unrelated to Phase 9 behavior.
 
-## Handoff risks
-
-- The repository-wide E2E failure is unchanged baseline evidence and is
-  unrelated to Phase 8 configuration schema changes.
-- No remote systems, AWS endpoints, browser session, or manual interactive TUI
-  verification were required.
+Interactive terminal selection was covered through injected chooser/picker tests; manual terminal interaction remains a reviewer-level verification item.
