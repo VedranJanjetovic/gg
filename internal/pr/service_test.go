@@ -180,3 +180,17 @@ func TestCreateDisclosesSkippedExecutionsDeferredChecksAndQASkip(t *testing.T) {
 		}
 	}
 }
+
+func TestCreateAllowsMissingProofForExplicitQAWaiver(t *testing.T) {
+	req := request(t.TempDir())
+	req.ProofWaived = true
+	gh := &fakeGH{url: "https://github.com/o/r/pull/11"}
+
+	result, err := pr.NewService(&fakeGit{uncommitted: true}, gh).Create(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Created || !strings.Contains(result.Body, "PROOF.md: waived for the exact confirmed QA skip") {
+		t.Fatalf("result = %#v", result)
+	}
+}

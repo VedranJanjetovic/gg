@@ -117,10 +117,10 @@ func (s *Service) Create(ctx context.Context, request Request) (Result, error) {
 			return Result{}, fmt.Errorf("validate proof artifact: %w", parseErr)
 		}
 		parsed = &p
-	case request.ProofRequired:
+	case request.ProofRequired && !request.ProofWaived:
 		return Result{}, fmt.Errorf("read proof artifact: %w", err)
 	default:
-		// The QA phase is disabled: no proof exists and none is expected.
+		// QA is disabled or the exact QA occurrence was explicitly waived.
 	}
 	body := formatBody(request, parsed)
 	if request.Push {

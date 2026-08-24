@@ -10,11 +10,13 @@ import (
 	"github.com/VedranJanjetovic/gg/internal/orchestrator"
 	"github.com/VedranJanjetovic/gg/internal/pipeline"
 	"github.com/VedranJanjetovic/gg/internal/pr"
+	"github.com/VedranJanjetovic/gg/internal/proof"
 	"github.com/VedranJanjetovic/gg/internal/state"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 type fakeRebaser struct {
@@ -33,10 +35,14 @@ func (f *fakeRebaser) RebaseProject(context.Context, git.RebaseRequest) (git.Reb
 	return git.RebaseResult{Branch: "feature", BaseRef: "origin/main", Output: "rebased"}, nil
 }
 
-type fakePullRequests struct{ calls int }
+type fakePullRequests struct {
+	calls    int
+	requests []pr.Request
+}
 
-func (f *fakePullRequests) Create(context.Context, pr.Request) (pr.Result, error) {
+func (f *fakePullRequests) Create(_ context.Context, request pr.Request) (pr.Result, error) {
 	f.calls++
+	f.requests = append(f.requests, request)
 	return pr.Result{Created: true, URL: "https://github.com/example/repo/pull/7"}, nil
 }
 
@@ -161,5 +167,69 @@ func TestConfiguredRebaseConflictPersistsStructuredEvidence(t *testing.T) {
 	}
 	if !strings.Contains(string(data), "file.go") || !strings.Contains(string(data), "origin/main") {
 		t.Fatalf("conflict evidence = %q", data)
+	}
+}
+
+func TestConfiguredPRReceivesExactWaiverAndDeferredHandoff(t *testing.T) {
+	root := t.TempDir()
+	planPhases := map[config.Phase]config.ResolvedPhase{
+		config.PhaseGrooming:     {Enabled: false},
+		config.PhasePlanning:     {Enabled: false},
+		config.PhaseQA:           {Enabled: true},
+		config.PhaseBuildChecker: {Enabled: false},
+		config.PhasePR:           {Enabled: true},
+		config.PhaseCI:           {Enabled: false},
+	}
+	for phase, resolved := range planPhases {
+		if resolved.Enabled {
+			resolved.AgentSettings = config.AgentSettings{Agent: config.AgentClaude, Model: "sonnet", Effort: config.EffortMedium}
+			planPhases[phase] = resolved
+		}
+	}
+	plan, err := pipeline.Resolve(pipeline.DefaultPipeline(), config.ResolvedConfig{Defaults: config.AgentSettings{Agent: config.AgentClaude, Model: "sonnet", Effort: config.EffortMedium}, Phases: planPhases})
+	if err != nil {
+		t.Fatal(err)
+	}
+	when := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
+	deferred := proof.DeferredCheck{
+		TestLocation: "internal/aws_test.go", CheckName: "TestRemoteFlow",
+		FlowScenario: "call deployed API", ExpectedBehavior: "request persists",
+		RemoteOnlyReason: "requires AWS credentials", RepositoryEvidence: "config/aws.go uses AWS_ENDPOINT",
+		RunInstructions: "run in CI with AWS secrets",
+	}
+	prs := &fakePullRequests{}
+	controller := orchestrator.NewController(
+		orchestrator.WithRunner(&gitOpsRunner{}),
+		orchestrator.WithPhaseState(&fakeState{}),
+		orchestrator.WithGitOpsServices(&fakeRebaser{}, prs, nil),
+		orchestrator.WithPromptBuilder(fakePrompt{}),
+	)
+	request := orchestrator.Request{
+		Project: state.ProjectState{
+			Slug: "demo", OriginalGoal: "goal", AcceptanceCriteria: []string{"criterion"}, WorktreePath: root, BranchName: "feature",
+			DeferredChecks: []proof.DeferredCheck{deferred},
+			PhaseHistory: []state.PhaseRecord{{
+				Phase: string(pipeline.PhaseQA), Status: state.StatusFailed, CompletedAt: &when,
+				Outcome: &state.ExecutionOutcome{Error: "proof failed"}, Skip: &state.SkipResolution{},
+			}},
+		},
+		Pipeline: plan, PhaseContracts: plan.PhaseContracts(),
+		GitOps: config.GitOpsConfig{Configured: true, ParentBranch: "main", EnablePR: true}, ArtifactRoot: root, RunID: "run-1",
+	}
+	if _, err := controller.Execute(context.Background(), request); err != nil {
+		t.Fatal(err)
+	}
+	if len(prs.requests) != 1 {
+		t.Fatalf("PR requests = %d, want 1", len(prs.requests))
+	}
+	got := prs.requests[0]
+	if got.ProofRequired || !got.ProofWaived {
+		t.Fatalf("proof waiver request = %#v", got)
+	}
+	if len(got.SkippedExecutions) != 1 || got.SkippedExecutions[0].Phase != string(pipeline.PhaseQA) || got.SkippedExecutions[0].Failure != "proof failed" {
+		t.Fatalf("skipped handoff = %#v", got.SkippedExecutions)
+	}
+	if len(got.DeferredChecks) != 1 || got.DeferredChecks[0] != deferred {
+		t.Fatalf("deferred handoff = %#v", got.DeferredChecks)
 	}
 }
