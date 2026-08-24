@@ -82,3 +82,36 @@ func ValidateSkipTarget(project state.ProjectState, phase pipeline.PhaseID, subp
 	}
 	return fmt.Errorf("%w: occurrence %q was not found", ErrSkipNotAllowed, occurrenceID)
 }
+
+// SkipContinuation returns the next execution unit for the current failed
+// occurrence. The durable state service records this cursor with the waiver;
+// keeping its calculation here prevents presentation code from duplicating
+// pipeline sequencing rules.
+func SkipContinuation(project state.ProjectState) (string, string, error) {
+	if project.Status != state.StatusFailed || len(project.PhaseHistory) == 0 {
+		return "", "", fmt.Errorf("%w: project has no current failed execution", ErrSkipNotAllowed)
+	}
+	last := project.PhaseHistory[len(project.PhaseHistory)-1]
+	if last.Status != state.StatusFailed || last.Skip != nil {
+		return "", "", fmt.Errorf("%w: latest execution is not a pending failure", ErrSkipNotAllowed)
+	}
+	if !state.IsSkipEligible(last.Phase, last.Subphase) {
+		return "", "", fmt.Errorf("%w: %s/%s", ErrSkipNotAllowed, last.Phase, last.Subphase)
+	}
+	if last.Phase == string(pipeline.PhaseDevelopment) && last.Subphase == "testing" {
+		return string(pipeline.PhaseDevelopment), "review", nil
+	}
+
+	plan, generation, _, err := pipeline.RestoreExecution(project.PipelineConfig)
+	if err != nil {
+		return "", "", fmt.Errorf("restore pipeline for skip continuation: %w", err)
+	}
+	phase, subphase, hasNext, err := nextExecutionCursor(plan, generation, pipeline.PhaseID(last.Phase), last.Subphase)
+	if err != nil {
+		return "", "", fmt.Errorf("select skip continuation: %w", err)
+	}
+	if !hasNext {
+		return "", "", nil
+	}
+	return phase, subphase, nil
+}

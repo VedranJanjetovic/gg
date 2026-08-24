@@ -17,9 +17,12 @@ func skipTestPipeline(t *testing.T, enabled ...config.Phase) pipeline.Executable
 	}
 	phases := make(map[config.Phase]config.ResolvedPhase)
 	for _, phase := range []config.Phase{config.PhaseGrooming, config.PhasePlanning, config.PhaseQA, config.PhaseBuildChecker, config.PhasePR, config.PhaseCI} {
-		phases[phase] = config.ResolvedPhase{Enabled: selected[phase], AgentSettings: config.AgentSettings{Agent: config.AgentClaude}}
+		phases[phase] = config.ResolvedPhase{Enabled: selected[phase], AgentSettings: config.AgentSettings{Agent: config.AgentClaude, Model: "test", Effort: config.EffortLow}}
 	}
-	plan, err := pipeline.Resolve(pipeline.DefaultPipeline(), config.ResolvedConfig{Phases: phases})
+	plan, err := pipeline.Resolve(pipeline.DefaultPipeline(), config.ResolvedConfig{
+		Defaults: config.AgentSettings{Agent: config.AgentClaude, Model: "test", Effort: config.EffortLow},
+		Phases:   phases,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,6 +87,32 @@ func TestValidateSkipTargetRequiresDurableCurrentFailure(t *testing.T) {
 	}
 	if err := ValidateSkipTarget(project, pipeline.PhaseQA, "", "stale-occurrence"); err == nil {
 		t.Fatal("stale occurrence was accepted")
+	}
+}
+
+func TestSkipContinuationSelectsNextUnitFromPersistedPipeline(t *testing.T) {
+	plan := skipTestPipeline(t, config.PhaseQA)
+	encoded, err := pipeline.SnapshotExecution(plan, pipeline.DevelopmentSubphaseGeneration{}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name, phase, subphase, wantPhase, wantSubphase string
+	}{
+		{name: "development testing", phase: string(pipeline.PhaseDevelopment), subphase: "testing", wantPhase: string(pipeline.PhaseDevelopment), wantSubphase: "review"},
+		{name: "top level", phase: string(pipeline.PhaseQA), wantPhase: string(pipeline.PhaseTestDocument)},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			project := state.ProjectState{Status: state.StatusFailed, PipelineConfig: encoded, PhaseHistory: []state.PhaseRecord{{Phase: test.phase, Subphase: test.subphase, Status: state.StatusFailed}}}
+			phase, subphase, err := SkipContinuation(project)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if phase != test.wantPhase || subphase != test.wantSubphase {
+				t.Fatalf("continuation = %q/%q, want %q/%q", phase, subphase, test.wantPhase, test.wantSubphase)
+			}
+		})
 	}
 }
 

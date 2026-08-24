@@ -80,6 +80,34 @@ func TestProjectTUIAttacherMapsProjectStreamsActionsAndErrors(t *testing.T) {
 	}
 }
 
+func TestProjectTUIAttacherMapsSkipProjectionAndCallback(t *testing.T) {
+	project := state.ProjectState{Name: "Skip project", Slug: "skip-project", Status: state.StatusFailed}
+	called := 0
+	attachment := cli.ProjectAttachment{
+		Project:       project,
+		Skip:          func(context.Context) error { called++; return nil },
+		SkipAvailable: true,
+		SkipLabel:     "QA",
+		SkipTarget:    func(state.ProjectState) (bool, string) { return true, "QA" },
+	}
+	runner := func(_ context.Context, _ state.ProjectState, _ tui.Loader, actions tui.Actions, _ io.Reader, _ io.Writer, _ ...tui.Option) error {
+		if actions.Skip == nil || !actions.SkipAvailable || actions.SkipLabel != "QA" || actions.SkipTarget == nil {
+			t.Fatalf("skip action was not mapped: %+v", actions)
+		}
+		available, label := actions.SkipTarget(project)
+		if !available || label != "QA" {
+			t.Fatalf("skip projection = %t/%q", available, label)
+		}
+		return actions.Skip(context.Background())
+	}
+	if err := (projectTUIAttacher{run: runner}).Attach(context.Background(), attachment); err != nil {
+		t.Fatal(err)
+	}
+	if called != 1 {
+		t.Fatalf("skip callback calls = %d, want 1", called)
+	}
+}
+
 func TestProjectTUIAttacherNonTTYStartsAndPrintsFinalStatus(t *testing.T) {
 	initial := state.ProjectState{
 		Name: "Non-TTY project", Slug: "non-tty-project", Status: state.StatusPending,

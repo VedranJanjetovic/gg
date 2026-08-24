@@ -99,6 +99,24 @@ func TestStatusTableHasRequiredColumnsAndDetailNormalizesSelector(t *testing.T) 
 	}
 }
 
+func TestStatusDetailRetainsEverySkippedOccurrenceAndFailureEvidence(t *testing.T) {
+	project := fixtureProjects()[0]
+	project.PhaseHistory = []state.PhaseRecord{
+		{Phase: "qa", Status: state.StatusFailed, OccurrenceID: "qa-1", Outcome: &state.ExecutionOutcome{Error: "AWS endpoint unavailable"}, Skip: &state.SkipResolution{ConfirmedAt: time.Date(2026, 8, 4, 10, 0, 0, 0, time.UTC), Cleanup: state.SkipCleanup{Status: state.SkipCleanupSucceeded}}},
+		{Phase: "test_document", Status: state.StatusFailed, OccurrenceID: "test-1", Outcome: &state.ExecutionOutcome{Error: "document check failed"}, Skip: &state.SkipResolution{ConfirmedAt: time.Date(2026, 8, 4, 11, 0, 0, 0, time.UTC), Cleanup: state.SkipCleanup{Status: state.SkipCleanupNotRequired}}},
+	}
+	app := New(WithLifecycleService(&listStatusProjects{projects: []state.ProjectState{project}}), WithRootResolver(listFixedRoot{}))
+	var detail bytes.Buffer
+	if err := app.statusCommand(context.Background(), &detail, []string{"active"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"Skipped: qa", "qa-1", "AWS endpoint unavailable", "Skipped: test_document", "test-1", "document check failed"} {
+		if !strings.Contains(detail.String(), want) {
+			t.Fatalf("detail missing %q:\n%s", want, detail.String())
+		}
+	}
+}
+
 func TestStatusMissingProjectAndUnconfiguredFolder(t *testing.T) {
 	missing := New(WithLifecycleService(&listStatusProjects{missing: true}), WithRootResolver(listFixedRoot{}))
 	var output bytes.Buffer

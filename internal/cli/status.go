@@ -73,8 +73,29 @@ func statusSelector(args []string) (string, error) {
 }
 
 func writeProjectDetail(output io.Writer, project state.ProjectState) error {
-	_, err := fmt.Fprintf(output, "Name: %s\nSlug: %s\nStatus: %s\nCurrent phase: %s\nBranch: %s\nWorktree: %s\nUpdated: %s\n", project.Name, project.Slug, project.Status, displayValue(project.CurrentPhase), displayValue(project.BranchName), displayValue(project.WorktreePath), formatUpdated(project.UpdatedAt))
-	return err
+	if _, err := fmt.Fprintf(output, "Name: %s\nSlug: %s\nStatus: %s\nCurrent phase: %s\nBranch: %s\nWorktree: %s\nUpdated: %s\n", project.Name, project.Slug, project.Status, displayValue(project.CurrentPhase), displayValue(project.BranchName), displayValue(project.WorktreePath), formatUpdated(project.UpdatedAt)); err != nil {
+		return err
+	}
+	for _, record := range project.PhaseHistory {
+		if record.Skip == nil {
+			continue
+		}
+		label := record.Phase
+		if record.Subphase != "" {
+			label += " / " + record.Subphase
+		}
+		if _, err := fmt.Fprintf(output, "Skipped: %s\n  Occurrence: %s\n  Failure: %s\n  Confirmed: %s\n  Cleanup: %s\n", label, displayValue(record.OccurrenceID), skippedFailureSummary(record), formatUpdated(record.Skip.ConfirmedAt), record.Skip.Cleanup.Status); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func skippedFailureSummary(record state.PhaseRecord) string {
+	if record.Outcome == nil || strings.TrimSpace(record.Outcome.Error) == "" {
+		return "-"
+	}
+	return strings.TrimSpace(record.Outcome.Error)
 }
 
 func writeProjectStatusTable(output io.Writer, projects []state.ProjectState) error {

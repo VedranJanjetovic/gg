@@ -29,7 +29,7 @@ func (a projectTUIAttacher) Attach(ctx context.Context, attachment cli.ProjectAt
 		ctx,
 		attachment.Project,
 		tui.Loader(attachment.Load),
-		tui.Actions{Start: attachment.Start, Stop: attachment.Stop, Resume: attachment.Resume, OpenCode: attachment.OpenCode, OpenTerminal: attachment.OpenTerminal},
+		tui.Actions{Start: attachment.Start, Stop: attachment.Stop, Resume: attachment.Resume, Skip: attachment.Skip, SkipAvailable: attachment.SkipAvailable, SkipLabel: attachment.SkipLabel, SkipTarget: attachment.SkipTarget, OpenCode: attachment.OpenCode, OpenTerminal: attachment.OpenTerminal},
 		a.input,
 		a.output,
 		options...,

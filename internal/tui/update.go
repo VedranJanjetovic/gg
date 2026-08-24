@@ -23,6 +23,7 @@ const (
 	actionStart actionKind = iota
 	actionStop
 	actionResume
+	actionSkip
 	actionCode
 	actionTerminal
 )
@@ -49,6 +50,19 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = message.Width
 		return m, nil
 	case tea.KeyMsg:
+		if m.skipConfirm {
+			switch message.String() {
+			case "y", "enter":
+				m.skipConfirm = false
+				m.skipPending = true
+				m.notice = "Skipping " + m.skipLabel + "…"
+				return m, actionCmd(m.ctx, actionSkip, m.actions.Skip)
+			case "n", "esc":
+				m.skipConfirm = false
+				m.notice = "Skip cancelled."
+			}
+			return m, nil
+		}
 		switch message.String() {
 		case "b", "q", "ctrl+c":
 			// Quitting always detaches. Production pipelines execute in a
@@ -82,7 +96,18 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				m.stopPending = true
 				return m, actionCmd(m.ctx, actionStop, m.actions.Stop)
 			}
-			m.notice = keyNotice("stop", m.actions.Stop != nil, m.project.Status != state.StatusRunning, "the project is not running")
+			available, label := m.skipTarget()
+			if m.project.Status == state.StatusFailed && m.actions.Skip != nil && available && !m.skipPending {
+				m.skipLabel = label
+				m.skipConfirm = true
+				m.notice = "Confirm skip of " + m.skipLabel + "?"
+				return m, nil
+			}
+			if m.project.Status == state.StatusFailed {
+				m.notice = keyNotice("skip", m.actions.Skip != nil && m.actions.SkipAvailable, true, "the failed execution is not eligible")
+			} else {
+				m.notice = keyNotice("stop", m.actions.Stop != nil, m.project.Status != state.StatusRunning, "the project is not running")
+			}
 		case "r":
 			resumable := m.project.Status == state.StatusStopped || m.project.Status == state.StatusFailed
 			if resumable && !m.actionPending() && m.actions.Resume != nil {
@@ -141,6 +166,8 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.stopPending = false
 		case actionResume:
 			m.resumePending = false
+		case actionSkip:
+			m.skipPending = false
 		case actionCode:
 			m.codePending = false
 		case actionTerminal:
@@ -174,6 +201,8 @@ func actionDoneNotice(kind actionKind) string {
 		return "Stop requested."
 	case actionResume:
 		return "Resume completed."
+	case actionSkip:
+		return "Skip confirmed; continuation started."
 	case actionCode:
 		return "Opened Visual Studio Code."
 	case actionTerminal:
@@ -184,10 +213,17 @@ func actionDoneNotice(kind actionKind) string {
 }
 
 func (m Model) foregroundOwned() bool {
-	return m.startPending || m.resumePending || m.codePending || m.terminalPending
+	return m.startPending || m.resumePending || m.skipPending || m.codePending || m.terminalPending
 }
 
 func (m Model) actionPending() bool { return m.foregroundOwned() || m.stopPending }
+
+func (m Model) skipTarget() (bool, string) {
+	if m.actions.SkipTarget != nil {
+		return m.actions.SkipTarget(m.project)
+	}
+	return m.actions.SkipAvailable, m.actions.SkipLabel
+}
 
 // launchPending reports whether an external tool launch (editor, terminal) is
 // still starting. Lifecycle actions are deliberately excluded: a pipeline run
