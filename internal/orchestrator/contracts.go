@@ -77,6 +77,29 @@ type GitOpsRebaser interface {
 	RebaseProject(context.Context, git.RebaseRequest) (git.RebaseResult, error)
 }
 
+// RebaseCheckpointManager is an optional capability implemented by the
+// production Git adapter. Keeping it separate preserves the small Rebase
+// adapter contract for callers that provide a deterministic fake.
+type RebaseCheckpointManager interface {
+	CaptureRebaseCheckpoint(context.Context, string) (git.RebaseCheckpoint, error)
+	RestoreRebaseCheckpoint(context.Context, git.RebaseCheckpoint) error
+	AbortRebaseIfActive(context.Context, string) error
+	VerifyRebaseCheckpoint(context.Context, git.RebaseCheckpoint) error
+}
+
+// RebaseWorktreeVerifier checks the post-operation Git index while allowing
+// ignored reports and focused test output in the worktree.
+type RebaseWorktreeVerifier interface {
+	VerifyRebaseWorktree(context.Context, string) error
+}
+
+// RebaseAgent is the optional fresh agent invocation used by production
+// Rebase attempts to resolve conflicts and run focused local regression
+// checks. It is separate from GitOpsRebaser so direct Git tests remain small.
+type RebaseAgent interface {
+	Run(context.Context, agent.RunRequest) (agent.RunResult, error)
+}
+
 type PullRequestService interface {
 	Create(context.Context, pr.Request) (pr.Result, error)
 }

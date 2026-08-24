@@ -16,8 +16,9 @@ Use only the assigned brief, current repository/worktree state, and artifacts ex
 
 ## Inputs
 
-- Assigned branch/worktree and explicit target base revision.
+- Assigned branch/worktree and configured parent branch. The current `origin/<parent-branch>` is the only Rebase target; an explicit `base_ref` must not override it.
 - Declared conflict-resolution policy, acceptance criteria, and relevant artifacts.
+- Evidence from earlier Rebase attempts when this is a retry.
 
 ## Outputs and Artifacts
 
@@ -26,17 +27,18 @@ Use only the assigned brief, current repository/worktree state, and artifacts ex
 
 ## Procedure
 
-1. Verify the assigned worktree and target base before changing history.
-2. Rebase only the assigned branch onto the explicit base.
-3. Resolve conflicts using declared artifacts and repository evidence; keep changes minimal.
-4. Run required post-rebase checks and record results.
+1. Capture one clean branch, index, and worktree checkpoint before changing history.
+2. For each of at most three attempts, restore that checkpoint, fetch the configured parent from `origin`, and rebase onto the freshly updated `origin/<parent-branch>` ref.
+3. Use a fresh Rebase agent for each attempt that needs conflict resolution. Supply the complete acceptance scope and all prior conflict or local-check evidence; preserve accepted feature and relevant upstream changes.
+4. Verify that no rebase is active or unresolved path remains, and run focused locally available regression checks in this Rebase phase.
+5. After every failed attempt, restore the original checkpoint. If the phase remains failed and is later skipped, abort any active rebase and verify that same checkpoint before continuation.
 
 ## Success Criteria
 
-- The branch is based on the requested revision without unresolved conflicts.
+- The branch is based on the latest fetched `origin/<parent-branch>` without unresolved conflicts.
 - No unrelated files or speculative refactors were introduced.
-- The report identifies the resulting state and downstream verification.
+- The report identifies the resulting state, every attempt, and downstream verification.
 
 ## Failure / Escalation
 
-Stop on ambiguous conflicts, unavailable base, failed mandatory checks, or history that cannot be safely rebased. Preserve evidence and escalate; do not force, discard, or rewrite work outside the assigned branch.
+Stop after three unsuccessful attempts for fetch, conflict, agent, unresolved-path, or locally runnable regression-check failures. Preserve evidence and escalate; do not force, discard, or rewrite work outside the assigned branch.

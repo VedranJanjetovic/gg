@@ -150,6 +150,9 @@ func WithConflictStateReader(reader ConflictStateReader) ControllerOption {
 func WithGitOpsServices(rebaser GitOpsRebaser, pullRequests PullRequestService, checks CIService) ControllerOption {
 	return func(c *sequentialController) { c.rebaser, c.pullRequests, c.checks = rebaser, pullRequests, checks }
 }
+func WithRebaseAgent(rebaseAgent RebaseAgent) ControllerOption {
+	return func(c *sequentialController) { c.rebaseAgent = rebaseAgent }
+}
 func WithPRCILifecycleMonitor(monitor LifecycleMonitor) ControllerOption {
 	return func(c *sequentialController) { c.lifecycleMonitor = monitor }
 }
@@ -164,6 +167,7 @@ type sequentialController struct {
 	conflictState      ConflictStateReader
 	developmentCommits DevelopmentCommitVerifier
 	rebaser            GitOpsRebaser
+	rebaseAgent        RebaseAgent
 	pullRequests       PullRequestService
 	checks             CIService
 	lifecycleMonitor   LifecycleMonitor
@@ -992,7 +996,7 @@ func (c *sequentialController) executePhase(ctx context.Context, request Request
 			runResult.ArtifactPaths = append(runResult.ArtifactPaths, path)
 		}
 	} else if phase == pipeline.PhaseRebase && c.rebaser != nil && strings.TrimSpace(request.GitOps.ParentBranch) != "" {
-		result, rebaseErr := c.runRebase(ctx, request)
+		result, rebaseErr := c.runRebase(ctx, request, settings)
 		runResult, runErr = result, rebaseErr
 	} else if phase == pipeline.PhasePR && c.pullRequests != nil && request.GitOps.EnablePR {
 		result, prErr := c.runPullRequest(ctx, request)
@@ -1116,36 +1120,174 @@ func (c *sequentialController) executePhase(ctx context.Context, request Request
 	return outcome, nil
 }
 
-func (c *sequentialController) runRebase(ctx context.Context, request Request) (agent.RunResult, error) {
+// MaxRebaseAttempts is the fixed retry budget for one Rebase execution.
+const MaxRebaseAttempts = 3
+
+const maxRebaseAttempts = MaxRebaseAttempts
+
+func (c *sequentialController) runRebase(ctx context.Context, request Request, settings config.AgentSettings) (agent.RunResult, error) {
 	result := agent.RunResult{ProjectSlug: request.Project.Slug, Phase: pipeline.PhaseRebase, Subphase: ""}
-	if strings.TrimSpace(request.GitOps.ParentBranch) == "" || strings.TrimSpace(request.GitOps.BaseRef) == "" {
+	parent := strings.TrimSpace(request.GitOps.ParentBranch)
+	if parent == "" {
 		result.Status = state.StatusFailed
-		return result, errors.New("Rebase GitOps configuration requires parent branch and base ref")
+		return result, errors.New("Rebase GitOps configuration requires parent branch")
 	}
-	if _, err := c.rebaser.FetchParent(ctx, request.GitOps.ParentBranch); err != nil {
-		result.Status = state.StatusFailed
-		return result, err
-	}
-	rebase, err := c.rebaser.RebaseProject(ctx, git.RebaseRequest{WorktreePath: request.Project.WorktreePath, Branch: request.Project.BranchName, ParentBranch: request.GitOps.ParentBranch, BaseRef: request.GitOps.BaseRef})
-	if rebase.Conflict != nil {
-		path, writeErr := writeGitOpsArtifact(request, "rebase-conflict.md", fmt.Sprintf("# Rebase Conflict\n\n- Branch: `%s`\n- Base: `%s`\n- Parent: `%s`\n- Paths: `%s`\n\n## Git output\n\n```text\n%s\n```\n", rebase.Branch, rebase.BaseRef, request.GitOps.ParentBranch, strings.Join(rebase.Conflict.Paths, ", "), strings.TrimSpace(rebase.Conflict.Output)))
-		result.Status = state.StatusFailed
-		result.ArtifactPaths = append(result.ArtifactPaths, path)
-		if writeErr != nil {
-			return result, errors.Join(err, writeErr)
+
+	manager, hasCheckpoint := c.rebaser.(RebaseCheckpointManager)
+	var checkpoint git.RebaseCheckpoint
+	if hasCheckpoint {
+		var err error
+		checkpoint, err = manager.CaptureRebaseCheckpoint(ctx, request.Project.WorktreePath)
+		if err != nil {
+			result.Status = state.StatusFailed
+			return result, fmt.Errorf("capture Rebase checkpoint: %w", err)
 		}
-		return result, err
 	}
+
+	evidence := make([]string, 0, maxRebaseAttempts)
+	var lastResult git.RebaseResult
+	var lastErr error
+	for attempt := 1; attempt <= maxRebaseAttempts; attempt++ {
+		if hasCheckpoint {
+			if err := manager.RestoreRebaseCheckpoint(ctx, checkpoint); err != nil {
+				result.Status = state.StatusFailed
+				return result, fmt.Errorf("restore Rebase checkpoint before attempt %d: %w", attempt, err)
+			}
+		}
+
+		if _, err := c.rebaser.FetchParent(ctx, parent); err != nil {
+			lastErr = fmt.Errorf("Rebase attempt %d fetch parent %q: %w", attempt, parent, err)
+			evidence = append(evidence, lastErr.Error())
+		} else {
+			// RebaseProject derives origin/<parent> from ParentBranch. BaseRef is
+			// deliberately not an authority so a stale explicit ref cannot
+			// override the freshly fetched parent.
+			lastResult, lastErr = c.rebaser.RebaseProject(ctx, git.RebaseRequest{
+				WorktreePath: request.Project.WorktreePath,
+				Branch:       request.Project.BranchName,
+				ParentBranch: parent,
+				BaseRef:      "origin/" + parent,
+			})
+			if lastErr != nil {
+				evidence = appendRebaseEvidence(evidence, attempt, lastResult, lastErr)
+				if c.rebaseAgent != nil {
+					agentResult, agentErr := c.runRebaseAgent(ctx, request, settings, attempt, evidence)
+					result.ArtifactPaths = appendUnique(result.ArtifactPaths, agentResult.ArtifactPaths...)
+					if agentErr == nil {
+						lastErr = c.verifyRebaseWorktree(ctx, request.Project.WorktreePath)
+						if lastErr == nil {
+							lastResult.Conflict = nil
+						}
+					} else {
+						lastErr = agentErr
+						evidence = append(evidence, fmt.Sprintf("attempt %d Rebase agent: %v", attempt, agentErr))
+					}
+				}
+			} else {
+				lastErr = c.verifyRebaseWorktree(ctx, request.Project.WorktreePath)
+				if lastErr == nil && c.rebaseAgent != nil {
+					agentResult, agentErr := c.runRebaseAgent(ctx, request, settings, attempt, evidence)
+					result.ArtifactPaths = appendUnique(result.ArtifactPaths, agentResult.ArtifactPaths...)
+					lastErr = agentErr
+					if lastErr == nil {
+						lastErr = c.verifyRebaseWorktree(ctx, request.Project.WorktreePath)
+					}
+				}
+			}
+		}
+
+		if lastErr == nil {
+			result.Status = state.StatusFinished
+			result.Disposition = agent.DispositionPassed
+			path, writeErr := writeGitOpsArtifact(request, "rebase-report.md", fmt.Sprintf("# Rebase Report\n\n- Branch: `%s`\n- Base: `origin/%s`\n- Attempts: `%d`\n- Result: passed\n\n## Git output\n\n```text\n%s\n```\n", lastResult.Branch, parent, attempt, strings.TrimSpace(lastResult.Output)))
+			if writeErr == nil {
+				result.ArtifactPaths = appendUnique(result.ArtifactPaths, path)
+			}
+			return result, nil
+		}
+
+		if attempt == maxRebaseAttempts && hasCheckpoint {
+			if restoreErr := manager.RestoreRebaseCheckpoint(ctx, checkpoint); restoreErr != nil {
+				result.Status = state.StatusFailed
+				return result, errors.Join(lastErr, fmt.Errorf("restore Rebase checkpoint after attempt %d: %w", attempt, restoreErr))
+			}
+		}
+	}
+
+	result.Status = state.StatusFailed
+	if lastResult.Conflict != nil {
+		path, writeErr := writeGitOpsArtifact(request, "rebase-conflict.md", fmt.Sprintf("# Rebase Conflict\n\n- Branch: `%s`\n- Base: `origin/%s`\n- Attempts: `%d`\n- Paths: `%s`\n\n## Evidence\n\n%s\n\n## Git output\n\n```text\n%s\n```\n", lastResult.Branch, parent, maxRebaseAttempts, strings.Join(lastResult.Conflict.Paths, ", "), strings.Join(evidence, "\n"), strings.TrimSpace(lastResult.Conflict.Output)))
+		if writeErr == nil {
+			result.ArtifactPaths = appendUnique(result.ArtifactPaths, path)
+		} else {
+			lastErr = errors.Join(lastErr, writeErr)
+		}
+	}
+	return result, fmt.Errorf("Rebase failed after %d attempts: %w", maxRebaseAttempts, lastErr)
+}
+
+func (c *sequentialController) verifyRebaseWorktree(ctx context.Context, worktree string) error {
+	if verifier, ok := c.rebaser.(RebaseWorktreeVerifier); ok {
+		if err := verifier.VerifyRebaseWorktree(ctx, worktree); err != nil {
+			return err
+		}
+	}
+	if c.conflictState != nil {
+		unresolved, err := c.conflictState.HasUnresolvedConflicts(ctx, worktree)
+		if err != nil {
+			return fmt.Errorf("inspect Rebase Git index: %w", err)
+		}
+		if unresolved {
+			return errRebaseHasUnmergedPaths
+		}
+	}
+	return nil
+}
+
+func (c *sequentialController) runRebaseAgent(ctx context.Context, request Request, settings config.AgentSettings, attempt int, evidence []string) (agent.RunResult, error) {
+	input := agent.PromptInput{
+		Project:            request.Project,
+		AcceptanceCriteria: append([]string(nil), request.Project.AcceptanceCriteria...),
+		Phase:              pipeline.PhaseRebase,
+		PhaseContract:      request.PhaseContracts[pipeline.PhaseRebase],
+		ArtifactPaths:      append([]string(nil), request.Project.ArtifactPaths...),
+		WorkingDirectory:   request.Project.WorktreePath,
+		RunID:              phaseInvocationID(request.RunID, pipeline.PhaseRebase, "agent", attempt-1),
+	}
+	prompt, err := c.prompts.BuildPrompt(input)
 	if err != nil {
-		result.Status = state.StatusFailed
-		return result, err
+		return agent.RunResult{Phase: pipeline.PhaseRebase}, fmt.Errorf("build Rebase attempt %d prompt: %w", attempt, err)
 	}
-	result.Status = state.StatusFinished
-	result.Disposition = agent.DispositionPassed
-	if path, writeErr := writeGitOpsArtifact(request, "rebase-report.md", fmt.Sprintf("# Rebase Report\n\n- Branch: `%s`\n- Base: `%s`\n- Parent fetched: `%s`\n- Result: passed\n\n## Git output\n\n```text\n%s\n```\n", rebase.Branch, rebase.BaseRef, request.GitOps.ParentBranch, strings.TrimSpace(rebase.Output))); writeErr == nil {
-		result.ArtifactPaths = append(result.ArtifactPaths, path)
+	if len(evidence) > 0 {
+		prompt += "\n\nPrior Rebase attempt evidence (use it to improve this fresh attempt):\n- " + strings.Join(evidence, "\n- ")
 	}
-	return result, nil
+	runResult, runErr := c.rebaseAgent.Run(ctx, agent.RunRequest{
+		Project:          request.Project,
+		Phase:            pipeline.PhaseRebase,
+		Settings:         settings,
+		Prompt:           prompt,
+		WorkingDirectory: request.Project.WorktreePath,
+		ArtifactPaths:    input.ArtifactPaths,
+		RunID:            input.RunID,
+	})
+	if runErr != nil {
+		return runResult, runErr
+	}
+	if runResult.Status == state.StatusFailed || runResult.Status == state.StatusStopped {
+		return runResult, fmt.Errorf("Rebase agent attempt %d returned status %s", attempt, runResult.Status)
+	}
+	if runResult.Disposition != "" && runResult.Disposition != agent.DispositionPassed {
+		return runResult, fmt.Errorf("Rebase agent attempt %d returned disposition %q", attempt, runResult.Disposition)
+	}
+	return runResult, nil
+}
+
+func appendRebaseEvidence(evidence []string, attempt int, result git.RebaseResult, err error) []string {
+	entry := fmt.Sprintf("attempt %d: %v", attempt, err)
+	if result.Conflict != nil {
+		entry += fmt.Sprintf("; paths=%s; output=%s", strings.Join(result.Conflict.Paths, ","), strings.TrimSpace(result.Conflict.Output))
+	}
+	return append(evidence, entry)
 }
 
 func (c *sequentialController) runPullRequest(ctx context.Context, request Request) (agent.RunResult, error) {

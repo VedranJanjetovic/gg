@@ -24,13 +24,55 @@ func TestFetchParentUsesConfiguredBranch(t *testing.T) {
 
 func TestRebaseSuccess(t *testing.T) {
 	f := &remoteExecutor{outputs: []string{"rebased\n"}}
-	got, err := git.NewClient("/repo", f).RebaseProject(context.Background(), git.RebaseRequest{WorktreePath: "/repo/project", Branch: "gg/project", ParentBranch: "develop", BaseRef: "origin/develop"})
+	got, err := git.NewClient("/repo", f).RebaseProject(context.Background(), git.RebaseRequest{WorktreePath: "/repo/project", Branch: "gg/project", ParentBranch: "develop", BaseRef: "stale/base"})
 	if err != nil || got.Conflict != nil || got.Output != "rebased\n" {
 		t.Fatalf("result=%#v err=%v", got, err)
 	}
 	want := git.Command{Dir: "/repo/project", Name: "git", Args: []string{"rebase", "origin/develop"}}
 	if !reflect.DeepEqual(f.calls, []git.Command{want}) {
 		t.Fatalf("calls=%#v want=%#v", f.calls, []git.Command{want})
+	}
+}
+
+func TestRebaseCheckpointCommandsRestoreCleanBranchState(t *testing.T) {
+	f := &remoteExecutor{
+		outputs: []string{"gg/project\n", "0123456789abcdef\n", "", "", "", "", "", "", "gg/project\n", "0123456789abcdef\n", ""},
+		errs:    []error{nil, nil, nil, errors.New("no rebase"), nil, nil, nil, errors.New("no rebase"), nil, nil, nil},
+	}
+	c := git.NewClient("/repo", f)
+	checkpoint, err := c.CaptureRebaseCheckpoint(context.Background(), "/repo/project")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if checkpoint.Branch != "gg/project" || checkpoint.Head != "0123456789abcdef" {
+		t.Fatalf("checkpoint = %#v", checkpoint)
+	}
+	if err := c.RestoreRebaseCheckpoint(context.Background(), checkpoint); err != nil {
+		t.Fatal(err)
+	}
+	want := []git.Command{
+		{Dir: "/repo/project", Name: "git", Args: []string{"branch", "--show-current"}},
+		{Dir: "/repo/project", Name: "git", Args: []string{"rev-parse", "HEAD"}},
+		{Dir: "/repo/project", Name: "git", Args: []string{"status", "--porcelain=v1", "--untracked-files=all", "--"}},
+		{Dir: "/repo/project", Name: "git", Args: []string{"rev-parse", "--verify", "REBASE_HEAD"}},
+		{Dir: "/repo/project", Name: "git", Args: []string{"checkout", "--force", "gg/project"}},
+		{Dir: "/repo/project", Name: "git", Args: []string{"reset", "--hard", "0123456789abcdef"}},
+		{Dir: "/repo/project", Name: "git", Args: []string{"clean", "-fd", "--"}},
+		{Dir: "/repo/project", Name: "git", Args: []string{"rev-parse", "--verify", "REBASE_HEAD"}},
+		{Dir: "/repo/project", Name: "git", Args: []string{"branch", "--show-current"}},
+		{Dir: "/repo/project", Name: "git", Args: []string{"rev-parse", "HEAD"}},
+		{Dir: "/repo/project", Name: "git", Args: []string{"status", "--porcelain=v1", "--untracked-files=all", "--"}},
+	}
+	if !reflect.DeepEqual(f.calls, want) {
+		t.Fatalf("calls = %#v, want %#v", f.calls, want)
+	}
+}
+
+func TestCaptureRebaseCheckpointRejectsDirtyWorktree(t *testing.T) {
+	f := &remoteExecutor{outputs: []string{"gg/project\n", "0123456789abcdef\n", " M README.md\n"}}
+	_, err := git.NewClient("/repo", f).CaptureRebaseCheckpoint(context.Background(), "/repo/project")
+	if err == nil || !strings.Contains(err.Error(), "uncommitted changes") {
+		t.Fatalf("error = %v, want dirty-worktree rejection", err)
 	}
 }
 

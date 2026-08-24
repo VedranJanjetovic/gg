@@ -18,5 +18,12 @@ var canonicalPhaseContracts = map[PhaseID]string{
 // PhaseContract returns the canonical executable skill text for a phase.
 func PhaseContract(id PhaseID) (string, bool) {
 	contract, ok := canonicalPhaseContracts[id]
+	if id == PhaseRebase && ok {
+		// The generated map is retained for compatibility with older bundled
+		// contracts. Keep the retry/checkpoint rules explicit in the executable
+		// contract until the skill bundling generator is run by the release
+		// process.
+		contract += "\n\n## Rebase retry contract\n\nUse one clean checkpoint and no more than three attempts. Every attempt restores the checkpoint, fetches origin/<parent-branch>, and targets that freshly updated ref; base_ref never overrides it. A fresh Rebase agent receives the acceptance scope and accumulated prior conflict/check evidence, resolves conflicts, and runs focused local regression checks. Restore the checkpoint after every failed attempt and before a confirmed skip continues."
+	}
 	return contract, ok
 }

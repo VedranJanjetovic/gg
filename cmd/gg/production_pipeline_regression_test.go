@@ -204,8 +204,8 @@ func TestProductionCompositionRunsFakeAgentsGitStateAndPersistsAllEvents(t *test
 	if strings.Join(lifecycle, "\n") != strings.Join(wantLifecycle, "\n") {
 		t.Fatalf("durable lifecycle event order:\n got %v\nwant %v", lifecycle, wantLifecycle)
 	}
-	if processCounts["started"] != 13 || processCounts["completed"] != 12 || processCounts["failed"] != 1 || processCounts["canceled"] != 0 {
-		t.Fatalf("agent lifecycle event counts = %v, want 13 started, 12 completed, 1 failed, 0 canceled", processCounts)
+	if processCounts["started"] != 15 || processCounts["completed"] != 14 || processCounts["failed"] != 1 || processCounts["canceled"] != 0 {
+		t.Fatalf("agent lifecycle event counts = %v, want 15 started, 14 completed, 1 failed, 0 canceled", processCounts)
 	}
 	if processCounts["output"] < processCounts["started"] {
 		t.Fatalf("agent output events = %d, want at least one per invocation (%d)", processCounts["output"], processCounts["started"])

@@ -151,7 +151,7 @@ func newAppWithIO(ctx context.Context, input io.Reader, output io.Writer, runTUI
 			codingPatternsPath = ""
 		}
 	}
-	controller := orchestrator.NewProductionController(runner, projects, gitClient, orchestrator.WithEventSink(events.OrchestratorSink()), orchestrator.WithGitOpsServices(gitClient, gitOpsPR, gitOpsCI), orchestrator.WithPRCILifecycleMonitor(monitor), orchestrator.WithPromptBuilder(agent.StandalonePromptBuilder{CodingPatternsPath: codingPatternsPath}))
+	controller := orchestrator.NewProductionController(runner, projects, gitClient, orchestrator.WithEventSink(events.OrchestratorSink()), orchestrator.WithGitOpsServices(gitClient, gitOpsPR, gitOpsCI), orchestrator.WithRebaseAgent(runner), orchestrator.WithPRCILifecycleMonitor(monitor), orchestrator.WithPromptBuilder(agent.StandalonePromptBuilder{CodingPatternsPath: codingPatternsPath}))
 	resumeCoordinator, err := orchestrator.NewResumeCoordinator(productionResumeSource{roots: rootResolver}, controller, orchestrator.ResumeCoordinatorOptions{Concurrency: 4})
 	if err != nil {
 		return nil, err
