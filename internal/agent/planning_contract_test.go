@@ -175,3 +175,79 @@ func TestValidatePlanningArtifactRejectsUnindentedMultilineFrontmatter(t *testin
 		t.Fatalf("error=%v, want rejected multiline frontmatter", err)
 	}
 }
+
+func TestValidatePlanningArtifactRequiresJSONCompatibleSingleLineMetadata(t *testing.T) {
+	valid := planningFixture(PlanningTrivial, []string{"Phase 1: README wording"}, []string{"One cohesive outcome."}, []PlanningPhaseBoundary{{Phase: "Phase 1: README wording", Justification: "No dependency ordering."}})
+	cases := []struct {
+		name   string
+		mutate func(string) string
+	}{
+		{
+			name: "yaml-only scalar",
+			mutate: func(value string) string {
+				return strings.Replace(value, `gg_plan_complexity: "Trivial"`, "gg_plan_complexity: Trivial", 1)
+			},
+		},
+		{
+			name: "indented multiline array",
+			mutate: func(value string) string {
+				return strings.Replace(value, `gg_plan_phases: ["Phase 1: README wording"]`, "gg_plan_phases: [\n  \"Phase 1: README wording\"\n]", 1)
+			},
+		},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.MkdirAll(filepath.Join(dir, ".gg"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, ".gg", "plan.md"), []byte(test.mutate(valid)), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			_, err := ValidatePlanningArtifact(dir)
+			if err == nil || !strings.Contains(err.Error(), "JSON-compatible") {
+				t.Fatalf("error=%v, want JSON-compatible metadata violation", err)
+			}
+		})
+	}
+}
+
+func TestValidatePlanningArtifactRejectsBlankEvidenceAndMisplacedBoundaries(t *testing.T) {
+	valid := planningFixture(PlanningTrivial, []string{"Phase 1: README wording"}, []string{"One cohesive outcome."}, []PlanningPhaseBoundary{{Phase: "Phase 1: README wording", Justification: "No dependency ordering."}})
+	cases := []struct {
+		name string
+		data string
+		want string
+	}{
+		{
+			name: "blank evidence item",
+			data: strings.Replace(valid, `gg_plan_complexity_evidence: ["One cohesive outcome."]`, `gg_plan_complexity_evidence: ["One cohesive outcome.", " "]`, 1),
+			want: "evidence item 2 is blank",
+		},
+		{
+			name: "orphan boundary",
+			data: strings.Replace(valid, "## Phase 1: README wording\n\nBoundary justification: No dependency ordering.\n", "Boundary justification: No dependency ordering.\n\n## Phase 1: README wording\n", 1),
+			want: "phase-boundary justifications",
+		},
+		{
+			name: "missing boundary",
+			data: strings.Replace(valid, "Boundary justification: No dependency ordering.\n", "", 1),
+			want: "phase-boundary justifications",
+		},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.MkdirAll(filepath.Join(dir, ".gg"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, ".gg", "plan.md"), []byte(test.data), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			_, err := ValidatePlanningArtifact(dir)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("error=%v, want %q", err, test.want)
+			}
+		})
+	}
+}

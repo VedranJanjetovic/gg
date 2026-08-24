@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -118,26 +119,17 @@ func validatePlanningFrontmatterShape(frontmatter string) []string {
 	lines := strings.Split(frontmatter, "\n")
 	violations := make([]string, 0)
 	for _, key := range keys {
-		for index, line := range lines {
+		for _, line := range lines {
 			field, value, found := strings.Cut(strings.TrimSpace(line), ":")
 			if !found || field != key {
 				continue
 			}
 			if strings.TrimSpace(value) == "" {
-				violations = append(violations, fmt.Sprintf("frontmatter %s must be a single-line value", key))
-			} else {
-				for _, continuation := range lines[index+1:] {
-					trimmed := strings.TrimSpace(continuation)
-					if trimmed == "" || strings.HasPrefix(trimmed, "#") {
-						continue
-					}
-					field, _, isField := strings.Cut(trimmed, ":")
-					if isField && field != "" && !strings.ContainsAny(field, " []{}") {
-						break
-					}
-					violations = append(violations, fmt.Sprintf("frontmatter %s must not use a multiline value", key))
-					break
-				}
+				violations = append(violations, fmt.Sprintf("frontmatter %s must be a single-line JSON-compatible value", key))
+				break
+			}
+			if !json.Valid([]byte(strings.TrimSpace(value))) {
+				violations = append(violations, fmt.Sprintf("frontmatter %s must be a single-line JSON-compatible value", key))
 			}
 			break
 		}
@@ -154,6 +146,11 @@ func validatePlanningArtifact(artifact PlanningArtifact) []string {
 	}
 	if len(nonBlank(artifact.Evidence)) == 0 {
 		violations = append(violations, "frontmatter gg_plan_complexity_evidence must contain at least one item")
+	}
+	for index, evidence := range artifact.Evidence {
+		if strings.TrimSpace(evidence) == "" {
+			violations = append(violations, fmt.Sprintf("frontmatter gg_plan_complexity_evidence item %d is blank", index+1))
+		}
 	}
 	if len(nonBlank(artifact.Phases)) == 0 {
 		violations = append(violations, "frontmatter gg_plan_phases must contain at least one phase")
@@ -255,7 +252,6 @@ var (
 	bodyCategoryPattern = regexp.MustCompile(`(?m)^- Complexity category:\s*\*\*([^*\n]+)\*\*\s*$`)
 	bodyCountPattern    = regexp.MustCompile(`(?m)^- Selected phase count:\s*\*\*([0-9]+)\*\*\s*$`)
 	bodyPhasePattern    = regexp.MustCompile(`(?m)^##\s+(Phase\s+[0-9]+:\s+.+?)\s*$`)
-	bodyBoundaryPattern = regexp.MustCompile(`(?m)^Boundary justification:\s*(.+?)\s*$`)
 	bodySectionPattern  = regexp.MustCompile(`(?m)^##\s+(.+?)\s*$`)
 )
 
@@ -345,29 +341,56 @@ func planningBodyPhaseCount(body string) int {
 }
 
 func planningBodyPhases(body string) []string {
-	matches := bodyPhasePattern.FindAllStringSubmatch(body, -1)
-	phases := make([]string, 0, len(matches))
-	for _, match := range matches {
-		if len(match) == 2 {
-			phases = append(phases, strings.TrimSpace(match[1]))
-		}
+	sections := planningBodyPhaseSections(body)
+	phases := make([]string, 0, len(sections))
+	for _, section := range sections {
+		phases = append(phases, section.phase)
 	}
 	return phases
 }
 
-func planningBodyBoundaries(body string) []PlanningPhaseBoundary {
-	justifications := bodyBoundaryPattern.FindAllStringSubmatch(body, -1)
-	phases := planningBodyPhases(body)
-	boundaries := make([]PlanningPhaseBoundary, 0, len(justifications))
-	for index, match := range justifications {
-		if len(match) != 2 {
+type planningBodyPhaseSection struct {
+	phase          string
+	justifications []string
+}
+
+func planningBodyPhaseSections(body string) []planningBodyPhaseSection {
+	lines := strings.Split(strings.ReplaceAll(body, "\r\n", "\n"), "\n")
+	sections := make([]planningBodyPhaseSection, 0)
+	current := -1
+	for _, line := range lines {
+		if match := bodyPhasePattern.FindStringSubmatch(line); len(match) == 2 {
+			sections = append(sections, planningBodyPhaseSection{phase: strings.TrimSpace(match[1])})
+			current = len(sections) - 1
 			continue
 		}
-		phase := ""
-		if index < len(phases) {
-			phase = phases[index]
+		if bodySectionPattern.MatchString(line) {
+			// A boundary explanation belongs directly to its phase section;
+			// an unrelated level-two section must not absorb it.
+			current = -1
+			continue
 		}
-		boundaries = append(boundaries, PlanningPhaseBoundary{Phase: phase, Justification: strings.TrimSpace(match[1])})
+		if strings.HasPrefix(line, "Boundary justification:") {
+			justification := strings.TrimSpace(strings.TrimPrefix(line, "Boundary justification:"))
+			if current < 0 {
+				// Preserve an orphan so validation reports a body/frontmatter
+				// mismatch instead of silently discarding it.
+				sections = append(sections, planningBodyPhaseSection{justifications: []string{justification}})
+				continue
+			}
+			sections[current].justifications = append(sections[current].justifications, justification)
+		}
+	}
+	return sections
+}
+
+func planningBodyBoundaries(body string) []PlanningPhaseBoundary {
+	sections := planningBodyPhaseSections(body)
+	var boundaries []PlanningPhaseBoundary
+	for _, section := range sections {
+		for _, justification := range section.justifications {
+			boundaries = append(boundaries, PlanningPhaseBoundary{Phase: section.phase, Justification: justification})
+		}
 	}
 	return boundaries
 }

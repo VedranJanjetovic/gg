@@ -832,6 +832,7 @@ func (c *sequentialController) executePlanningLoop(ctx context.Context, request 
 	}
 
 	var outcomes []PhaseOutcome
+	validationSummaries := make([]string, 0, agent.MaxPlanningAttempts)
 	for attempt := 1; attempt <= agent.MaxPlanningAttempts; attempt++ {
 		outcome, err := c.executePhase(ctx, *request, executable, "", attempt-1, nil)
 		outcomes = append(outcomes, outcome)
@@ -843,8 +844,9 @@ func (c *sequentialController) executePlanningLoop(ctx context.Context, request 
 		if !errors.As(err, &contractErr) {
 			return outcomes, err
 		}
+		validationSummaries = append(validationSummaries, fmt.Sprintf("attempt %d: %s", attempt, strings.Join(contractErr.Violations, "; ")))
 		if attempt == agent.MaxPlanningAttempts {
-			return outcomes, fmt.Errorf("phase-limit-exceeded: Planning artifact remained invalid after %d attempts: %w", agent.MaxPlanningAttempts, err)
+			return outcomes, fmt.Errorf("phase-limit-exceeded: Planning artifact remained invalid after %d attempts: %s: %w", agent.MaxPlanningAttempts, strings.Join(validationSummaries, " | "), err)
 		}
 		request.PlanningRetry = &PlanningRetry{Attempt: attempt + 1, Artifact: contractErr.Artifact, Violations: append([]string(nil), contractErr.Violations...)}
 	}
