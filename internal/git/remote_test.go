@@ -34,6 +34,21 @@ func TestRebaseSuccess(t *testing.T) {
 	}
 }
 
+func TestRebaseRejectsUnsafeBranchBeforeInvokingGit(t *testing.T) {
+	f := &remoteExecutor{outputs: []string{"unexpected"}}
+	_, err := git.NewClient("/repo", f).RebaseProject(context.Background(), git.RebaseRequest{
+		WorktreePath: "/repo/project",
+		Branch:       "feature..bad",
+		ParentBranch: "main",
+	})
+	if err == nil || !strings.Contains(err.Error(), "branch is invalid") {
+		t.Fatalf("error = %v, want unsafe branch rejection", err)
+	}
+	if len(f.calls) != 0 {
+		t.Fatalf("git calls = %#v, want none", f.calls)
+	}
+}
+
 func TestRebaseCheckpointCommandsRestoreCleanBranchState(t *testing.T) {
 	f := &remoteExecutor{
 		outputs: []string{"gg/project\n", "0123456789abcdef\n", "", "", "", "", "", "", "gg/project\n", "0123456789abcdef\n", ""},
@@ -65,6 +80,20 @@ func TestRebaseCheckpointCommandsRestoreCleanBranchState(t *testing.T) {
 	}
 	if !reflect.DeepEqual(f.calls, want) {
 		t.Fatalf("calls = %#v, want %#v", f.calls, want)
+	}
+}
+
+func TestRestoreRebaseCheckpointAbortsActiveRebase(t *testing.T) {
+	f := &remoteExecutor{
+		outputs: []string{"rebase-head\n", "", "", "", "", "", "gg/project\n", "0123456789abcdef\n", ""},
+		errs:    []error{nil, nil, nil, nil, nil, errors.New("no rebase"), nil, nil, nil},
+	}
+	checkpoint := git.RebaseCheckpoint{WorktreePath: "/repo/project", Branch: "gg/project", Head: "0123456789abcdef"}
+	if err := git.NewClient("/repo", f).RestoreRebaseCheckpoint(context.Background(), checkpoint); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.calls) != 9 || !reflect.DeepEqual(f.calls[1].Args, []string{"rebase", "--abort"}) {
+		t.Fatalf("calls = %#v, want active rebase abort before restore", f.calls)
 	}
 }
 

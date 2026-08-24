@@ -1,39 +1,37 @@
 ---
-gg_run_id: "gg-tool-generally-great-but-1787557476767017000/development/implementation/iteration-0"
+gg_run_id: "gg-tool-generally-great-but-1787557476767017000/development/testing/iteration-0"
 gg_disposition: passed
 ---
 
-# Development
+# Development / Testing
 
 ## Scope
 
-Implemented only plan Phase 4, “Rebase retry and checkpoint recovery”.
+Phase 4 only: Rebase retry and checkpoint recovery.
 
-## Changes
+## Changes verified
 
-- Added Git checkpoint capture, active-rebase abort, clean restore, checkpoint verification, and post-Rebase unresolved-index verification.
-- Rebase now validates refs, fetches the configured parent on every attempt, and targets the freshly updated `origin/<parent-branch>`; `base_ref` cannot override that target.
-- Added the fixed three-attempt Rebase retry loop covering fetch, Git, agent, unresolved-path, and local verification failures.
-- Added optional fresh Rebase-agent dispatch with accumulated prior failure evidence and production wiring.
-- Updated the canonical and embedded Rebase contracts with checkpoint, retry, latest-origin, conflict-resolution, and focused-local-check requirements.
+- Rebase failure evidence now includes post-Git verification failures and Rebase-agent failures, so every fresh retry receives the prior local regression evidence.
+- Rebase validates the branch ref before invoking Git.
+- Git worktree ownership comparisons tolerate platform-resolved symlinks such as macOS `/var` and `/private/var` while preserving the caller’s path spelling.
+- Added tests for fetch-failure exhaustion, post-rebase verification retry, fresh agent invocation IDs, post-rebase agent-failure checkpoint restoration, active-rebase abort, and unsafe branch rejection.
 
 ## Generated subphase
 
-- `implementation`: passed. Source and unit-test changes are present in the assigned worktree.
+- `testing`: passed. Focused Phase 4 tests and regression checks pass.
 
 ## Verification
 
-- `gofmt -w internal/git/remote.go internal/git/remote_test.go internal/orchestrator/contracts.go internal/orchestrator/execution.go internal/orchestrator/rebase_retry_test.go cmd/gg/main.go cmd/gg/production_pipeline_regression_test.go internal/pipeline/contract_text.go`: passed.
+- `gofmt -w internal/git/remote.go internal/git/remote_test.go internal/git/worktree.go internal/orchestrator/execution.go internal/orchestrator/rebase_retry_test.go`: passed.
 - `git diff --check`: passed.
+- `go test ./internal/git`: passed.
+- `go test ./internal/orchestrator -run 'Rebase|rebase'`: passed.
+- `go test -race ./internal/git ./internal/orchestrator`: passed.
 - `go vet ./internal/git ./internal/orchestrator ./internal/pipeline ./cmd/gg`: passed.
-- Focused Git Rebase tests: passed.
-- Focused orchestrator retry tests: passed.
-- Race-enabled focused Git and orchestrator Rebase tests: passed.
-- `go test ./internal/orchestrator ./internal/pipeline`: passed.
-- Production pipeline regression test: passed.
-- `go test ./...`: two unrelated existing macOS environment-sensitive tests failed: Git worktree ownership compares `/var` with `/private/var`, and the disposable-worktree e2e test cannot load its expected persisted state. Both failures reproduce individually and are outside the Phase 4 files/behavior.
+- `go test ./...`: all packages passed except the pre-existing macOS E2E failure `internal/e2e.TestRealCLIConfigureCreatesProjectAndDisposableWorktree`, which cannot load state at the configured repository root (`.../002/.gg/projects/.../state.json`). Git’s separate `/var` versus `/private/var` baseline failure was fixed; `internal/git` now passes.
+- `go vet ./...`: unavailable as a repository-wide gate under the installed Go toolchain because existing tests use `testing.Context` and `testing.Chdir`, which require Go 1.24 while `go.mod` declares Go 1.22.
 
 ## Handoff risks
 
-- Rebase checkpoints require a clean index/worktree; this matches the pipeline’s committed Development output and prevents silent loss of unrelated uncommitted work.
-- The full repository gate remains subject to the two pre-existing macOS path/state failures documented above.
+- Rebase checkpoint capture still intentionally requires a clean index/worktree; this prevents retry or skip cleanup from discarding unrelated uncommitted work.
+- The remaining E2E failure is outside Phase 4 behavior and remains actionable for a separate environment/state-root fix.

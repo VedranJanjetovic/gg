@@ -228,8 +228,8 @@ func (c *Client) RebaseProject(ctx context.Context, request RebaseRequest) (Reba
 	if request.WorktreePath == "" || !filepath.IsAbs(request.WorktreePath) {
 		return RebaseResult{}, errors.New("git rebase worktree path must be absolute")
 	}
-	if request.Branch == "" {
-		return RebaseResult{}, errors.New("git rebase branch is required")
+	if err := validateRef(request.Branch, "branch"); err != nil {
+		return RebaseResult{}, err
 	}
 	parentBranch := request.ParentBranch
 	if parentBranch == "" {

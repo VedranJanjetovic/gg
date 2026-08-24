@@ -1177,20 +1177,31 @@ func (c *sequentialController) runRebase(ctx context.Context, request Request, s
 						lastErr = c.verifyRebaseWorktree(ctx, request.Project.WorktreePath)
 						if lastErr == nil {
 							lastResult.Conflict = nil
+						} else {
+							evidence = appendRebaseEvidence(evidence, attempt, lastResult, lastErr)
 						}
 					} else {
 						lastErr = agentErr
-						evidence = append(evidence, fmt.Sprintf("attempt %d Rebase agent: %v", attempt, agentErr))
+						evidence = appendRebaseEvidence(evidence, attempt, lastResult, fmt.Errorf("Rebase agent: %w", agentErr))
 					}
 				}
 			} else {
 				lastErr = c.verifyRebaseWorktree(ctx, request.Project.WorktreePath)
+				if lastErr != nil {
+					evidence = appendRebaseEvidence(evidence, attempt, lastResult, lastErr)
+				}
 				if lastErr == nil && c.rebaseAgent != nil {
 					agentResult, agentErr := c.runRebaseAgent(ctx, request, settings, attempt, evidence)
 					result.ArtifactPaths = appendUnique(result.ArtifactPaths, agentResult.ArtifactPaths...)
 					lastErr = agentErr
+					if lastErr != nil {
+						evidence = appendRebaseEvidence(evidence, attempt, lastResult, fmt.Errorf("Rebase agent: %w", lastErr))
+					}
 					if lastErr == nil {
 						lastErr = c.verifyRebaseWorktree(ctx, request.Project.WorktreePath)
+						if lastErr != nil {
+							evidence = appendRebaseEvidence(evidence, attempt, lastResult, lastErr)
+						}
 					}
 				}
 			}
