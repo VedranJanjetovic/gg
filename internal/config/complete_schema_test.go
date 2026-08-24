@@ -203,6 +203,59 @@ func TestSparseCompleteShapeRequiresMigrationAndPrefillsMissingNewerPhase(t *tes
 	}
 }
 
+func TestSaveCompleteConfigurationMaterializesPartialCompleteShape(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	store := config.NewStore()
+	root := t.TempDir()
+	global := config.GlobalConfig{
+		Version:  config.CurrentSchemaVersion,
+		Defaults: config.AgentSettings{Agent: config.AgentClaude, Model: "global-model", Effort: config.EffortMedium},
+	}
+	partial := completeProject()
+	partial.Version = config.CompleteSchemaVersion - 1
+	partial.Phases[0].AgentSettings.Model = ""
+
+	if got := config.ClassifyProjectConfig(partial); got != config.ProjectConfigMigrationRequired {
+		t.Fatalf("classification = %q, want migration_required", got)
+	}
+	if err := store.SaveCompleteConfiguration(root, global, partial); err != nil {
+		t.Fatalf("SaveCompleteConfiguration: %v", err)
+	}
+	loaded, err := store.LoadProjectClassified(root)
+	if err != nil {
+		t.Fatalf("LoadProjectClassified: %v", err)
+	}
+	if loaded.Classification != config.ProjectConfigComplete {
+		t.Fatalf("classification after save = %q, want complete", loaded.Classification)
+	}
+	if got := loaded.Config.Phases[0].AgentSettings.Model; got != "gpt-5" {
+		t.Fatalf("materialized phase model = %q, want project default gpt-5", got)
+	}
+}
+
+func TestMixedCompleteAndSparseDataWithInvalidPhaseIsMalformed(t *testing.T) {
+	t.Parallel()
+
+	project := completeProject()
+	project.Version = config.CompleteSchemaVersion - 1
+	project.PhaseOverrides = map[config.Phase]config.PhaseOverride{config.PhaseQA: {}}
+	project.Phases[0].AgentSettings.Agent = config.Agent("unsupported")
+	if got := config.ClassifyProjectConfig(project); got != config.ProjectConfigMalformed {
+		t.Fatalf("classification = %q, want malformed", got)
+	}
+}
+
+func TestWhitespaceOnlyPartialModelIsMalformed(t *testing.T) {
+	t.Parallel()
+
+	project := completeProject()
+	project.Version = config.CompleteSchemaVersion - 1
+	project.Phases[0].AgentSettings.Model = "   "
+	if got := config.ClassifyProjectConfig(project); got != config.ProjectConfigMalformed {
+		t.Fatalf("classification = %q, want malformed", got)
+	}
+}
+
 func TestPartialPhaseTupleRequiresMigrationAndInvalidPhaseDataIsMalformed(t *testing.T) {
 	t.Parallel()
 
@@ -248,6 +301,27 @@ func TestCompleteResolutionIsSelfContainedAndCloneIsolated(t *testing.T) {
 	clone.Phases[0].AgentSettings.Model = "changed"
 	if project.Phases[0].AgentSettings.Model == "changed" {
 		t.Fatal("ProjectConfig.Clone aliases phase settings")
+	}
+}
+
+func TestConfigurationClonesDoNotAliasGitOpsPointers(t *testing.T) {
+	t.Parallel()
+
+	pr, ci := true, false
+	project := completeProject()
+	project.GitOps = config.GitOpsOverride{EnablePR: &pr, EnableCI: &ci}
+	clone := project.Clone()
+	*clone.GitOps.EnablePR = false
+	*clone.GitOps.EnableCI = true
+	if !*project.GitOps.EnablePR || *project.GitOps.EnableCI {
+		t.Fatal("ProjectConfig.Clone aliases GitOps pointers")
+	}
+
+	global := config.GlobalConfig{Version: config.CurrentSchemaVersion, Defaults: config.AgentSettings{Agent: config.AgentCodex, Model: "gpt-5", Effort: config.EffortHigh}, GitOps: config.GitOpsOverride{EnablePR: &pr, EnableCI: &ci}}
+	globalClone := global.Clone()
+	*globalClone.GitOps.EnablePR = false
+	if !*global.GitOps.EnablePR {
+		t.Fatal("GlobalConfig.Clone aliases GitOps pointers")
 	}
 }
 

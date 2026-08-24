@@ -175,6 +175,7 @@ type GlobalConfig struct {
 func (config GlobalConfig) Clone() GlobalConfig {
 	clone := config
 	clone.Folders = append([]string(nil), config.Folders...)
+	clone.GitOps = cloneGitOpsOverride(config.GitOps)
 	return clone
 }
 
@@ -227,6 +228,7 @@ func CompletePhaseOrder() []Phase {
 func (config ProjectConfig) Clone() ProjectConfig {
 	clone := config
 	clone.PhaseOverrides = NormalizePhaseOverrides(config.PhaseOverrides)
+	clone.GitOps = cloneGitOpsOverride(config.GitOps)
 	if config.Phases != nil {
 		clone.Phases = append([]PhaseConfig(nil), config.Phases...)
 	}
@@ -240,8 +242,21 @@ func CompleteProjectConfig(version SchemaVersion, defaults AgentSettings, phases
 		Version:  version,
 		Defaults: AgentSettingsOverride{Agent: defaults.Agent, Model: defaults.Model, Effort: defaults.Effort, Provenance: defaults.Provenance},
 		Phases:   append([]PhaseConfig(nil), phases...),
-		GitOps:   gitops,
+		GitOps:   cloneGitOpsOverride(gitops),
 	}
+}
+
+func cloneGitOpsOverride(value GitOpsOverride) GitOpsOverride {
+	clone := value
+	if value.EnablePR != nil {
+		enablePR := *value.EnablePR
+		clone.EnablePR = &enablePR
+	}
+	if value.EnableCI != nil {
+		enableCI := *value.EnableCI
+		clone.EnableCI = &enableCI
+	}
+	return clone
 }
 
 // MaterializeCompleteProjectConfig resolves a legacy sparse folder only for

@@ -59,7 +59,7 @@ func ClassifyProjectConfig(cfg ProjectConfig) ProjectConfigClassification {
 // It deliberately rejects invalid values and invalid required-phase state so a
 // malformed file is not given a migration escape hatch.
 func isMigrationShape(cfg ProjectConfig) bool {
-	if cfg.Version > CompleteSchemaVersion {
+	if cfg.Version == 0 || cfg.Version > CompleteSchemaVersion {
 		return false
 	}
 	if err := validateGitOpsOverride(cfg.GitOps, "gitops"); err != nil {
@@ -69,7 +69,6 @@ func isMigrationShape(cfg ProjectConfig) bool {
 		if !validPartialSettingsOverride(cfg.Defaults) || validatePhaseOverrides(cfg.PhaseOverrides) != nil {
 			return false
 		}
-		return true
 	}
 	if completeSettingsShape(cfg.Defaults) {
 		if err := validateCompleteSettings(cfg.Defaults, "defaults"); err != nil {
@@ -78,11 +77,18 @@ func isMigrationShape(cfg ProjectConfig) bool {
 	} else if !validPartialSettingsOverride(cfg.Defaults) {
 		return false
 	}
-	order := CompletePhaseOrder()
-	if len(cfg.Phases) > len(order) {
+	if !validMigrationPhases(cfg.Phases) {
 		return false
 	}
-	for index, entry := range cfg.Phases {
+	return len(cfg.Phases) > 0
+}
+
+func validMigrationPhases(phases []PhaseConfig) bool {
+	order := CompletePhaseOrder()
+	if len(phases) > len(order) {
+		return false
+	}
+	for index, entry := range phases {
 		if index >= len(order) || entry.Phase != order[index] || !isSupportedPhase(entry.Phase) {
 			return false
 		}
@@ -100,7 +106,7 @@ func isMigrationShape(cfg ProjectConfig) bool {
 			return false
 		}
 	}
-	return len(cfg.Phases) < len(order) || len(cfg.Phases) > 0
+	return true
 }
 
 func completeSettingsShape(settings AgentSettingsOverride) bool {
@@ -112,6 +118,9 @@ func completeAgentSettingsShape(settings AgentSettings) bool {
 }
 
 func validPartialAgentSettings(settings AgentSettings) bool {
+	if settings.Model != "" && strings.TrimSpace(settings.Model) == "" {
+		return false
+	}
 	if settings.Agent != "" && settings.Agent != AgentClaude && settings.Agent != AgentCodex {
 		return false
 	}
@@ -125,6 +134,9 @@ func validPartialAgentSettings(settings AgentSettings) bool {
 }
 
 func validPartialSettingsOverride(settings AgentSettingsOverride) bool {
+	if settings.Model != "" && strings.TrimSpace(settings.Model) == "" {
+		return false
+	}
 	if settings.Agent != "" && settings.Agent != AgentClaude && settings.Agent != AgentCodex {
 		return false
 	}
@@ -321,16 +333,32 @@ func (s *Store) SaveConfiguration(root string, global GlobalConfig, project Proj
 // atomically with the global configuration. Ordinary loads never call this
 // method, so migration remains an explicit user action.
 func (s *Store) SaveCompleteConfiguration(root string, global GlobalConfig, project ProjectConfig) error {
-	if project.Phases == nil {
+	classification := ClassifyProjectConfig(project)
+	switch classification {
+	case ProjectConfigMigrationRequired:
 		materialized, err := MaterializeCompleteProjectConfig(global, &project)
 		if err != nil {
 			return fmt.Errorf("materialize complete project configuration: %w", err)
 		}
 		project = materialized
-	} else if err := ValidateCompleteProjectConfig(project); err != nil {
+	case ProjectConfigMalformed:
+		return fmt.Errorf("validate complete project configuration: %w", projectConfigValidationError(project))
+	case ProjectConfigComplete:
+		// The classifier has already validated the complete schema.
+	default:
+		return fmt.Errorf("classify project configuration: unknown classification %q", classification)
+	}
+	if err := ValidateCompleteProjectConfig(project); err != nil {
 		return fmt.Errorf("validate complete project configuration: %w", err)
 	}
 	return s.SaveConfiguration(root, global, project)
+}
+
+func projectConfigValidationError(project ProjectConfig) error {
+	if project.Phases != nil {
+		return ValidateCompleteProjectConfig(project)
+	}
+	return ValidateProjectConfig(project)
 }
 
 func (s *Store) preflightConfigurationPaths(root, globalPath string) error {

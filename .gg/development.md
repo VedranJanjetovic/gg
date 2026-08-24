@@ -1,9 +1,9 @@
 ---
-gg_run_id: "gg-tool-generally-great-but-1787575707310868000/development/testing/iteration-0"
+gg_run_id: "gg-tool-generally-great-but-1787575707310868000/development/review/iteration-0"
 gg_disposition: passed
 ---
 
-# Development testing
+# Development review
 
 ## Scope
 
@@ -13,62 +13,55 @@ Phase 8: Complete configuration schema and migration gate.
 
 ### Implementation
 
-Carried forward the Phase 8 schema implementation and corrected the migration
-boundary exposed by testing:
+Reviewed the complete-schema and migration-gate implementation, then fixed
+three boundary defects:
 
-- sparse complete-shaped configurations with missing/partial phase data are
-  classified as migration-required rather than silently accepted or treated as
-  malformed;
-- malformed sparse overrides, invalid values, and invalid GitOps data remain
-  malformed;
-- sparse complete-shaped data is converted to legacy overrides only in the
-  explicit materialization path, without writing the source file;
-- materialization handles nil override maps and never creates enabled overrides
-  for fixed phases;
-- complete project phase state owns persisted PR/CI enablement, while explicit
-  one-run GitOps overrides still apply;
-- legacy materialized tuples receive explicit manual provenance because their
-  original selection provenance was not persisted.
+- explicit complete saves now materialize any classified migration shape,
+  including partial complete-shaped phase data rather than only nil `Phases`;
+- mixed sparse/complete data validates its phase entries before receiving a
+  migration classification, and whitespace-only partial models are malformed;
+- global and project configuration clones, plus complete constructors, deep
+  copy pointer-valued GitOps toggles.
 
 ### Testing
 
-Added regression coverage in `internal/config/complete_schema_test.go` for:
-
-- missing newer phases and partial tuples requiring migration;
-- no-write load/prefill behavior;
-- malformed invalid phase data and sparse overrides;
-- complete optional PR/CI state surviving changed global GitOps settings;
-- explicit one-run GitOps overrides;
-- repeated classification/materialization behavior.
+Added regression coverage for partial complete-shape save/migration,
+malformed mixed data, whitespace-only partial models, and GitOps pointer copy
+isolation in `internal/config/complete_schema_test.go`.
 
 ### Review
 
-Reviewed classification safety, complete-resolution precedence, defensive-copy
-behavior, fixed-phase constraints, and compatibility with the existing config,
-pipeline, CLI, TUI, orchestrator, and command tests. No actionable findings
-remain within Phase 8 scope.
+Reviewed version and phase classification, required/optional phase invariants,
+whole-tuple resolution, provenance handling, migration no-write behavior,
+GitOps precedence, catalog validation boundaries, defensive copies, and
+compatibility with existing config, pipeline, CLI, TUI, orchestrator, and
+command tests. No actionable findings remain within Phase 8 scope.
 
 ## Changed files
 
 - `internal/config/config.go`
 - `internal/config/store.go`
-- `internal/config/resolve.go`
 - `internal/config/complete_schema_test.go`
 - `.gg/development.md`
+
+The Phase 8 implementation also includes the previously completed changes in
+`internal/config/catalog.go`, `internal/config/resolve.go`, and
+`internal/config/validate.go`.
 
 ## Verification
 
 - `go test ./internal/config ./internal/pipeline ./internal/cli ./internal/tui ./internal/orchestrator ./cmd/gg` — passed.
-- `go test -count=10 ./internal/config` — passed.
 - `go test -race ./internal/config ./internal/pipeline ./internal/cli ./internal/tui` — passed.
 - `go vet ./internal/config` — passed.
 - `git diff --check` — passed.
-- `go test ./...` — all packages passed except the documented baseline failure `internal/e2e.TestRealCLIConfigureCreatesProjectAndDisposableWorktree`, which cannot find persisted state under the test's asserted temporary root. No new package failures occurred.
-- `go vet ./internal/config ./internal/pipeline ./internal/cli ./internal/tui` — blocked by pre-existing `testing.Chdir requires go1.24 or later` diagnostics in `internal/cli/run_test.go` while `go.mod` declares Go 1.22.
+- `go test ./...` — all packages passed except the pre-existing
+  `internal/e2e.TestRealCLIConfigureCreatesProjectAndDisposableWorktree`
+  failure, which cannot find persisted state under the test's asserted
+  temporary root. No new package failures occurred.
 
 ## Handoff risks
 
-- The repository-wide E2E failure and toolchain/vet mismatch are unchanged
-  baseline issues recorded by the plan and are unrelated to this Phase 8 work.
+- The repository-wide E2E failure is unchanged baseline evidence and is
+  unrelated to Phase 8 configuration schema changes.
 - No remote systems, AWS endpoints, browser session, or manual interactive TUI
-  verification were required; those remain reviewer-level checks.
+  verification were required.
