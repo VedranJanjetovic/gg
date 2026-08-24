@@ -126,6 +126,12 @@ func TestQAPromptRequiresProofRunIDFrontmatter(t *testing.T) {
 }
 
 func TestPrePRPromptsShareLocalOnlyVerificationBoundary(t *testing.T) {
+	ownership := map[pipeline.PhaseID]string{
+		pipeline.PhaseDevelopment:  "Development Testing owns focused tests for this plan phase",
+		pipeline.PhaseQA:           "QA independently validates the acceptance criteria",
+		pipeline.PhaseTestDocument: "Test/Document owns final test and documentation gaps",
+		pipeline.PhaseBuildChecker: "Build checker owns the declared build, lint, format, static-analysis, and packaging gates",
+	}
 	for _, phase := range []pipeline.PhaseID{pipeline.PhaseDevelopment, pipeline.PhaseQA, pipeline.PhaseTestDocument, pipeline.PhaseBuildChecker} {
 		got, err := BuildPrompt(PromptInput{
 			ProjectGoal: "ship it", AcceptanceCriteria: []string{"tests pass"}, Phase: phase,
@@ -143,6 +149,9 @@ func TestPrePRPromptsShareLocalOnlyVerificationBoundary(t *testing.T) {
 			if !strings.Contains(got, want) {
 				t.Errorf("%s prompt missing %q", phase, want)
 			}
+		}
+		if !strings.Contains(got, ownership[phase]) {
+			t.Errorf("%s prompt missing ownership statement %q", phase, ownership[phase])
 		}
 	}
 	got, err := BuildPrompt(PromptInput{

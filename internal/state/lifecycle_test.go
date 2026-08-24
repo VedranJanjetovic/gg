@@ -8,6 +8,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/VedranJanjetovic/gg/internal/proof"
 )
 
 type testClock struct {
@@ -522,6 +524,44 @@ func TestLifecycleRecordFailedPhasePreservesRunUntilExplicitTerminalClosure(t *t
 	}
 	if persisted.Status != StatusFailed {
 		t.Fatalf("explicitly closed project status = %s, want failed", persisted.Status)
+	}
+}
+
+func TestLifecycleRecordPhaseCarriesDeferredChecksIntoProjectHandoff(t *testing.T) {
+	root := t.TempDir()
+	store, err := NewFileStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clock := &testClock{now: time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)}
+	svc := NewLifecycleService(store, clock, store.Locker())
+	project := validProjectState()
+	project.Status = StatusRunning
+	if err := svc.Create(context.Background(), project); err != nil {
+		t.Fatal(err)
+	}
+	check := proof.DeferredCheck{
+		TestLocation: "internal/aws/handler_test.go", CheckName: "TestRemoteFlow",
+		FlowScenario: "exercise the deployed API", ExpectedBehavior: "the API persists the request",
+		RemoteOnlyReason: "requires AWS credentials", RepositoryEvidence: "config/aws.go uses AWS_ENDPOINT",
+		RunInstructions: "run in CI with AWS secrets",
+	}
+	got, err := svc.RecordPhase(context.Background(), project.Slug, "qa", "", StatusFinished, &ExecutionOutcome{DeferredChecks: []proof.DeferredCheck{check}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.DeferredChecks) != 1 || len(got.PhaseHistory) == 0 || len(got.PhaseHistory[len(got.PhaseHistory)-1].DeferredChecks) != 1 {
+		t.Fatalf("deferred handoff = %#v", got)
+	}
+	if got.PhaseHistory[len(got.PhaseHistory)-1].Outcome == nil || len(got.PhaseHistory[len(got.PhaseHistory)-1].Outcome.DeferredChecks) != 1 {
+		t.Fatalf("deferred outcome = %#v", got.PhaseHistory[len(got.PhaseHistory)-1].Outcome)
+	}
+	reloaded, err := store.Load(context.Background(), project.Slug)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reloaded.DeferredChecks) != 1 || reloaded.DeferredChecks[0] != check {
+		t.Fatalf("persisted deferred handoff = %#v", reloaded.DeferredChecks)
 	}
 }
 

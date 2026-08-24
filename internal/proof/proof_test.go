@@ -64,6 +64,30 @@ func TestDeferredProofMixedAndAllDeferredCollectionsPass(t *testing.T) {
 	}
 }
 
+func TestDeferredClassificationKeepsFeedbackAndFailurePrecedence(t *testing.T) {
+	feedback := deferredProof + "\n## Feedback\nThe deferred flow needs a follow-up CI run.\n"
+	if got, err := ClassifyMarkdown([]byte(feedback)); err != nil || got != ClassificationFeedback {
+		t.Fatalf("deferred feedback classification = %q, error = %v", got, err)
+	}
+
+	failed := validProof + "\n" + deferredProof + "\n## Feedback\nA locally runnable check failed.\n"
+	failed = strings.Replace(failed, "Status: pass", "Status: fail", 1)
+	if got, err := ClassifyMarkdown([]byte(failed)); err != nil || got != ClassificationFail {
+		t.Fatalf("local failure precedence classification = %q, error = %v", got, err)
+	}
+}
+
+func TestDeferredValidationDoesNotRequirePassEvidence(t *testing.T) {
+	withoutPassField := deferredProof
+	if strings.Contains(withoutPassField, "Proof it passed") {
+		t.Fatal("deferred fixture unexpectedly contains pass evidence")
+	}
+	parsed, err := Parse([]byte(withoutPassField))
+	if err != nil || parsed.Validations[0].ProofItPassed != "" {
+		t.Fatalf("deferred proof pass evidence = %q, error = %v", parsed.Validations[0].ProofItPassed, err)
+	}
+}
+
 func TestParseAndClassifyTable(t *testing.T) {
 	tests := []struct {
 		name, input string

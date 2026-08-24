@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/VedranJanjetovic/gg/internal/pipeline"
@@ -246,6 +247,50 @@ EOF`)
 	}
 	if len(result.DeferredChecks) != 1 || result.DeferredChecks[0].CheckName != "TestCreateWidgetAgainstAWS" {
 		t.Fatalf("deferred checks = %#v", result.DeferredChecks)
+	}
+}
+
+func TestAgentRunnerRejectsMalformedDeferredQAProofAsProtocolFailure(t *testing.T) {
+	for _, test := range []struct {
+		name, field string
+	}{
+		{name: "missing repository evidence", field: "- Repository evidence: "},
+		{name: "forbidden pass claim", field: "- Proof it passed: $ go test ./... exited 0\n- Repository evidence:"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			worktree := t.TempDir()
+			proofText := `---
+gg_run_id: "runner-test"
+---
+
+## Validation: remote API
+- Status: deferred
+- Test location: internal/aws/handler_test.go
+- Test name: TestCreateWidgetAgainstAWS
+- Flow/scenario: create a widget through the deployed API
+- What it verifies: the deployed API persists and returns the created widget
+- Remote-only reason: the test requires AWS credentials and the deployed API endpoint
+- Repository evidence: internal/aws/handler_test.go configures AWS_ENDPOINT
+- Manual run instructions: run the test in CI with the AWS secrets.
+`
+			proofText = strings.Replace(proofText, "- Repository evidence: internal/aws/handler_test.go configures AWS_ENDPOINT", test.field, 1)
+			script := fakeRunner(t, `cat > .gg/PROOF.md <<'EOF'
+`+proofText+`EOF`)
+			runner := NewAgentRunner(AgentRunnerOptions{
+				Factory: NewExecProcessFactory(nil, nil), Lookup: func(string) (string, error) { return script, nil },
+				LogRoot: t.TempDir(), Proof: proofServiceForRunnerTest(t),
+			})
+			project := runnerProject(worktree)
+			req := runnerRequest(project, worktree, "qa prompt")
+			req.Phase, req.Subphase, req.ArtifactPaths = pipeline.PhaseQA, "", nil
+			result, err := runner.Run(context.Background(), req)
+			if err == nil || result.Status != state.StatusFailed || result.Disposition != DispositionFailed {
+				t.Fatalf("result=%+v error=%v, want terminal protocol failure", result, err)
+			}
+			if IsSemanticFailure(err) {
+				t.Fatalf("error=%v, malformed deferred proof must not enter semantic feedback", err)
+			}
+		})
 	}
 }
 

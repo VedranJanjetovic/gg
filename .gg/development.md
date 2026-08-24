@@ -1,32 +1,35 @@
 ---
-gg_run_id: "gg-tool-generally-great-but-1787557476767017000/development/implementation/iteration-0"
+gg_run_id: "gg-tool-generally-great-but-1787557476767017000/development/testing/iteration-0"
 gg_disposition: passed
 ---
 
-# Development implementation
+# Development testing
 
-## Generated subphase result
+## Generated subphase results
 
-- `implementation`: completed Phase 6, Local verification and deferred proof.
-- Scope remained limited to pre-PR verification contracts, deferred PROOF evidence, runner propagation, and durable project handoff.
+- `implementation`: completed the Phase 6 implementation for local-only pre-PR verification and deferred proof evidence.
+- `testing`: added and ran focused edge-case and integration coverage for deferred proof parsing, runner protocol failures, prompt ownership, and durable project handoff.
+- `review`: no actionable findings remain in the tested Phase 6 scope.
 
 ## Changed files
 
-- Updated canonical Development, QA, Test/Document, and Build checker contracts and synchronized embedded contract text.
-- Added the shared local-only verification boundary to prompts.
-- Added strict `deferred` PROOF validation with repository-evidence fields and normalized deferred checks.
-- Propagated deferred checks through QA artifacts, runner results, execution metadata, phase history, and project state.
-- Added parser, artifact, runner, state, prompt, and contract synchronization tests.
+The Phase 6 implementation includes the canonical Development, QA, Test/Document, and Build checker contracts plus synchronized embedded contracts; shared local-only prompt guidance; deferred `PROOF.md` parsing/classification; runner and durable state propagation; and tests in:
+
+- `internal/proof/proof_test.go`
+- `internal/agent/prompt_test.go`
+- `internal/agent/runner_result_contract_test.go`
+- `internal/state/lifecycle_test.go`
+- related Phase 6 production files already present in the committed implementation.
 
 ## Verification
 
-- `go test ./internal/proof ./internal/agent ./internal/orchestrator ./internal/ci ./internal/pipeline` — passed.
-- `go test ./internal/proof ./internal/agent ./internal/state ./internal/pipeline ./internal/orchestrator` — passed.
+- `go test ./internal/proof ./internal/agent ./internal/state ./internal/pipeline ./internal/orchestrator ./internal/ci` — passed.
+- `go test -race ./internal/proof ./internal/agent ./internal/state ./internal/pipeline ./internal/orchestrator ./internal/ci` — passed.
 - `git diff --check` — passed.
-- `go test ./...` — all packages passed except the pre-existing macOS E2E failure `internal/e2e.TestRealCLIConfigureCreatesProjectAndDisposableWorktree`, which cannot find persisted project state under the test's asserted temporary root. This is the known baseline limitation recorded in `.gg/plan.md`, not a Phase 6 failure.
+- `go test ./...` — all packages passed except the known macOS E2E failure `internal/e2e.TestRealCLIConfigureCreatesProjectAndDisposableWorktree`, which cannot find persisted project state under the test's asserted temporary root. This matches the baseline limitation recorded in `.gg/plan.md` and is unrelated to Phase 6.
 
 ## Handoff risks
 
-- Deferred checks are accepted only when the artifact supplies the required repository evidence; gg does not independently infer whether a check is remote-only.
-- Deferred checks remain informational and do not enable or require PR/CI. Later PR disclosure is left to the downstream handoff phase.
-- No manual browser/UI or remote CI verification was performed in this local implementation phase.
+- Deferred checks are accepted only when all required evidence fields are present; gg does not independently infer remote-only status from prose.
+- Ordinary local failures remain failures. Deferred checks are informational and do not enable or require PR/CI.
+- No live AWS, remote endpoint, browser/UI, or CI verification was performed locally; these are downstream or human verification items.
