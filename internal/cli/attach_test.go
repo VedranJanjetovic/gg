@@ -46,7 +46,7 @@ func TestBareGGCreatesStartsAndAttachesProject(t *testing.T) {
 	attachCalls := 0
 	app := New(
 		WithRootResolver(fixedRoot{root: stateRoot}),
-		WithConfigStore(configuredMemoryStore()),
+		WithConfigStore(completeConfiguredMemoryStore()),
 		WithGitClient(git.NewClient(repo, nil)),
 		WithProjectPrompter(projectPromptStub{input: orchestrator.ProjectInput{
 			Goal:               "Build an attachable project UI.",
@@ -306,7 +306,7 @@ func TestBareGGStartFailureIsReturnedAndReservationIsRolledBack(t *testing.T) {
 	attachCalls := 0
 	app := New(
 		WithRootResolver(fixedRoot{root: stateRoot}),
-		WithConfigStore(configuredMemoryStore()),
+		WithConfigStore(completeConfiguredMemoryStore()),
 		WithGitClient(git.NewClient(repo, nil)),
 		WithProjectPrompter(projectPromptStub{input: orchestrator.ProjectInput{
 			Goal:               "Build a failure-safe session.",

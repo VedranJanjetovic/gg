@@ -401,6 +401,23 @@ func configuredMemoryStore() *memoryConfigureStore {
 	}
 }
 
+func completeConfiguredMemoryStore() *memoryConfigureStore {
+	store := configuredMemoryStore()
+	store.project = completeTestProjectConfig(config.AgentClaude, "sonnet", config.EffortMedium)
+	return store
+}
+
+func completeTestProjectConfig(agent config.Agent, model string, effort config.Effort) config.ProjectConfig {
+	defaults := config.AgentSettings{Agent: agent, Model: model, Effort: effort, Provenance: config.ModelProvenanceCatalog}
+	phases := make([]config.PhaseConfig, 0, len(config.CompletePhaseOrder()))
+	for _, phase := range config.CompletePhaseOrder() {
+		phases = append(phases, config.PhaseConfig{
+			Phase: phase, Enabled: true, Required: containsConfigPhase(config.RequiredPhases(), phase), AgentSettings: defaults,
+		})
+	}
+	return config.CompleteProjectConfig(config.CompleteSchemaVersion, defaults, phases, config.GitOpsOverride{})
+}
+
 func TestConfigurePickerRunsBeforeEffortAndPersistsAtomically(t *testing.T) {
 	store := &memoryConfigureStore{globalErr: config.ErrGlobalConfigNotFound, projectErr: config.ErrProjectNotConfigured}
 	catalog := config.NewStaticAgentCatalogSource(config.NewAgentCatalog(config.AgentCatalogEntry{Agent: config.AgentCodex, Models: []string{"gpt-5"}, ModelListStatus: config.ModelListAvailable}))

@@ -49,7 +49,7 @@ type executionSnapshotStructure struct {
 // to create a new project. Unlike the legacy run snapshot, it retains disabled
 // optional phases, the project default, and the provenance of every tuple.
 func SnapshotProjectExecution(plan ExecutablePipeline, subphases DevelopmentSubphaseGeneration, maxQAAttempts int, project config.ProjectConfig, gitops ...config.GitOpsConfig) (state.PipelineConfigSnapshot, error) {
-	if err := config.ValidateCompleteProjectConfig(project); err != nil {
+	if err := validateProjectSnapshotConfiguration(project); err != nil {
 		return state.PipelineConfigSnapshot{}, fmt.Errorf("project configuration: %w", err)
 	}
 	effectiveGitOps := config.DefaultGitOpsConfig()
@@ -210,6 +210,9 @@ func RestoreResolvedConfiguration(snapshot state.PipelineConfigSnapshot) (config
 		Phases:   make(map[config.Phase]config.ResolvedPhase, len(persisted.PhaseStructure)),
 		GitOps:   persisted.GitOps,
 	}
+	for _, phase := range config.CompletePhaseOrder() {
+		resolved.Phases[phase] = config.ResolvedPhase{AgentSettings: persisted.ProjectDefault}
+	}
 	for _, phase := range persisted.PhaseStructure {
 		resolved.Phases[config.Phase(phase.ID)] = config.ResolvedPhase{Enabled: phase.Enabled, AgentSettings: phase.Settings}
 	}
@@ -327,8 +330,8 @@ func executionPhaseOrder(version int) ([]PhaseID, error) {
 }
 
 func validateSnapshotStructure(phases []executionSnapshotStructure) error {
-	if len(phases) != len(config.CompletePhaseOrder()) {
-		return fmt.Errorf("project execution snapshot requires all %d phase structure entries", len(config.CompletePhaseOrder()))
+	if len(phases) == 0 || len(phases) > len(config.CompletePhaseOrder()) {
+		return fmt.Errorf("project execution snapshot requires between one and %d phase structure entries", len(config.CompletePhaseOrder()))
 	}
 	seen := make(map[config.Phase]bool, len(phases))
 	for index, phase := range phases {
@@ -349,6 +352,45 @@ func validateSnapshotStructure(phases []executionSnapshotStructure) error {
 		if err := config.ValidateAgentSettings(phase.Settings); err != nil {
 			return fmt.Errorf("project execution snapshot phase %q: %w", phase.ID, err)
 		}
+		if phase.Settings.Provenance != config.ModelProvenanceCatalog && phase.Settings.Provenance != config.ModelProvenanceManual {
+			return fmt.Errorf("project execution snapshot phase %q has invalid model provenance", phase.ID)
+		}
+	}
+	for _, required := range config.RequiredPhases() {
+		if !seen[required] {
+			return fmt.Errorf("project execution snapshot is missing required phase %q", required)
+		}
+	}
+	return nil
+}
+
+func validateProjectSnapshotConfiguration(project config.ProjectConfig) error {
+	completeErr := config.ValidateCompleteProjectConfig(project)
+	if completeErr == nil {
+		return nil
+	}
+	if project.Version != config.CompleteSchemaVersion || project.Phases == nil || project.PhaseOverrides != nil || len(project.Phases) == 0 || len(project.Phases) > len(config.CompletePhaseOrder()) {
+		return fmt.Errorf("project configuration: %w", completeErr)
+	}
+	for index, entry := range project.Phases {
+		if entry.Phase != config.CompletePhaseOrder()[index] {
+			return fmt.Errorf("project configuration phase %d is %q; expected %q", index, entry.Phase, config.CompletePhaseOrder()[index])
+		}
+	}
+	// Pad only for validation. The serialized snapshot retains the original
+	// prefix, which is what makes Inherit preserve an older folder structure.
+	padded := project.Clone()
+	for _, phase := range config.CompletePhaseOrder()[len(project.Phases):] {
+		padded.Phases = append(padded.Phases, config.PhaseConfig{
+			Phase: phase, Enabled: false, Required: false,
+			AgentSettings: config.AgentSettings{
+				Agent: project.Defaults.Agent, Model: project.Defaults.Model,
+				Effort: project.Defaults.Effort, Provenance: project.Defaults.Provenance,
+			},
+		})
+	}
+	if err := config.ValidateCompleteProjectConfig(padded); err != nil {
+		return fmt.Errorf("project configuration: %w", err)
 	}
 	return nil
 }

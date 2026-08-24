@@ -777,7 +777,7 @@ func TestInteractiveRunReservesCreatedProjectBeforeControllerDispatch(t *testing
 	controller := &captureController{}
 	app := New(
 		WithRootResolver(fixedRoot{root: root}),
-		WithConfigStore(configuredMemoryStore()),
+		WithConfigStore(completeConfiguredMemoryStore()),
 		WithGitClient(git.NewClient(repo, nil)),
 		WithLifecycleService(service),
 		WithProjectPrompter(projectPromptStub{input: orchestrator.ProjectInput{

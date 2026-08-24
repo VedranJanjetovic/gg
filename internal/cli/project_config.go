@@ -49,7 +49,7 @@ func (a *App) chooseNewProjectConfiguration(ctx context.Context, output io.Write
 			return projectCreationConfiguration{}, fmt.Errorf("unknown project configuration choice %d", choice)
 		}
 	}
-	resolved, err := config.Resolve(global, &selected, config.RunOverrides{})
+	resolved, err := resolveNewProjectConfiguration(global, selected)
 	if err != nil {
 		return projectCreationConfiguration{}, fmt.Errorf("resolve project configuration: %w", err)
 	}
@@ -87,6 +87,9 @@ func (a *App) loadCompleteFolderConfiguration(ctx context.Context, root string, 
 			return config.ProjectConfig{}, errors.New("load folder configuration: malformed configuration")
 		}
 		if loaded.Classification == config.ProjectConfigMigrationRequired {
+			if isLegacyCompletePhaseStructure(loaded.Config) {
+				return loaded.Config.Clone(), nil
+			}
 			picker := a.configurePicker
 			if picker == nil {
 				picker = tui.RunConfigureWizard
@@ -124,10 +127,97 @@ func (a *App) loadCompleteFolderConfiguration(ctx context.Context, root string, 
 	if err != nil {
 		return config.ProjectConfig{}, fmt.Errorf("load folder configuration: %w", err)
 	}
-	if config.ClassifyProjectConfig(folder) == config.ProjectConfigComplete {
+	classification := config.ClassifyProjectConfig(folder)
+	if classification == config.ProjectConfigComplete {
 		return folder.Clone(), nil
 	}
-	return config.MaterializeCompleteProjectConfig(global, &folder)
+	if classification == config.ProjectConfigMigrationRequired && isLegacyCompletePhaseStructure(folder) {
+		return folder.Clone(), nil
+	}
+	if classification == config.ProjectConfigMalformed {
+		return config.ProjectConfig{}, errors.New("load folder configuration: malformed configuration")
+	}
+
+	// ConfigureStore deliberately remains a small compatibility interface, so
+	// alternate stores may not expose the classified-load capability. They must
+	// still honor the same explicit migration gate as the production store:
+	// sparse data is only usable after the configure workflow saves a complete
+	// replacement.
+	picker := a.configurePicker
+	if picker == nil {
+		picker = tui.RunConfigureWizard
+	}
+	workflow := NewConfigureWorkflowWithPicker(a.input, output, a.cwd, a.store, a.catalogSource, picker)
+	if err := workflow.Run(ctx); err != nil {
+		return config.ProjectConfig{}, fmt.Errorf("reconfigure sparse folder: %w", err)
+	}
+	folder, err = a.store.LoadProject(root)
+	if err != nil {
+		return config.ProjectConfig{}, fmt.Errorf("reload folder configuration: %w", err)
+	}
+	if config.ClassifyProjectConfig(folder) != config.ProjectConfigComplete {
+		return config.ProjectConfig{}, errors.New("folder reconfiguration did not produce a complete configuration")
+	}
+	return folder.Clone(), nil
+}
+
+// isLegacyCompletePhaseStructure recognizes a complete configuration written
+// before a newer optional phase was added. It is distinct from sparse data:
+// every retained phase and tuple is complete, ordered, and self-contained, so
+// Inherit can preserve the older structure without forcing a folder rewrite.
+func isLegacyCompletePhaseStructure(project config.ProjectConfig) bool {
+	if project.Version != config.CompleteSchemaVersion || project.Phases == nil || project.PhaseOverrides != nil {
+		return false
+	}
+	if project.Defaults.Agent == "" || project.Defaults.Model == "" || project.Defaults.Effort == "" || project.Defaults.Provenance == "" {
+		return false
+	}
+	if !validModelProvenance(project.Defaults.Provenance) || len(project.Phases) == 0 || len(project.Phases) > len(config.CompletePhaseOrder()) {
+		return false
+	}
+	seenRequired := make(map[config.Phase]bool)
+	for index, entry := range project.Phases {
+		order := config.CompletePhaseOrder()
+		if entry.Phase != order[index] || entry.Required != containsConfigPhase(config.RequiredPhases(), entry.Phase) || (entry.Required && !entry.Enabled) {
+			return false
+		}
+		if err := config.ValidateAgentSettings(entry.AgentSettings); err != nil || !validModelProvenance(entry.AgentSettings.Provenance) {
+			return false
+		}
+		if entry.Required {
+			seenRequired[entry.Phase] = true
+		}
+	}
+	for _, phase := range config.RequiredPhases() {
+		if !seenRequired[phase] {
+			return false
+		}
+	}
+	return true
+}
+
+func validModelProvenance(provenance config.ModelProvenance) bool {
+	return provenance == config.ModelProvenanceCatalog || provenance == config.ModelProvenanceManual
+}
+
+func resolveNewProjectConfiguration(global config.GlobalConfig, project config.ProjectConfig) (config.ResolvedConfig, error) {
+	if !isLegacyCompletePhaseStructure(project) {
+		return config.Resolve(global, &project, config.RunOverrides{})
+	}
+	// Resolve requires every current optional phase to have an entry. Add only
+	// disabled placeholders for phases absent from an older inherited structure;
+	// the project snapshot still records the original structure unchanged.
+	resolvedProject := project.Clone()
+	for _, phase := range config.CompletePhaseOrder()[len(project.Phases):] {
+		resolvedProject.Phases = append(resolvedProject.Phases, config.PhaseConfig{
+			Phase: phase, Enabled: false, Required: false,
+			AgentSettings: config.AgentSettings{
+				Agent: project.Defaults.Agent, Model: project.Defaults.Model,
+				Effort: project.Defaults.Effort, Provenance: project.Defaults.Provenance,
+			},
+		})
+	}
+	return config.Resolve(global, &resolvedProject, config.RunOverrides{})
 }
 
 func (a *App) pickProjectConfiguration(ctx context.Context, folder config.ProjectConfig, output io.Writer) (config.ProjectConfig, error) {

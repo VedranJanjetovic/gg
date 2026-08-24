@@ -80,6 +80,43 @@ func TestChooseNewProjectConfigurationInheritsWithoutWritingFolder(t *testing.T)
 	}
 }
 
+func TestLoadCompleteFolderConfigurationMigratesSparseFallbackStoreExplicitly(t *testing.T) {
+	root := t.TempDir()
+	store := &persistedMemoryConfigureStore{memoryConfigureStore: &memoryConfigureStore{
+		global: config.GlobalConfig{Version: config.CurrentSchemaVersion, Defaults: config.AgentSettings{
+			Agent: config.AgentCodex, Model: "gpt-5", Effort: config.EffortHigh,
+		}},
+		project: config.ProjectConfig{Version: config.CurrentSchemaVersion, Defaults: config.AgentSettingsOverride{Model: "legacy-model"}},
+	}}
+	var pickerCalls int
+	app := New(
+		WithConfigStore(store),
+		WithWorkingDirectory(func() (string, error) { return root, nil }),
+		WithRootResolver(fixedRoot{root: root}),
+		WithConfigurePicker(func(_ context.Context, _ config.AgentCatalog, _ tui.WizardDefaults, _ io.Reader, _ io.Writer) (tui.PickerResult, error) {
+			pickerCalls++
+			return tui.PickerResult{Agent: config.AgentCodex, Model: "gpt-5", Effort: config.EffortHigh}, nil
+		}),
+		WithAgentCatalogSource(config.NewStaticAgentCatalogSource(config.NewAgentCatalog(
+			config.AgentCatalogEntry{Agent: config.AgentCodex, Models: []string{"gpt-5"}, ModelListStatus: config.ModelListAvailable},
+		))),
+	)
+
+	loaded, err := app.loadCompleteFolderConfiguration(context.Background(), root, store.global, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pickerCalls != 1 {
+		t.Fatalf("configure picker calls = %d, want 1", pickerCalls)
+	}
+	if err := config.ValidateCompleteProjectConfig(loaded); err != nil {
+		t.Fatalf("loaded configuration is not complete: %v", err)
+	}
+	if store.savedProject == nil {
+		t.Fatal("sparse configuration was used without an explicit save")
+	}
+}
+
 func TestChooseNewProjectConfigurationPickIsolatedAndSnapshotsAllTuples(t *testing.T) {
 	folder := phase9CompleteConfig()
 	store := &memoryConfigureStore{
@@ -175,4 +212,23 @@ type projectPromptFunc func(context.Context, io.Writer) (orchestrator.ProjectInp
 
 func (f projectPromptFunc) Prompt(ctx context.Context, output io.Writer) (orchestrator.ProjectInput, error) {
 	return f(ctx, output)
+}
+
+type persistedMemoryConfigureStore struct{ *memoryConfigureStore }
+
+func (s *persistedMemoryConfigureStore) SaveGlobal(value config.GlobalConfig) error {
+	s.global = value
+	return s.memoryConfigureStore.SaveGlobal(value)
+}
+
+func (s *persistedMemoryConfigureStore) SaveProject(root string, value config.ProjectConfig) error {
+	s.project = value
+	return s.memoryConfigureStore.SaveProject(root, value)
+}
+
+func (s *persistedMemoryConfigureStore) SaveConfiguration(root string, global config.GlobalConfig, project config.ProjectConfig) error {
+	if err := s.SaveGlobal(global); err != nil {
+		return err
+	}
+	return s.SaveProject(root, project)
 }

@@ -70,3 +70,44 @@ func TestProjectSnapshotRetainsCompleteConfigurationAndDisabledPhases(t *testing
 		t.Fatalf("resolved snapshot = %#v", resolvedSnapshot)
 	}
 }
+
+func TestProjectSnapshotPreservesOlderPrefixStructure(t *testing.T) {
+	project := phase9ProjectConfig()
+	project.Phases = project.Phases[:len(project.Phases)-1]
+	resolvedProject := project.Clone()
+	resolvedProject.Phases = append(resolvedProject.Phases, config.PhaseConfig{
+		Phase: config.PhaseCI, Enabled: false, AgentSettings: project.Phases[0].AgentSettings,
+	})
+	global := config.GlobalConfig{Version: config.CurrentSchemaVersion, Defaults: config.AgentSettings{
+		Agent: project.Defaults.Agent, Model: project.Defaults.Model, Effort: project.Defaults.Effort,
+		Provenance: project.Defaults.Provenance,
+	}}
+	resolved, err := config.Resolve(global, &resolvedProject, config.RunOverrides{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := pipeline.Resolve(pipeline.DefaultPipeline(), resolved)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := pipeline.SnapshotProjectExecution(plan, pipeline.DevelopmentSubphaseGeneration{}, 3, project, resolved.GitOps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restored, _, _, err := pipeline.RestoreExecution(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, phase := range restored.Phases() {
+		if phase.Phase().ID() == pipeline.PhaseCI {
+			t.Fatal("inherited older structure gained CI")
+		}
+	}
+	resolvedSnapshot, err := pipeline.RestoreResolvedConfiguration(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolvedSnapshot.Phases[config.PhaseCI].Enabled {
+		t.Fatal("missing inherited phase was not represented as disabled for legacy resolution")
+	}
+}
