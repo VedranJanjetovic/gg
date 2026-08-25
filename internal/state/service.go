@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -300,6 +301,246 @@ func (s *LifecycleService) RecordPlan(ctx context.Context, slug string, phases, 
 			}
 		}
 		project.Plan = &plan
+		project.UpdatedAt = s.clock.Now()
+		if err := s.store.Save(locked, project); err != nil {
+			return err
+		}
+		result = project
+		return nil
+	})
+	return result, err
+}
+
+// SetVerificationContract atomically persists the strict Planning contract,
+// its executable pipeline snapshot, and the initial three-attempt policy.
+// Keeping these values in one locked save prevents resume from observing a
+// contract that is newer or older than the executable plan.
+func (s *LifecycleService) SetVerificationContract(ctx context.Context, slug string, contract VerificationContract, snapshot PipelineConfigSnapshot) (ProjectState, error) {
+	if err := checkContext(ctx); err != nil {
+		return ProjectState{}, err
+	}
+	if err := contract.Validate(); err != nil {
+		return ProjectState{}, err
+	}
+	if snapshot.SchemaVersion <= 0 || !json.Valid(snapshot.Data) {
+		return ProjectState{}, errors.New("verification contract requires a valid pipeline snapshot")
+	}
+	if s.store == nil || s.locker == nil {
+		return ProjectState{}, errors.New("lifecycle service requires store and locker")
+	}
+	var result ProjectState
+	err := s.withProjectLock(ctx, slug, func(locked context.Context) error {
+		project, err := s.store.Load(locked, slug)
+		if err != nil {
+			return err
+		}
+		project.PipelineConfig = PipelineConfigSnapshot{SchemaVersion: snapshot.SchemaVersion, Data: append(json.RawMessage(nil), snapshot.Data...)}
+		project.Verification = &VerificationState{
+			PlannedSteps: cloneVerificationSteps(contract.Steps),
+			RepairMode:   contract.RepairMode,
+		}
+		project.UpdatedAt = s.clock.Now()
+		if err := s.store.Save(locked, project); err != nil {
+			return err
+		}
+		result = project
+		return nil
+	})
+	return result, err
+}
+
+// MigrateVerificationContract adds the executable contract to legacy state
+// without discarding verification observations already captured before the
+// schema-1 snapshot migration. The update is atomic with the snapshot write.
+func (s *LifecycleService) MigrateVerificationContract(ctx context.Context, slug string, contract VerificationContract, snapshot PipelineConfigSnapshot) (ProjectState, error) {
+	if err := checkContext(ctx); err != nil {
+		return ProjectState{}, err
+	}
+	if err := contract.Validate(); err != nil {
+		return ProjectState{}, err
+	}
+	if snapshot.SchemaVersion <= 0 || !json.Valid(snapshot.Data) {
+		return ProjectState{}, errors.New("verification contract requires a valid pipeline snapshot")
+	}
+	if s.store == nil || s.locker == nil {
+		return ProjectState{}, errors.New("lifecycle service requires store and locker")
+	}
+	var result ProjectState
+	err := s.withProjectLock(ctx, slug, func(locked context.Context) error {
+		project, err := s.store.Load(locked, slug)
+		if err != nil {
+			return err
+		}
+		project.PipelineConfig = PipelineConfigSnapshot{SchemaVersion: snapshot.SchemaVersion, Data: append(json.RawMessage(nil), snapshot.Data...)}
+		verification := project.Verification
+		if verification == nil {
+			verification = &VerificationState{}
+		} else {
+			copy := *verification
+			verification = &copy
+		}
+		verification.PlannedSteps = cloneVerificationSteps(contract.Steps)
+		verification.RepairMode = contract.RepairMode
+		verification.ParentBaseline = cloneVerificationFindings(verification.ParentBaseline)
+		verification.ParentResults = cloneVerificationResults(verification.ParentResults)
+		verification.CurrentResults = cloneVerificationResults(verification.CurrentResults)
+		verification.CurrentFindings = cloneVerificationFindings(verification.CurrentFindings)
+		verification.Warnings = cloneVerificationFindings(verification.Warnings)
+		verification.PromotedRequiredGreen = append([]string(nil), verification.PromotedRequiredGreen...)
+		project.Verification = verification
+		project.UpdatedAt = s.clock.Now()
+		if err := s.store.Save(locked, project); err != nil {
+			return err
+		}
+		result = project
+		return nil
+	})
+	return result, err
+}
+
+// SetVerificationRepairMode records the explicit repair selection for an
+// already planned project. It never creates a contract from prose or from a
+// missing legacy declaration.
+func (s *LifecycleService) SetVerificationRepairMode(ctx context.Context, slug string, repair bool) (ProjectState, error) {
+	if err := checkContext(ctx); err != nil {
+		return ProjectState{}, err
+	}
+	if s.store == nil || s.locker == nil {
+		return ProjectState{}, errors.New("lifecycle service requires store and locker")
+	}
+	var result ProjectState
+	err := s.withProjectLock(ctx, slug, func(locked context.Context) error {
+		project, err := s.store.Load(locked, slug)
+		if err != nil {
+			return err
+		}
+		if project.Verification == nil {
+			return errors.New("project has no persisted verification contract; rerun Planning before selecting repair mode")
+		}
+		project.Verification.RepairMode = repair
+		project.UpdatedAt = s.clock.Now()
+		if err := s.store.Save(locked, project); err != nil {
+			return err
+		}
+		result = project
+		return nil
+	})
+	return result, err
+}
+
+// RecordVerificationBaselineReport atomically stores the original parent
+// report and its concise findings. The report is immutable after capture.
+func (s *LifecycleService) RecordVerificationBaselineReport(ctx context.Context, slug string, results []VerificationCommandResult, baseline []VerificationFinding) (ProjectState, error) {
+	return s.updateVerification(ctx, slug, func(verification *VerificationState) error {
+		if verification.ParentBaselineCaptured || len(verification.ParentBaseline) > 0 || len(verification.ParentResults) > 0 {
+			if !verification.ParentBaselineCaptured {
+				// Legacy state may contain findings without the explicit capture
+				// marker. Promote that existing data to an immutable baseline
+				// without replacing it with this later report.
+				verification.ParentBaselineCaptured = true
+			}
+			return nil
+		}
+		verification.ParentBaselineCaptured = true
+		verification.ParentBaseline = cloneVerificationFindings(baseline)
+		verification.ParentResults = cloneVerificationResults(results)
+		return nil
+	})
+}
+
+// RecordVerificationResultReport stores the command-level report together
+// with the concise state used by status and resume.
+func (s *LifecycleService) RecordVerificationResultReport(ctx context.Context, slug string, results []VerificationCommandResult, findings, warnings []VerificationFinding, boundary string, attempts int, nextAction string) (ProjectState, error) {
+	return s.updateVerification(ctx, slug, func(verification *VerificationState) error {
+		if attempts < 0 || attempts > MaxVerificationRemediationAttempts {
+			return errors.New("verification remediation attempts are outside the configured maximum")
+		}
+		verification.CurrentResults = cloneVerificationResults(results)
+		verification.CurrentFindings = cloneVerificationFindings(findings)
+		verification.Warnings = cloneVerificationFindings(warnings)
+		verification.BoundaryCursor = strings.TrimSpace(boundary)
+		verification.RemediationAttempts = attempts
+		verification.NextAction = strings.TrimSpace(nextAction)
+		return nil
+	})
+}
+
+// PromoteVerificationIdentity permanently marks a repaired baseline identity
+// as required-green for subsequent boundaries.
+func (s *LifecycleService) PromoteVerificationIdentity(ctx context.Context, slug, identity string) (ProjectState, error) {
+	identity = strings.TrimSpace(identity)
+	if identity == "" {
+		return ProjectState{}, errors.New("verification identity is required")
+	}
+	return s.updateVerification(ctx, slug, func(verification *VerificationState) error {
+		for _, existing := range verification.PromotedRequiredGreen {
+			if existing == identity {
+				return nil
+			}
+		}
+		verification.PromotedRequiredGreen = append(verification.PromotedRequiredGreen, identity)
+		return nil
+	})
+}
+
+// BeginVerificationRemediation atomically consumes one remediation cycle
+// before any agent work is dispatched. Persisting the increment first makes
+// a crash between the state write and the dispatch unable to reset the budget.
+func (s *LifecycleService) BeginVerificationRemediation(ctx context.Context, slug, boundary, nextAction string) (ProjectState, error) {
+	boundary = strings.TrimSpace(boundary)
+	if boundary == "" {
+		return ProjectState{}, errors.New("verification remediation boundary is required")
+	}
+	return s.updateVerification(ctx, slug, func(verification *VerificationState) error {
+		if verification.RemediationAttempts >= MaxVerificationRemediationAttempts {
+			return errors.New("verification remediation attempts are exhausted")
+		}
+		verification.RemediationAttempts++
+		verification.BoundaryCursor = boundary
+		verification.NextAction = strings.TrimSpace(nextAction)
+		return nil
+	})
+}
+
+// ResetVerificationRemediation clears the current boundary budget after a
+// successful boundary or when an exhausted boundary is explicitly resumed.
+// The original baseline, findings, and boundary cursor remain intact.
+func (s *LifecycleService) ResetVerificationRemediation(ctx context.Context, slug, nextAction string) (ProjectState, error) {
+	return s.updateVerification(ctx, slug, func(verification *VerificationState) error {
+		verification.RemediationAttempts = 0
+		verification.NextAction = strings.TrimSpace(nextAction)
+		return nil
+	})
+}
+
+func (s *LifecycleService) updateVerification(ctx context.Context, slug string, update func(*VerificationState) error) (ProjectState, error) {
+	if err := checkContext(ctx); err != nil {
+		return ProjectState{}, err
+	}
+	if s.store == nil || s.locker == nil {
+		return ProjectState{}, errors.New("lifecycle service requires store and locker")
+	}
+	var result ProjectState
+	err := s.withProjectLock(ctx, slug, func(locked context.Context) error {
+		project, err := s.store.Load(locked, slug)
+		if err != nil {
+			return err
+		}
+		if project.Verification == nil {
+			return errors.New("project has no persisted verification contract")
+		}
+		verification := *project.Verification
+		verification.PlannedSteps = cloneVerificationSteps(project.Verification.PlannedSteps)
+		verification.ParentBaseline = cloneVerificationFindings(project.Verification.ParentBaseline)
+		verification.ParentResults = cloneVerificationResults(project.Verification.ParentResults)
+		verification.CurrentResults = cloneVerificationResults(project.Verification.CurrentResults)
+		verification.CurrentFindings = cloneVerificationFindings(project.Verification.CurrentFindings)
+		verification.Warnings = cloneVerificationFindings(project.Verification.Warnings)
+		verification.PromotedRequiredGreen = append([]string(nil), project.Verification.PromotedRequiredGreen...)
+		if err := update(&verification); err != nil {
+			return err
+		}
+		project.Verification = &verification
 		project.UpdatedAt = s.clock.Now()
 		if err := s.store.Save(locked, project); err != nil {
 			return err

@@ -20,6 +20,7 @@ import (
 	"github.com/VedranJanjetovic/gg/internal/git"
 	"github.com/VedranJanjetovic/gg/internal/orchestrator"
 	"github.com/VedranJanjetovic/gg/internal/pipeline"
+	"github.com/VedranJanjetovic/gg/internal/resume"
 	"github.com/VedranJanjetovic/gg/internal/state"
 	"github.com/VedranJanjetovic/gg/internal/tui"
 	"github.com/VedranJanjetovic/gg/internal/update"
@@ -426,7 +427,11 @@ func (a *App) run(ctx context.Context, args []string, stdout io.Writer) error {
 		}
 		return a.runPipeline(ctx, stdout, options)
 	case "resume":
-		return a.resume(ctx, stdout, commandArgs)
+		options, err := parseResumeOptions(commandArgs)
+		if err != nil {
+			return err
+		}
+		return a.resume(ctx, stdout, options)
 	case "stop":
 		if err := a.requireConfiguredProject(); err != nil {
 			return err
@@ -644,6 +649,12 @@ func (a *App) runPipeline(ctx context.Context, stdout io.Writer, options runOpti
 		if loadErr != nil {
 			return fmt.Errorf("load project %q: %w", selector, loadErr)
 		}
+		if projectState.Status == state.StatusStopped || projectState.Status == state.StatusFailed {
+			projectState, err = resume.Prepare(ctx, projectState, projectService)
+			if err != nil {
+				return fmt.Errorf("prepare project %q for resume: %w", selector, err)
+			}
+		}
 		worktreePath = projectState.WorktreePath
 		resumeExisting = projectState.Status == state.StatusStopped || projectState.Status == state.StatusFailed
 		// A newly created project owns its complete snapshot before Grooming
@@ -711,7 +722,7 @@ func (a *App) runPipeline(ctx context.Context, stdout io.Writer, options runOpti
 			}
 			_, execErr = a.controller.Execute(ctx, orchestrator.Request{
 				Project: project, Pipeline: plan, PhaseContracts: plan.PhaseContracts(), Subphases: subphases,
-				MaxIterations: options.maxIterations, RunID: runID, GitOps: snapshotGitOps(project.PipelineConfig),
+				MaxIterations: options.maxIterations, RunID: runID, GitOps: snapshotGitOps(project.PipelineConfig), RepairExistingVerification: options.repairExistingVerification,
 				ArtifactRoot: root, PullRequestURL: project.PullRequestURL,
 			})
 		} else if resumeExisting {
@@ -720,26 +731,28 @@ func (a *App) runPipeline(ctx context.Context, stdout io.Writer, options runOpti
 				return fmt.Errorf("run project %q from persisted execution snapshot: %w", selector, restoreErr)
 			}
 			_, execErr = a.controller.Resume(ctx, orchestrator.ResumeRequest{ProjectSlug: selector, RunID: runID, Execution: orchestrator.Request{
-				Project:        project,
-				Pipeline:       resumePlan,
-				PhaseContracts: resumePlan.PhaseContracts(),
-				Subphases:      resumeSubphases,
-				MaxIterations:  resumeMaxIterations,
-				RunID:          runID,
-				GitOps:         snapshotGitOps(project.PipelineConfig),
-				ArtifactRoot:   root,
-				PullRequestURL: project.PullRequestURL,
+				Project:                    project,
+				Pipeline:                   resumePlan,
+				PhaseContracts:             resumePlan.PhaseContracts(),
+				Subphases:                  resumeSubphases,
+				MaxIterations:              resumeMaxIterations,
+				RunID:                      runID,
+				GitOps:                     snapshotGitOps(project.PipelineConfig),
+				ArtifactRoot:               root,
+				RepairExistingVerification: options.repairExistingVerification,
+				PullRequestURL:             project.PullRequestURL,
 			}})
 		} else {
 			_, execErr = a.controller.Execute(ctx, orchestrator.Request{
-				Project:        project,
-				Pipeline:       plan,
-				PhaseContracts: plan.PhaseContracts(),
-				Subphases:      subphases,
-				MaxIterations:  options.maxIterations,
-				RunID:          runID,
-				GitOps:         resolved.GitOps,
-				ArtifactRoot:   root,
+				Project:                    project,
+				Pipeline:                   plan,
+				PhaseContracts:             plan.PhaseContracts(),
+				Subphases:                  subphases,
+				MaxIterations:              options.maxIterations,
+				RunID:                      runID,
+				GitOps:                     resolved.GitOps,
+				RepairExistingVerification: options.repairExistingVerification,
+				ArtifactRoot:               root,
 			})
 		}
 		if execErr != nil {
@@ -757,8 +770,13 @@ func (a *App) runPipeline(ctx context.Context, stdout io.Writer, options runOpti
 		if finishedRerun {
 			message = "Finished project PR/CI workflow rerun completed."
 		}
-		_, err = fmt.Fprintln(stdout, message)
-		return err
+		if _, err = fmt.Fprintln(stdout, message); err != nil {
+			return err
+		}
+		if completed, loadErr := projectService.Load(ctx, selector); loadErr == nil && (state.VerificationHasWarnings(completed) || len(state.VerificationDisplay(completed)) > 0) {
+			return writeVerificationSummary(stdout, completed, "Verification summary")
+		}
+		return nil
 	}
 	request := pipeline.RunRequest{Args: append([]string(nil), options.args...), Config: resolved, WorktreePath: worktreePath}
 	if err := a.pipeline.Run(ctx, request); err != nil {
@@ -802,11 +820,11 @@ func hasPersistedExecutionSnapshot(snapshot state.PipelineConfigSnapshot) bool {
 	return snapshot.SchemaVersion > 0 && len(bytes.TrimSpace(snapshot.Data)) > 0 && !bytes.Equal(bytes.TrimSpace(snapshot.Data), []byte("{}"))
 }
 
-func (a *App) resume(ctx context.Context, stdout io.Writer, args []string) error {
+func (a *App) resume(ctx context.Context, stdout io.Writer, options resumeOptions) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	selector, err := canonicalProjectSelector(args)
+	selector, err := canonicalProjectSelector([]string{options.selector})
 	if err != nil {
 		return fmt.Errorf("resume: %w", err)
 	}
@@ -814,8 +832,11 @@ func (a *App) resume(ctx context.Context, stdout io.Writer, args []string) error
 		if a.resumeAll == nil {
 			return errors.New("resume requires a project selector")
 		}
-		results, resumeErr := a.resumeAll.ResumeAll(ctx, orchestrator.ResumeAllRequest{})
+		results, resumeErr := a.resumeAll.ResumeAll(ctx, orchestrator.ResumeAllRequest{RepairExistingVerification: options.repairExistingVerification})
 		if _, err := fmt.Fprintf(stdout, "Resumed %d project(s).\n", countSuccessfulResumes(results)); err != nil {
+			return err
+		}
+		if err := a.writeResumeVerificationSummaries(ctx, stdout, results); err != nil {
 			return err
 		}
 		return resumeErr
@@ -839,6 +860,10 @@ func (a *App) resume(ctx context.Context, stdout io.Writer, args []string) error
 		if loadErr != nil {
 			return fmt.Errorf("repair project %q configuration: %w", selector, loadErr)
 		}
+		project, err = resume.Prepare(ctx, project, projectService)
+		if err != nil {
+			return fmt.Errorf("prepare project %q for resume: %w", selector, err)
+		}
 		plan, subphases, maxAttempts, planErr := pipeline.RestoreExecution(project.PipelineConfig)
 		gitOps := snapshotGitOps(project.PipelineConfig)
 		if planErr != nil {
@@ -849,20 +874,26 @@ func (a *App) resume(ctx context.Context, stdout io.Writer, args []string) error
 			return fmt.Errorf("resolve configured root: %w", rootErr)
 		}
 		_, resumeErr := a.controller.Resume(ctx, orchestrator.ResumeRequest{ProjectSlug: selector, Execution: orchestrator.Request{
-			Project:        project,
-			Pipeline:       plan,
-			PhaseContracts: plan.PhaseContracts(),
-			Subphases:      subphases,
-			MaxIterations:  maxAttempts,
-			GitOps:         gitOps,
-			ArtifactRoot:   artifactRoot,
-			PullRequestURL: project.PullRequestURL,
+			Project:                    project,
+			Pipeline:                   plan,
+			PhaseContracts:             plan.PhaseContracts(),
+			Subphases:                  subphases,
+			MaxIterations:              maxAttempts,
+			GitOps:                     gitOps,
+			ArtifactRoot:               artifactRoot,
+			RepairExistingVerification: options.repairExistingVerification,
+			PullRequestURL:             project.PullRequestURL,
 		}})
 		if resumeErr != nil {
 			return fmt.Errorf("resume project %q: %w", selector, resumeErr)
 		}
-		_, err = fmt.Fprintln(stdout, "Resume workflow completed.")
-		return err
+		if _, err = fmt.Fprintln(stdout, "Resume workflow completed."); err != nil {
+			return err
+		}
+		if completed, loadErr := projectService.Load(ctx, selector); loadErr == nil && (state.VerificationHasWarnings(completed) || len(state.VerificationDisplay(completed)) > 0) {
+			return writeVerificationSummary(stdout, completed, "Verification summary")
+		}
+		return nil
 	}
 	if err := a.transitionProject(ctx, selector, state.StatusRunning); err != nil {
 		return fmt.Errorf("resume project %q: %w", selector, err)
@@ -879,6 +910,25 @@ func countSuccessfulResumes(results []orchestrator.ResumeResult) int {
 		}
 	}
 	return count
+}
+
+func (a *App) writeResumeVerificationSummaries(ctx context.Context, output io.Writer, results []orchestrator.ResumeResult) error {
+	if a.projects == nil {
+		return nil
+	}
+	for _, result := range results {
+		if result.Err != nil {
+			continue
+		}
+		project, err := a.projects.Load(ctx, result.ProjectSlug)
+		if err != nil || (len(state.VerificationDisplay(project)) == 0 && !state.VerificationHasWarnings(project)) {
+			continue
+		}
+		if err := writeVerificationSummary(output, project, "Verification summary for "+displayValue(project.Name)); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (a *App) stop(ctx context.Context, stdout io.Writer, args []string) error {
@@ -1295,7 +1345,7 @@ func (a *App) cleanupProject(ctx context.Context, project state.ProjectState) er
 	if err != nil {
 		return fmt.Errorf("derive owned worktree metadata: %w", err)
 	}
-	if filepath.Clean(project.WorktreePath) != filepath.Clean(naming.WorktreePath) || project.BranchName != naming.BranchName {
+	if !git.PathsEqual(project.WorktreePath, naming.WorktreePath) || project.BranchName != naming.BranchName {
 		return fmt.Errorf("refusing cleanup: persisted worktree metadata does not match owned path %q and branch %q", naming.WorktreePath, naming.BranchName)
 	}
 	// Pruning discards a terminal project: leftover uncommitted files (for
@@ -1357,14 +1407,14 @@ func (a *App) validateProjectWorktreeState(ctx context.Context, project state.Pr
 	if err != nil {
 		return err
 	}
-	if filepath.Clean(project.WorktreePath) != filepath.Clean(naming.WorktreePath) || project.BranchName != naming.BranchName {
+	if !git.PathsEqual(project.WorktreePath, naming.WorktreePath) || project.BranchName != naming.BranchName {
 		return errors.New("persisted worktree metadata does not match owned deterministic metadata")
 	}
 	worktree, err := client.LookupWorktree(ctx, project.WorktreePath, project.BranchName)
 	if err != nil {
 		return fmt.Errorf("verify project worktree: %w", err)
 	}
-	if filepath.Clean(worktree.Path) != filepath.Clean(project.WorktreePath) || worktree.Branch != project.BranchName || worktree.Detached || worktree.Bare {
+	if !git.PathsEqual(worktree.Path, project.WorktreePath) || worktree.Branch != project.BranchName || worktree.Detached || worktree.Bare {
 		return errors.New("persisted worktree metadata is not an attached owned worktree")
 	}
 	return nil
@@ -1458,7 +1508,10 @@ func writeCommandHelp(w io.Writer, command string) {
 	}
 	fmt.Fprintf(w, "%s\n\nUsage:\n  gg %s%s\n", description.summary, command, description.usageSuffix)
 	if command == "run" {
-		fmt.Fprint(w, "\nRun controls: --parent-branch, --base-ref, --enable-pr, --disable-pr, --enable-ci, --disable-ci, and --max-iterations (default 3 total QA attempts). New projects choose Inherit or Pick configuration in the attached TUI; use -- to pass every following token to the pipeline unchanged.\n")
+		fmt.Fprint(w, "\nRun controls: --parent-branch, --base-ref, --enable-pr, --disable-pr, --enable-ci, --disable-ci, and --max-iterations (default 3 total QA attempts). Add --repair-existing-verification to let Development repair the verification failures that already existed on the parent branch; without it those failures are recorded as warnings and only new regressions block the run. New projects choose Inherit or Pick configuration in the attached TUI; use -- to pass every following token to the pipeline unchanged.\n")
+	}
+	if command == "resume" {
+		fmt.Fprint(w, "\nResume controls: --repair-existing-verification, which behaves exactly as it does for \"gg run\".\n")
 	}
 }
 

@@ -17,6 +17,22 @@ type capturePipeline struct {
 	runRequests []pipeline.RunRequest
 }
 
+func chdirForTest(t *testing.T, dir string) {
+	t.Helper()
+	previous, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("get working directory: %v", err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatalf("change working directory to %q: %v", dir, err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(previous); err != nil {
+			t.Errorf("restore working directory: %v", err)
+		}
+	})
+}
+
 func (p *capturePipeline) Run(_ context.Context, request pipeline.RunRequest) error {
 	p.runRequests = append(p.runRequests, request)
 	return nil
@@ -28,7 +44,7 @@ func TestRunOverridesResolveAndDispatchEffectiveConfiguration(t *testing.T) {
 	t.Skip("transient configuration flags were removed in Phase 9")
 	root := t.TempDir()
 	initTestRepository(t, root)
-	t.Chdir(root)
+	chdirForTest(t, root)
 	disabled := false
 	store := &memoryConfigureStore{
 		global: config.GlobalConfig{
@@ -90,7 +106,7 @@ func TestRunRejectsInvalidOverridesBeforeDispatch(t *testing.T) {
 	t.Skip("superseded by removed-flag coverage")
 	root := t.TempDir()
 	initTestRepository(t, root)
-	t.Chdir(root)
+	chdirForTest(t, root)
 	tests := []struct {
 		name string
 		args []string
@@ -130,7 +146,7 @@ func TestRunRejectsCIWhenPRIsDisabledBeforeDispatch(t *testing.T) {
 	t.Skip("phase toggles are no longer run flags")
 	root := t.TempDir()
 	initTestRepository(t, root)
-	t.Chdir(root)
+	chdirForTest(t, root)
 	store := configuredMemoryStore()
 	capture := &capturePipeline{}
 	var stdout, stderr bytes.Buffer
@@ -149,7 +165,7 @@ func TestRunDuplicateAndConflictingPhaseFlagsUseLastValue(t *testing.T) {
 	t.Skip("phase toggles are no longer run flags")
 	root := t.TempDir()
 	initTestRepository(t, root)
-	t.Chdir(root)
+	chdirForTest(t, root)
 	store := configuredMemoryStore()
 	capture := &capturePipeline{}
 	var stdout, stderr bytes.Buffer
@@ -179,7 +195,7 @@ func TestRunDelimiterStopsOverrideParsingAndIsNotDispatched(t *testing.T) {
 	t.Skip("phase toggles are no longer run flags")
 	root := t.TempDir()
 	initTestRepository(t, root)
-	t.Chdir(root)
+	chdirForTest(t, root)
 	store := configuredMemoryStore()
 	capture := &capturePipeline{}
 	var stdout, stderr bytes.Buffer
@@ -224,7 +240,7 @@ func TestRunDelimiterStopsOverrideParsingAndIsNotDispatched(t *testing.T) {
 func TestRunDelimiterForwardsHelpTokensToPipeline(t *testing.T) {
 	root := t.TempDir()
 	initTestRepository(t, root)
-	t.Chdir(root)
+	chdirForTest(t, root)
 	for _, helpToken := range []string{"--help", "-h"} {
 		t.Run(helpToken, func(t *testing.T) {
 			store := configuredMemoryStore()
@@ -255,7 +271,7 @@ func TestRunHelpDocumentsTransientFlags(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("code = %d, stderr = %q", code, stderr.String())
 	}
-	for _, want := range []string{"--parent-branch", "--base-ref", "--max-iterations", "Inherit or Pick", "pass every following token to the pipeline unchanged"} {
+	for _, want := range []string{"--parent-branch", "--base-ref", "--max-iterations", "--repair-existing-verification", "Inherit or Pick", "pass every following token to the pipeline unchanged"} {
 		if !strings.Contains(stdout.String(), want) {
 			t.Errorf("help missing %q:\n%s", want, stdout.String())
 		}
@@ -337,6 +353,81 @@ func TestParseRunOptionsGitOpsOverrides(t *testing.T) {
 	}
 	if options.overrides.GitOps.ParentBranch != "develop" || options.overrides.GitOps.BaseRef != "origin/develop" || options.overrides.GitOps.EnablePR == nil || *options.overrides.GitOps.EnablePR || options.overrides.GitOps.EnableCI == nil || !*options.overrides.GitOps.EnableCI {
 		t.Fatalf("GitOps overrides = %#v", options.overrides.GitOps)
+	}
+}
+
+// --repair-existing-verification is a boolean flag, so it must never consume
+// the token that follows it. Treating it as a valued flag silently pushed the
+// remaining flags behind a positional argument, where flag.Parse stops.
+func TestParseRunOptionsRepairFlagDoesNotConsumeFollowingToken(t *testing.T) {
+	tests := []struct {
+		name          string
+		args          []string
+		wantRepair    bool
+		wantParent    string
+		wantIterating int
+	}{
+		{name: "flag then selector then valued flag", args: []string{"--repair-existing-verification", "proj", "--parent-branch", "main"}, wantRepair: true, wantParent: "main", wantIterating: 3},
+		{name: "flag then selector then max iterations", args: []string{"--repair-existing-verification", "proj", "--max-iterations", "5"}, wantRepair: true, wantIterating: 5},
+		{name: "selector first", args: []string{"proj", "--repair-existing-verification"}, wantRepair: true, wantIterating: 3},
+		{name: "assignment form", args: []string{"--repair-existing-verification=true", "proj"}, wantRepair: true, wantIterating: 3},
+		{name: "single dash", args: []string{"-repair-existing-verification", "proj"}, wantRepair: true, wantIterating: 3},
+		{name: "explicitly false", args: []string{"--repair-existing-verification=false", "proj"}, wantIterating: 3},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			options, err := parseRunOptions(test.args)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if options.repairExistingVerification != test.wantRepair {
+				t.Errorf("repairExistingVerification = %v, want %v", options.repairExistingVerification, test.wantRepair)
+			}
+			if options.overrides.GitOps.ParentBranch != test.wantParent {
+				t.Errorf("ParentBranch = %q, want %q", options.overrides.GitOps.ParentBranch, test.wantParent)
+			}
+			if options.maxIterations != test.wantIterating {
+				t.Errorf("maxIterations = %d, want %d", options.maxIterations, test.wantIterating)
+			}
+			if len(options.args) != 1 || options.args[0] != "proj" {
+				t.Errorf("positional args = %v, want [proj]", options.args)
+			}
+		})
+	}
+}
+
+func TestParseResumeOptionsAcceptsEveryRepairFlagSpelling(t *testing.T) {
+	tests := []struct {
+		args       []string
+		wantRepair bool
+	}{
+		{args: []string{"proj", "--repair-existing-verification"}, wantRepair: true},
+		{args: []string{"proj", "--repair-existing-verification=true"}, wantRepair: true},
+		{args: []string{"proj", "-repair-existing-verification"}, wantRepair: true},
+		{args: []string{"proj", "-repair-existing-verification=true"}, wantRepair: true},
+		{args: []string{"--repair-existing-verification", "proj"}, wantRepair: true},
+		{args: []string{"proj", "--repair-existing-verification=false"}},
+		{args: []string{"proj"}},
+	}
+	for _, test := range tests {
+		t.Run(strings.Join(test.args, " "), func(t *testing.T) {
+			options, err := parseResumeOptions(test.args)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if options.selector != "proj" {
+				t.Errorf("selector = %q, want %q", options.selector, "proj")
+			}
+			if options.repairExistingVerification != test.wantRepair {
+				t.Errorf("repairExistingVerification = %v, want %v", options.repairExistingVerification, test.wantRepair)
+			}
+		})
+	}
+}
+
+func TestParseResumeOptionsStillRejectsTwoSelectors(t *testing.T) {
+	if _, err := parseResumeOptions([]string{"one", "two"}); err == nil {
+		t.Fatal("expected an error for two project selectors")
 	}
 }
 

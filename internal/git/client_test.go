@@ -303,13 +303,15 @@ func TestVerifyUnsignedDevelopmentCommitInTemporaryRepository(t *testing.T) {
 	}
 }
 
-func runGit(t *testing.T, dir string, args ...string) {
+func runGit(t *testing.T, dir string, args ...string) string {
 	t.Helper()
 	command := exec.Command("git", args...)
 	command.Dir = dir
-	if output, err := command.CombinedOutput(); err != nil {
+	output, err := command.CombinedOutput()
+	if err != nil {
 		t.Fatalf("git %v: %v\n%s", args, err, output)
 	}
+	return string(output)
 }
 
 func TestVerifyUnsignedDevelopmentCommitPropagatesCancellation(t *testing.T) {
@@ -322,6 +324,90 @@ func TestVerifyUnsignedDevelopmentCommitPropagatesCancellation(t *testing.T) {
 	}
 	if len(executor.calls) != 0 {
 		t.Fatalf("commands = %#v, want none after cancellation", executor.calls)
+	}
+}
+
+func TestInspectDevelopmentWorktreeReturnsMeaningfulChangesAndIgnoresArtifacts(t *testing.T) {
+	executor := &fakeExecutor{output: " M tracked.go\x00A  added.go\x00 D deleted.go\x00R  renamed.go\x00old.go\x00?? new.go\x00 M .gg/development.md\x00?? .gg/PROOF.md\x00"}
+	client := git.NewClient("/repo/worktree", executor)
+	changes, err := client.InspectDevelopmentWorktree(context.Background(), "/repo/worktree")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []git.DevelopmentWorktreeChange{
+		{Status: "A ", Path: "added.go"},
+		{Status: " D", Path: "deleted.go"},
+		{Status: "??", Path: "new.go"},
+		{Status: "R ", Path: "renamed.go", OriginalPath: "old.go"},
+		{Status: " M", Path: "tracked.go"},
+	}
+	if !reflect.DeepEqual(changes, want) {
+		t.Fatalf("changes = %#v, want %#v", changes, want)
+	}
+	wantCommand := git.Command{Dir: "/repo/worktree", Name: "git", Args: []string{"status", "--porcelain=v1", "--untracked-files=all", "-z", "--"}}
+	if !reflect.DeepEqual(executor.commands, []git.Command{wantCommand}) {
+		t.Fatalf("commands = %#v, want %#v", executor.commands, []git.Command{wantCommand})
+	}
+}
+
+func TestInspectDevelopmentWorktreeCleanWhenOnlyArtifactWorkspaceIsDirty(t *testing.T) {
+	client := git.NewClient("/repo/worktree", &fakeExecutor{output: " M .gg/development.md\x00?? .gg/verification-logs/run.log\x00"})
+	changes, err := client.InspectDevelopmentWorktree(context.Background(), "/repo/worktree")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(changes) != 0 {
+		t.Fatalf("changes = %#v, want clean ownership state", changes)
+	}
+}
+
+func TestInspectDevelopmentWorktreeTemporaryRepositoryReportsAllSourceChanges(t *testing.T) {
+	repo := t.TempDir()
+	runGit(t, repo, "init", "-q")
+	runGit(t, repo, "config", "user.email", "gg@example.test")
+	runGit(t, repo, "config", "user.name", "gg test")
+	for name, content := range map[string]string{
+		"modified.go":   "package before\n",
+		"deleted.go":    "package deleted\n",
+		"rename-old.go": "package renamed\n",
+		"unchanged.go":  "package unchanged\n",
+	} {
+		if err := os.WriteFile(filepath.Join(repo, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runGit(t, repo, "add", "-A")
+	runGit(t, repo, "-c", "commit.gpgsign=false", "commit", "-qm", "initial")
+
+	if err := os.WriteFile(filepath.Join(repo, "modified.go"), []byte("package after\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(repo, "deleted.go")); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, repo, "mv", "rename-old.go", "rename-new.go")
+	if err := os.WriteFile(filepath.Join(repo, "added.go"), []byte("package added\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	changes, err := git.NewClient(repo, nil).InspectDevelopmentWorktree(context.Background(), repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byPath := make(map[string]git.DevelopmentWorktreeChange, len(changes))
+	for _, change := range changes {
+		byPath[change.Path] = change
+	}
+	for _, path := range []string{"added.go", "deleted.go", "modified.go", "rename-new.go"} {
+		if _, ok := byPath[path]; !ok {
+			t.Fatalf("changes = %#v, want path %q", changes, path)
+		}
+	}
+	if byPath["rename-new.go"].OriginalPath != "rename-old.go" {
+		t.Fatalf("rename = %#v, want old path rename-old.go", byPath["rename-new.go"])
+	}
+	if _, ok := byPath["unchanged.go"]; ok {
+		t.Fatalf("unchanged path reported in changes: %#v", changes)
 	}
 }
 
@@ -451,5 +537,38 @@ func TestAutoCommitExcludesProofArtifact(t *testing.T) {
 	}
 	if after, _ := client.HeadCommit(context.Background(), repo); after != head {
 		t.Fatalf("proof-only dirt created a commit %s -> %s", head, after)
+	}
+}
+
+func TestAutoCommitExcludesTrackedArtifactWorkspace(t *testing.T) {
+	repo := t.TempDir()
+	runGit(t, repo, "init", "-q")
+	runGit(t, repo, "config", "user.email", "gg@example.test")
+	runGit(t, repo, "config", "user.name", "gg test")
+	if err := os.Mkdir(filepath.Join(repo, ".gg"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, ".gg", "PROOF.md"), []byte("proof\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, repo, "add", "-f", ".gg/PROOF.md")
+	runGit(t, repo, "-c", "commit.gpgsign=false", "commit", "-qm", "initial")
+
+	if err := os.WriteFile(filepath.Join(repo, ".gg", "PROOF.md"), []byte("updated proof\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "source.go"), []byte("package source\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := git.NewClient(repo, nil).AutoCommitUncommittedChanges(context.Background(), repo, "gg: development/implementation"); err != nil {
+		t.Fatal(err)
+	}
+
+	status := runGit(t, repo, "status", "--porcelain")
+	if !strings.Contains(status, "M  .gg/PROOF.md") && !strings.Contains(status, " M .gg/PROOF.md") {
+		t.Fatalf("artifact workspace change was not preserved: %q", status)
+	}
+	if strings.Contains(status, "source.go") {
+		t.Fatalf("source change was not auto-committed: %q", status)
 	}
 }

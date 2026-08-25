@@ -831,6 +831,11 @@ type failOnceRunner struct {
 
 func (r *failOnceRunner) Run(_ context.Context, request agent.RunRequest) (agent.RunResult, error) {
 	r.calls++
+	if request.Phase == pipeline.PhasePlanning {
+		if err := writeValidPlanningArtifact(request); err != nil {
+			return agent.RunResult{ProjectSlug: request.Project.Slug, Phase: request.Phase, Subphase: request.Subphase, Status: state.StatusFailed}, err
+		}
+	}
 	if r.failOnce && r.calls == 1 {
 		return agent.RunResult{ProjectSlug: request.Project.Slug, Phase: request.Phase, Subphase: request.Subphase, Status: state.StatusFailed}, errors.New("phase execution failed")
 	}
@@ -853,6 +858,8 @@ gg_plan_complexity: "Trivial"
 gg_plan_complexity_evidence: ["The test scope is one cohesive outcome."]
 gg_plan_phases: ["Phase 1: test scope"]
 gg_plan_phase_boundaries: [{"phase":"Phase 1: test scope","justification":"The test scope has no dependency ordering."}]
+gg_verification_steps: [{"name":"tests","command":"go","args":["test","./..."],"adapter":"go-test"}]
+gg_repair_mode: false
 ---
 # Implementation Plan
 
@@ -895,6 +902,7 @@ func TestFailedControllerRunPersistsFailedStateAndResumeAcrossAppRestart(t *test
 		orchestrator.WithPhaseState(lifecycle),
 		orchestrator.WithEventSink(events),
 		orchestrator.WithPromptBuilder(agent.StandalonePromptBuilder{}),
+		orchestrator.WithVerificationService(passingVerification{}),
 	)
 	app = New(
 		WithRootResolver(fixedRoot{root: root}),
@@ -936,6 +944,7 @@ func TestFailedControllerRunPersistsFailedStateAndResumeAcrossAppRestart(t *test
 		orchestrator.WithPhaseState(lifecycleAfterRestart),
 		orchestrator.WithEventSink(resumeEvents),
 		orchestrator.WithPromptBuilder(agent.StandalonePromptBuilder{}),
+		orchestrator.WithVerificationService(passingVerification{}),
 	)
 	app = New(
 		WithRootResolver(fixedRoot{root: root}),

@@ -13,6 +13,124 @@ import (
 // CurrentSchemaVersion is the version of ProjectState understood by this package.
 const CurrentSchemaVersion = 1
 
+// MaxVerificationRemediationAttempts is the fixed retry budget every
+// verification boundary gets. It is deliberately a constant rather than a
+// per-project setting: nothing configures it, and a boundary that could grant
+// itself unlimited remediation would not be a boundary.
+const MaxVerificationRemediationAttempts = 3
+
+// VerificationAdapter identifies the parser used to turn a command result
+// into stable verification findings. The adapters are deliberately a small
+// closed set until a later phase adds execution and comparison behavior.
+type VerificationAdapter string
+
+const (
+	VerificationAdapterGofmtEmpty   VerificationAdapter = "gofmt-empty"
+	VerificationAdapterGoTest       VerificationAdapter = "go-test"
+	VerificationAdapterGoDiagnostic VerificationAdapter = "go-diagnostic"
+	VerificationAdapterGitDiffCheck VerificationAdapter = "git-diff-check"
+)
+
+func (adapter VerificationAdapter) IsValid() bool {
+	switch adapter {
+	case VerificationAdapterGofmtEmpty, VerificationAdapterGoTest, VerificationAdapterGoDiagnostic, VerificationAdapterGitDiffCheck:
+		return true
+	default:
+		return false
+	}
+}
+
+// VerificationStep is one directly executable, named planned check.
+type VerificationStep struct {
+	Name    string              `json:"name"`
+	Command string              `json:"command"`
+	Args    []string            `json:"args"`
+	Env     map[string]string   `json:"env,omitempty"`
+	Adapter VerificationAdapter `json:"adapter"`
+}
+
+// VerificationContract is the strict declaration produced by Planning. The
+// remediation budget is not part of it; see MaxVerificationRemediationAttempts.
+type VerificationContract struct {
+	Steps      []VerificationStep `json:"steps"`
+	RepairMode bool               `json:"repairMode"`
+}
+
+// Validate checks the executable contract without executing any external
+// command. RepairMode is a value because its presence is enforced by the
+// strict frontmatter parser before the contract reaches this model.
+func (contract VerificationContract) Validate() error {
+	if len(contract.Steps) == 0 {
+		return errors.New("verification contract requires at least one step")
+	}
+	seen := make(map[string]struct{}, len(contract.Steps))
+	for index, step := range contract.Steps {
+		name := strings.TrimSpace(step.Name)
+		if name == "" {
+			return fmt.Errorf("verification step %d requires a name", index)
+		}
+		if _, exists := seen[name]; exists {
+			return fmt.Errorf("verification step %q is duplicated", name)
+		}
+		seen[name] = struct{}{}
+		if strings.TrimSpace(step.Command) == "" {
+			return fmt.Errorf("verification step %q requires a command", name)
+		}
+		if !step.Adapter.IsValid() {
+			return fmt.Errorf("verification step %q has unsupported adapter %q", name, step.Adapter)
+		}
+		for key := range step.Env {
+			if strings.TrimSpace(key) == "" || strings.ContainsAny(key, "=\x00") {
+				return fmt.Errorf("verification step %q has invalid environment key", name)
+			}
+		}
+	}
+	return nil
+}
+
+// VerificationFinding is the concise durable form of one verification
+// observation. Raw command output remains in the log referenced by LogPath.
+type VerificationFinding struct {
+	CheckName      string `json:"checkName"`
+	Identity       string `json:"identity,omitempty"`
+	Reason         string `json:"reason,omitempty"`
+	Classification string `json:"classification,omitempty"`
+	LogPath        string `json:"logPath,omitempty"`
+	NextAction     string `json:"nextAction,omitempty"`
+}
+
+// VerificationCommandResult is the durable, bounded status of one planned
+// verification command. Raw output remains in LogPath; retaining the command
+// status lets resumed boundaries distinguish a repaired failure from a
+// missing or unclassifiable result.
+type VerificationCommandResult struct {
+	CheckName      string                `json:"checkName"`
+	Command        string                `json:"command,omitempty"`
+	Args           []string              `json:"args,omitempty"`
+	Status         string                `json:"status"`
+	Failures       []VerificationFinding `json:"failures,omitempty"`
+	LogPath        string                `json:"logPath,omitempty"`
+	RetryCount     int                   `json:"retryCount,omitempty"`
+	UnavailableErr string                `json:"unavailableErr,omitempty"`
+}
+
+// VerificationState stores the contract and lifecycle cursor needed by later
+// verification phases. It is optional so schema-1 project state remains valid.
+type VerificationState struct {
+	PlannedSteps           []VerificationStep          `json:"plannedSteps"`
+	RepairMode             bool                        `json:"repairMode"`
+	ParentBaselineCaptured bool                        `json:"parentBaselineCaptured"`
+	ParentBaseline         []VerificationFinding       `json:"parentBaseline,omitempty"`
+	ParentResults          []VerificationCommandResult `json:"parentResults,omitempty"`
+	PromotedRequiredGreen  []string                    `json:"promotedRequiredGreen,omitempty"`
+	CurrentResults         []VerificationCommandResult `json:"currentResults,omitempty"`
+	CurrentFindings        []VerificationFinding       `json:"currentFindings,omitempty"`
+	Warnings               []VerificationFinding       `json:"warnings,omitempty"`
+	BoundaryCursor         string                      `json:"boundaryCursor,omitempty"`
+	RemediationAttempts    int                         `json:"remediationAttempts,omitempty"`
+	NextAction             string                      `json:"nextAction,omitempty"`
+}
+
 // LifecycleStatus is the persisted lifecycle state of a project.
 type LifecycleStatus string
 
@@ -203,9 +321,13 @@ type ProjectState struct {
 	Interview *InterviewState `json:"interview,omitempty"`
 	// Plan mirrors the planning artifact's phase list and development's
 	// completion marks. It is optional display data for legacy state.
-	Plan         *PlanState `json:"plan,omitempty"`
-	WorktreePath string     `json:"worktreePath"`
-	BranchName   string     `json:"branchName"`
+	Plan *PlanState `json:"plan,omitempty"`
+	// Verification is the durable executable verification contract and its
+	// later lifecycle cursor. It is absent in legacy project state until
+	// Planning successfully declares the contract.
+	Verification *VerificationState `json:"verification,omitempty"`
+	WorktreePath string             `json:"worktreePath"`
+	BranchName   string             `json:"branchName"`
 	// GitDisabled marks projects whose configured folder is not a git
 	// repository: they execute directly in that folder (no worktree, no
 	// branch) and every git-dependent behavior — commit enforcement, proof
@@ -298,6 +420,17 @@ func NewProjectState(input ProjectState) (ProjectState, error) {
 	state.QAFeedbackArtifactPaths = append([]string(nil), input.QAFeedbackArtifactPaths...)
 	state.RebaseConflictArtifactPaths = append([]string(nil), input.RebaseConflictArtifactPaths...)
 	state.PipelineConfig.Data = append(json.RawMessage(nil), input.PipelineConfig.Data...)
+	if input.Verification != nil {
+		verification := *input.Verification
+		verification.PlannedSteps = cloneVerificationSteps(input.Verification.PlannedSteps)
+		verification.ParentBaseline = cloneVerificationFindings(input.Verification.ParentBaseline)
+		verification.ParentResults = cloneVerificationResults(input.Verification.ParentResults)
+		verification.CurrentResults = cloneVerificationResults(input.Verification.CurrentResults)
+		verification.CurrentFindings = cloneVerificationFindings(input.Verification.CurrentFindings)
+		verification.Warnings = cloneVerificationFindings(input.Verification.Warnings)
+		verification.PromotedRequiredGreen = append([]string(nil), input.Verification.PromotedRequiredGreen...)
+		state.Verification = &verification
+	}
 	if input.PRCIMonitor != nil {
 		monitor := *input.PRCIMonitor
 		monitor.RemediationKeys = append([]string(nil), input.PRCIMonitor.RemediationKeys...)
@@ -449,6 +582,44 @@ func (state ProjectState) Validate() error {
 	if state.QACompletedAttempts > state.MaxQAAttempts {
 		return errors.New("completed QA attempts exceed configured maximum")
 	}
+	if state.Verification != nil {
+		contract := VerificationContract{
+			Steps:      state.Verification.PlannedSteps,
+			RepairMode: state.Verification.RepairMode,
+		}
+		if err := contract.Validate(); err != nil {
+			return fmt.Errorf("verification contract: %w", err)
+		}
+		if state.Verification.RemediationAttempts < 0 || state.Verification.RemediationAttempts > MaxVerificationRemediationAttempts {
+			return errors.New("verification remediation attempts are outside the configured maximum")
+		}
+		if err := validateVerificationFindings(state.Verification.ParentBaseline, "parent baseline"); err != nil {
+			return err
+		}
+		if err := validateVerificationResults(state.Verification.ParentResults, "parent results"); err != nil {
+			return err
+		}
+		if err := validateVerificationResults(state.Verification.CurrentResults, "current results"); err != nil {
+			return err
+		}
+		if err := validateVerificationFindings(state.Verification.CurrentFindings, "current findings"); err != nil {
+			return err
+		}
+		if err := validateVerificationFindings(state.Verification.Warnings, "warnings"); err != nil {
+			return err
+		}
+		seen := make(map[string]struct{}, len(state.Verification.PromotedRequiredGreen))
+		for _, identity := range state.Verification.PromotedRequiredGreen {
+			identity = strings.TrimSpace(identity)
+			if identity == "" {
+				return errors.New("promoted required-green identity cannot be empty")
+			}
+			if _, exists := seen[identity]; exists {
+				return fmt.Errorf("promoted required-green identity %q is duplicated", identity)
+			}
+			seen[identity] = struct{}{}
+		}
+	}
 	switch state.QALoopStage {
 	case "":
 		if state.QACompletedAttempts != 0 {
@@ -509,4 +680,71 @@ func validSlug(slug string) bool {
 		}
 	}
 	return true
+}
+
+func cloneVerificationSteps(steps []VerificationStep) []VerificationStep {
+	if steps == nil {
+		return nil
+	}
+	cloned := make([]VerificationStep, len(steps))
+	for index, step := range steps {
+		cloned[index] = step
+		cloned[index].Args = append([]string(nil), step.Args...)
+		if step.Env != nil {
+			cloned[index].Env = make(map[string]string, len(step.Env))
+			for key, value := range step.Env {
+				cloned[index].Env[key] = value
+			}
+		}
+	}
+	return cloned
+}
+
+func cloneVerificationFindings(findings []VerificationFinding) []VerificationFinding {
+	return append([]VerificationFinding(nil), findings...)
+}
+
+func cloneVerificationResults(results []VerificationCommandResult) []VerificationCommandResult {
+	if results == nil {
+		return nil
+	}
+	cloned := make([]VerificationCommandResult, len(results))
+	for index, result := range results {
+		cloned[index] = result
+		cloned[index].Args = append([]string(nil), result.Args...)
+		cloned[index].Failures = cloneVerificationFindings(result.Failures)
+	}
+	return cloned
+}
+
+func validateVerificationFindings(findings []VerificationFinding, label string) error {
+	for index, finding := range findings {
+		if strings.TrimSpace(finding.CheckName) == "" {
+			return fmt.Errorf("verification %s finding %d requires a check name", label, index)
+		}
+	}
+	return nil
+}
+
+func validateVerificationResults(results []VerificationCommandResult, label string) error {
+	seen := make(map[string]struct{}, len(results))
+	for index, result := range results {
+		if strings.TrimSpace(result.CheckName) == "" {
+			return fmt.Errorf("verification %s result %d requires a check name", label, index)
+		}
+		if _, exists := seen[result.CheckName]; exists {
+			return fmt.Errorf("verification %s contains duplicate check %q", label, result.CheckName)
+		}
+		seen[result.CheckName] = struct{}{}
+		if strings.TrimSpace(result.Status) == "" {
+			return fmt.Errorf("verification %s result %q requires a status", label, result.CheckName)
+		}
+		if result.RetryCount < 0 {
+			return fmt.Errorf("verification %s result %q has negative retry count", label, result.CheckName)
+		}
+		if err := validateVerificationFindings(result.Failures, label+" failures"); err != nil {
+			return err
+		}
+	}
+	return nil
 }

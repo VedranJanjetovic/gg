@@ -207,7 +207,7 @@ func (a *App) attachProject(ctx context.Context, selector string, start func(con
 					// Detached resume: the run must outlive this gg process.
 					return a.startDetached(resumeCtx, selector, []string{"resume", selector})
 				}
-				return a.resume(resumeCtx, io.Discard, []string{selector})
+				return a.resume(resumeCtx, io.Discard, resumeOptions{selector: selector})
 			},
 		}
 		if skipper, ok := service.(skipExecutionService); ok {
@@ -355,5 +355,5 @@ func (a *App) skipFailedExecution(ctx context.Context, selector string, skipper 
 	if a.runSpawner != nil {
 		return a.startDetached(ctx, selector, []string{"resume", selector})
 	}
-	return a.resume(ctx, io.Discard, []string{selector})
+	return a.resume(ctx, io.Discard, resumeOptions{selector: selector})
 }

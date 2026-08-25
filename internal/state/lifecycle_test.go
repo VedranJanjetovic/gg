@@ -2,6 +2,7 @@ package state
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"reflect"
@@ -11,6 +12,161 @@ import (
 
 	"github.com/VedranJanjetovic/gg/internal/proof"
 )
+
+func TestLifecyclePersistsVerificationContractAndFindings(t *testing.T) {
+	root := t.TempDir()
+	store, err := NewFileStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := NewLifecycleService(store, &testClock{now: time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)}, store.Locker())
+	project := validProjectState()
+	if err := svc.Create(context.Background(), project); err != nil {
+		t.Fatal(err)
+	}
+	contract := VerificationContract{Steps: []VerificationStep{{Name: "tests", Command: "go", Args: []string{"test"}, Adapter: VerificationAdapterGoTest}}, RepairMode: true}
+	configured, err := svc.SetVerificationContract(context.Background(), project.Slug, contract, PipelineConfigSnapshot{SchemaVersion: 1, Data: json.RawMessage(`{"verificationSteps":[]}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if configured.Verification == nil || !configured.Verification.RepairMode || configured.PipelineConfig.SchemaVersion != 1 {
+		t.Fatalf("configured project = %#v", configured)
+	}
+	baseline := []VerificationFinding{{CheckName: "tests", Identity: "pkg/Test", Reason: "failed", LogPath: ".gg/logs/tests.log"}}
+	baselineResults := []VerificationCommandResult{{CheckName: "tests", Command: "go", Status: "failed", Failures: baseline}}
+	if _, err := svc.RecordVerificationBaselineReport(context.Background(), project.Slug, baselineResults, baseline); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.RecordVerificationResultReport(context.Background(), project.Slug, baselineResults, nil, []VerificationFinding{{CheckName: "tests", Identity: "pkg/Test", Reason: "failed", Classification: "unchanged_baseline"}}, "phase-2", 1, "repair the failing check"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.PromoteVerificationIdentity(context.Background(), project.Slug, "pkg/Test"); err != nil {
+		t.Fatal(err)
+	}
+	reloaded, err := store.Load(context.Background(), project.Slug)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reloaded.Verification.ParentBaselineCaptured || len(reloaded.Verification.ParentBaseline) != 1 || len(reloaded.Verification.Warnings) != 1 || reloaded.Verification.BoundaryCursor != "phase-2" || reloaded.Verification.RemediationAttempts != 1 || len(reloaded.Verification.PromotedRequiredGreen) != 1 {
+		t.Fatalf("reloaded verification state = %#v", reloaded.Verification)
+	}
+}
+
+func TestLifecycleMigratesLegacyContractWithoutDroppingVerificationHistory(t *testing.T) {
+	root := t.TempDir()
+	store, err := NewFileStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := NewLifecycleService(store, nil, store.Locker())
+	project := validProjectState()
+	if err := svc.Create(context.Background(), project); err != nil {
+		t.Fatal(err)
+	}
+	oldContract := VerificationContract{Steps: []VerificationStep{{Name: "old", Command: "go", Args: []string{"test"}, Adapter: VerificationAdapterGoTest}}}
+	if _, err := svc.SetVerificationContract(context.Background(), project.Slug, oldContract, PipelineConfigSnapshot{SchemaVersion: 1, Data: json.RawMessage(`{"legacy":true}`)}); err != nil {
+		t.Fatal(err)
+	}
+	baseline := []VerificationFinding{{CheckName: "old", Identity: "pkg/Test", Reason: "panic", LogPath: "baseline.log"}}
+	baselineResults := []VerificationCommandResult{{CheckName: "old", Command: "go", Status: "failed", Failures: baseline}}
+	if _, err := svc.RecordVerificationBaselineReport(context.Background(), project.Slug, baselineResults, baseline); err != nil {
+		t.Fatal(err)
+	}
+	current := []VerificationFinding{{CheckName: "old", Identity: "pkg/Test", Reason: "panic", Classification: "changed_reason"}}
+	warnings := []VerificationFinding{{CheckName: "old", Identity: "pkg/Other", Reason: "flaky", Classification: "flaky"}}
+	results := []VerificationCommandResult{{CheckName: "old", Command: "go", Status: "failed", Failures: current}}
+	if _, err := svc.RecordVerificationResultReport(context.Background(), project.Slug, results, current, warnings, "phase-7", 2, "resume with fresh budget"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.PromoteVerificationIdentity(context.Background(), project.Slug, "pkg/Test"); err != nil {
+		t.Fatal(err)
+	}
+
+	newContract := VerificationContract{Steps: []VerificationStep{{Name: "new", Command: "go", Args: []string{"test", "./..."}, Adapter: VerificationAdapterGoTest}}, RepairMode: true}
+	got, err := svc.MigrateVerificationContract(context.Background(), project.Slug, newContract, PipelineConfigSnapshot{SchemaVersion: 1, Data: json.RawMessage(`{"migrated":true}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got.Verification.ParentBaseline, baseline) ||
+		!reflect.DeepEqual(got.Verification.ParentResults, baselineResults) ||
+		!reflect.DeepEqual(got.Verification.CurrentFindings, current) ||
+		!reflect.DeepEqual(got.Verification.Warnings, warnings) ||
+		!reflect.DeepEqual(got.Verification.PromotedRequiredGreen, []string{"pkg/Test"}) ||
+		got.Verification.BoundaryCursor != "phase-7" || got.Verification.RemediationAttempts != 2 ||
+		got.Verification.NextAction != "resume with fresh budget" {
+		t.Fatalf("legacy migration dropped verification history: %#v", got.Verification)
+	}
+	if !reflect.DeepEqual(got.Verification.PlannedSteps, newContract.Steps) || !got.Verification.RepairMode {
+		t.Fatalf("migrated contract = %#v, want %#v", got.Verification, newContract)
+	}
+}
+
+func TestLifecycleKeepsAnEmptyParentBaselineAcrossRepeatedCapture(t *testing.T) {
+	root := t.TempDir()
+	store, err := NewFileStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := NewLifecycleService(store, nil, store.Locker())
+	project := validProjectState()
+	if err := svc.Create(context.Background(), project); err != nil {
+		t.Fatal(err)
+	}
+	contract := VerificationContract{Steps: []VerificationStep{{Name: "tests", Command: "go", Args: []string{"test"}, Adapter: VerificationAdapterGoTest}}}
+	if _, err := svc.SetVerificationContract(context.Background(), project.Slug, contract, PipelineConfigSnapshot{SchemaVersion: 1, Data: json.RawMessage(`{"snapshot":true}`)}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.RecordVerificationBaselineReport(context.Background(), project.Slug, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.RecordVerificationBaselineReport(context.Background(), project.Slug, nil, []VerificationFinding{{CheckName: "tests", Identity: "pkg/Test"}}); err != nil {
+		t.Fatal(err)
+	}
+	reloaded, err := store.Load(context.Background(), project.Slug)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reloaded.Verification.ParentBaselineCaptured || len(reloaded.Verification.ParentBaseline) != 0 {
+		t.Fatalf("empty parent baseline was not preserved: %#v", reloaded.Verification)
+	}
+}
+
+func TestLifecycleBoundsVerificationRemediationAndResetsWithoutReplacingBaseline(t *testing.T) {
+	root := t.TempDir()
+	store, err := NewFileStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := NewLifecycleService(store, nil, store.Locker())
+	project := validProjectState()
+	if err := svc.Create(context.Background(), project); err != nil {
+		t.Fatal(err)
+	}
+	contract := VerificationContract{Steps: []VerificationStep{{Name: "tests", Command: "go", Args: []string{"test"}, Adapter: VerificationAdapterGoTest}}}
+	if _, err := svc.SetVerificationContract(context.Background(), project.Slug, contract, PipelineConfigSnapshot{SchemaVersion: 1, Data: json.RawMessage(`{"snapshot":true}`)}); err != nil {
+		t.Fatal(err)
+	}
+	baseline := []VerificationFinding{{CheckName: "tests", Identity: "pkg/Test", Reason: "panic"}}
+	if _, err := svc.RecordVerificationBaselineReport(context.Background(), project.Slug, nil, baseline); err != nil {
+		t.Fatal(err)
+	}
+	for attempt := 1; attempt <= MaxVerificationRemediationAttempts; attempt++ {
+		got, beginErr := svc.BeginVerificationRemediation(context.Background(), project.Slug, "phase-6", "retry")
+		if beginErr != nil || got.Verification.RemediationAttempts != attempt {
+			t.Fatalf("attempt %d: state=%#v err=%v", attempt, got.Verification, beginErr)
+		}
+	}
+	if _, err := svc.BeginVerificationRemediation(context.Background(), project.Slug, "phase-6", "retry"); err == nil {
+		t.Fatal("fourth remediation attempt unexpectedly succeeded")
+	}
+	reset, err := svc.ResetVerificationRemediation(context.Background(), project.Slug, "resume with fresh budget")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reset.Verification.RemediationAttempts != 0 || !reflect.DeepEqual(reset.Verification.ParentBaseline, baseline) || reset.Verification.BoundaryCursor != "phase-6" {
+		t.Fatalf("reset state=%#v, want zero attempts with immutable baseline and cursor", reset.Verification)
+	}
+}
 
 type testClock struct {
 	mu  sync.Mutex

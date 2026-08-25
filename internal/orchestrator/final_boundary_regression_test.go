@@ -9,6 +9,7 @@ import (
 
 	"github.com/VedranJanjetovic/gg/internal/agent"
 	"github.com/VedranJanjetovic/gg/internal/config"
+	"github.com/VedranJanjetovic/gg/internal/git"
 	"github.com/VedranJanjetovic/gg/internal/orchestrator"
 	"github.com/VedranJanjetovic/gg/internal/pipeline"
 	"github.com/VedranJanjetovic/gg/internal/state"
@@ -334,6 +335,10 @@ func (v *retainedSignedCommitVerifier) HeadCommit(context.Context, string) (stri
 	return "development-base", nil
 }
 
+func (v *retainedSignedCommitVerifier) InspectDevelopmentWorktree(context.Context, string) ([]git.DevelopmentWorktreeChange, error) {
+	return nil, nil
+}
+
 func (v *retainedSignedCommitVerifier) AutoCommitUncommittedChanges(context.Context, string, string) error {
 	return nil
 }
@@ -414,6 +419,51 @@ func TestResumeReverifiesFailedDevelopmentFromPersistedBase(t *testing.T) {
 	}
 	if persisted.Status != state.StatusFailed || persisted.RunReservationToken != "" {
 		t.Fatalf("Resume() mutated ownership before verification: %#v", persisted)
+	}
+}
+
+func TestResumeReverifiesInterruptedRunningDevelopmentFromPersistedBase(t *testing.T) {
+	root := t.TempDir()
+	store, err := state.NewFileStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := state.NewLifecycleService(store, nil, store.Locker())
+	project := durableExecutionProject(t, service)
+	if _, err := service.RecordPhase(context.Background(), project.Slug, string(pipeline.PhaseDevelopment), "testing", state.StatusRunning, &state.ExecutionOutcome{
+		DevelopmentBaseCommit: "development-base",
+	}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, recovered, err := service.RecoverStaleRun(context.Background(), project.Slug); err != nil || !recovered {
+		t.Fatalf("RecoverStaleRun() = recovered=%v err=%v, want stale running phase preserved", recovered, err)
+	}
+	stopped, err := service.Load(context.Background(), project.Slug)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verifier := &retainedSignedCommitVerifier{signatureErr: errors.New("retained commit is signed")}
+	runner := &finiteRunner{}
+	request := resumeRequest(t, stopped, resolvedPipeline(t, config.PhaseQA))
+	request.RunID = "run-after-crash"
+	controller := orchestrator.NewController(
+		orchestrator.WithRunner(runner),
+		orchestrator.WithPhaseState(service),
+		orchestrator.WithPromptBuilder(fakePrompt{}),
+		orchestrator.WithDevelopmentCommitVerifier(verifier),
+	)
+	if _, err := controller.Resume(context.Background(), orchestrator.ResumeRequest{
+		ProjectSlug: project.Slug,
+		RunID:       request.RunID,
+		Execution:   request,
+	}); !errors.Is(err, verifier.signatureErr) {
+		t.Fatalf("Resume() error = %v, want retained signed commit rejection", err)
+	}
+	if len(runner.calls) != 0 {
+		t.Fatalf("Resume() dispatched after interrupted-ownership verification failed: %v", runner.calls)
+	}
+	if len(verifier.verifyBases) != 1 || verifier.verifyBases[0] != "development-base" {
+		t.Fatalf("resume verification bases = %v, want persisted running checkpoint", verifier.verifyBases)
 	}
 }
 

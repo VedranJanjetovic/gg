@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -185,6 +186,55 @@ func TestWorktreeIntegrationCreateReuseLookupAndRemove(t *testing.T) {
 	}
 	if strings.TrimSpace(looked.Branch) == "" {
 		t.Fatal("lookup branch empty")
+	}
+}
+
+func TestPathsEqualResolvesFilesystemAliasesAndMissingChildren(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "target")
+	if err := os.Mkdir(target, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(root, "alias")
+	if err := os.Symlink(target, alias); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	tests := map[string]struct {
+		left, right string
+		want        bool
+	}{
+		"same path":        {target, target, true},
+		"dot segments":     {filepath.Join(root, ".", "target"), target, true},
+		"symlink alias":    {alias, target, true},
+		"missing child":    {filepath.Join(alias, "new-child"), filepath.Join(target, "new-child"), true},
+		"different folder": {filepath.Join(root, "other"), filepath.Join(root, "another"), false},
+	}
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			if got := git.PathsEqual(test.left, test.right); got != test.want {
+				t.Fatalf("PathsEqual(%q, %q) = %v, want %v", test.left, test.right, got, test.want)
+			}
+		})
+	}
+	if runtime.GOOS == "darwin" && !git.PathsEqual("/var", "/private/var") {
+		t.Fatal("PathsEqual(/var, /private/var) = false, want true on macOS")
+	}
+	caseVariant := filepath.Join(root, "TARGET")
+	if _, err := os.Stat(caseVariant); err == nil {
+		if !git.PathsEqual(target, caseVariant) {
+			t.Fatalf("PathsEqual(%q, %q) = false, want true on a case-insensitive volume", target, caseVariant)
+		}
+		if !git.PathsEqual(filepath.Join(target, "new-child"), filepath.Join(caseVariant, "new-child")) {
+			t.Fatalf("PathsEqual missing children under case aliases = false, want true")
+		}
+	} else if runtime.GOOS == "windows" {
+		if git.PathsEqual(target, caseVariant) {
+			t.Fatalf("PathsEqual(%q, %q) = true, want false in a case-sensitive Windows directory", target, caseVariant)
+		}
+		if git.PathsEqual(filepath.Join(target, "new-child"), filepath.Join(caseVariant, "new-child")) {
+			t.Fatalf("PathsEqual missing children under case aliases = true in a case-sensitive Windows directory")
+		}
 	}
 }
 

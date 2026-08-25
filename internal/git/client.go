@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -22,6 +23,15 @@ type Command struct {
 // of executing them, which keeps callers testable and supports dry-run flows.
 type CommandExecutor interface {
 	Execute(context.Context, Command) (string, error)
+}
+
+// DevelopmentWorktreeChange describes one meaningful change found before a
+// Development subphase is dispatched. Git's two-character porcelain status is
+// retained so callers can explain why ownership was not granted.
+type DevelopmentWorktreeChange struct {
+	Status       string
+	Path         string
+	OriginalPath string
 }
 
 // ExecCommandExecutor executes commands with the standard library.
@@ -243,6 +253,67 @@ func (c *Client) HeadCommit(ctx context.Context, worktreePath string) (string, e
 	return head, nil
 }
 
+// InspectDevelopmentWorktree returns meaningful changes currently present in
+// a Development worktree. The check includes tracked changes and untracked
+// source files, while the ignored .gg artifact workspace and legacy root
+// PROOF.md are deliberately excluded from ownership decisions.
+func (c *Client) InspectDevelopmentWorktree(ctx context.Context, worktreePath string) ([]DevelopmentWorktreeChange, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if c == nil || c.executor == nil {
+		return nil, errors.New("git client is nil")
+	}
+	if strings.TrimSpace(worktreePath) == "" {
+		return nil, errors.New("git worktree path is empty")
+	}
+	dir := filepath.Clean(worktreePath)
+	command := Command{Dir: dir, Name: "git", Args: []string{"status", "--porcelain=v1", "--untracked-files=all", "-z", "--"}}
+	output, err := c.execute(ctx, command)
+	if err != nil {
+		return nil, fmt.Errorf("inspect Development worktree: %w", err)
+	}
+	changes := parseDevelopmentWorktreeChanges(output)
+	sort.Slice(changes, func(i, j int) bool {
+		if changes[i].Path != changes[j].Path {
+			return changes[i].Path < changes[j].Path
+		}
+		return changes[i].OriginalPath < changes[j].OriginalPath
+	})
+	return changes, nil
+}
+
+func parseDevelopmentWorktreeChanges(output string) []DevelopmentWorktreeChange {
+	parts := strings.Split(output, "\x00")
+	changes := make([]DevelopmentWorktreeChange, 0, len(parts))
+	for index := 0; index < len(parts); index++ {
+		record := parts[index]
+		if len(record) < 4 {
+			continue
+		}
+		status, path := record[:2], record[3:]
+		change := DevelopmentWorktreeChange{Status: status, Path: path}
+		if status[0] == 'R' || status[0] == 'C' || status[1] == 'R' || status[1] == 'C' {
+			if index+1 < len(parts) && parts[index+1] != "" {
+				// With -z, Git reports the destination first and the source
+				// second for rename/copy records.
+				change.OriginalPath = parts[index+1]
+				index++
+			}
+		}
+		if isDevelopmentArtifactPath(change.Path) && (change.OriginalPath == "" || isDevelopmentArtifactPath(change.OriginalPath)) {
+			continue
+		}
+		changes = append(changes, change)
+	}
+	return changes
+}
+
+func isDevelopmentArtifactPath(path string) bool {
+	path = filepath.ToSlash(filepath.Clean(path))
+	return path == ".gg" || strings.HasPrefix(path, ".gg/") || path == "PROOF.md"
+}
+
 // AutoCommitUncommittedChanges stages and commits any uncommitted work in the
 // worktree with an unsigned commit. It is the safety net for development
 // subphases whose agent finished its work without committing: the work is
@@ -270,7 +341,7 @@ func (c *Client) AutoCommitUncommittedChanges(ctx context.Context, worktreePath,
 	}
 	// PROOF.md is contractually an uncommitted QA artifact: committing it
 	// would make every later QA attempt fail its uncommitted-proof check.
-	if _, err := c.execute(ctx, Command{Dir: dir, Name: "git", Args: []string{"add", "-A", "--", ".", ":(exclude)PROOF.md"}}); err != nil {
+	if _, err := c.execute(ctx, Command{Dir: dir, Name: "git", Args: []string{"add", "-A", "--", ".", ":(exclude).gg", ":(exclude).gg/**", ":(exclude)PROOF.md"}}); err != nil {
 		return fmt.Errorf("stage uncommitted development changes: %w", err)
 	}
 	staged, err := c.execute(ctx, Command{Dir: dir, Name: "git", Args: []string{"diff", "--cached", "--name-only"}})
@@ -294,8 +365,9 @@ func (c *Client) VerifyUnsignedDevelopmentCommit(ctx context.Context, worktreePa
 }
 
 // VerifyUnsignedDevelopmentCommits verifies every commit introduced after
-// previousHead is unsigned. requireCommit additionally requires HEAD to have
-// advanced, which is the success contract for a Development subphase.
+// previousHead is unsigned. When requireCommit is true, it additionally
+// requires HEAD to have advanced; callers that allow a clean subphase can
+// still require ancestry and unsigned-commit validation with false.
 func (c *Client) VerifyUnsignedDevelopmentCommits(ctx context.Context, worktreePath, previousHead string, requireCommit bool) error {
 	if err := ctx.Err(); err != nil {
 		return err

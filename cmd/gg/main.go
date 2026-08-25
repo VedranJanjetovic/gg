@@ -24,6 +24,7 @@ import (
 	"github.com/VedranJanjetovic/gg/internal/state"
 	"github.com/VedranJanjetovic/gg/internal/tui"
 	"github.com/VedranJanjetovic/gg/internal/update"
+	"github.com/VedranJanjetovic/gg/internal/verification"
 	"github.com/VedranJanjetovic/gg/internal/version"
 )
 
@@ -151,7 +152,7 @@ func newAppWithIO(ctx context.Context, input io.Reader, output io.Writer, runTUI
 			codingPatternsPath = ""
 		}
 	}
-	controller := orchestrator.NewProductionController(runner, projects, gitClient, orchestrator.WithEventSink(events.OrchestratorSink()), orchestrator.WithGitOpsServices(gitClient, gitOpsPR, gitOpsCI), orchestrator.WithRebaseAgent(runner), orchestrator.WithPRCILifecycleMonitor(monitor), orchestrator.WithPromptBuilder(agent.StandalonePromptBuilder{CodingPatternsPath: codingPatternsPath}))
+	controller := orchestrator.NewProductionController(runner, projects, gitClient, orchestrator.WithEventSink(events.OrchestratorSink()), orchestrator.WithGitOpsServices(gitClient, gitOpsPR, gitOpsCI), orchestrator.WithRebaseAgent(runner), orchestrator.WithPRCILifecycleMonitor(monitor), orchestrator.WithPromptBuilder(agent.StandalonePromptBuilder{CodingPatternsPath: codingPatternsPath}), orchestrator.WithVerificationService(verification.NewRunner(verification.RunnerOptions{})))
 	resumeCoordinator, err := orchestrator.NewResumeCoordinator(productionResumeSource{roots: rootResolver}, controller, orchestrator.ResumeCoordinatorOptions{Concurrency: 4})
 	if err != nil {
 		return nil, err

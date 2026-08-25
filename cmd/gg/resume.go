@@ -9,6 +9,7 @@ import (
 	"github.com/VedranJanjetovic/gg/internal/config"
 	"github.com/VedranJanjetovic/gg/internal/orchestrator"
 	"github.com/VedranJanjetovic/gg/internal/pipeline"
+	"github.com/VedranJanjetovic/gg/internal/resume"
 	"github.com/VedranJanjetovic/gg/internal/state"
 )
 
@@ -72,6 +73,11 @@ func (s productionResumeSource) Discover(ctx context.Context, runID string) ([]o
 			}
 			if project.Status != state.StatusStopped && project.Status != state.StatusFailed {
 				continue
+			}
+			projectSlug := project.Slug
+			project, err = resume.Prepare(ctx, project, service)
+			if err != nil {
+				return nil, fmt.Errorf("prepare project %q for resume: %w", projectSlug, err)
 			}
 			plan, subphases, maxAttempts, err := pipeline.RestoreExecution(project.PipelineConfig)
 			if err != nil {

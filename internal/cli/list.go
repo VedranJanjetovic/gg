@@ -66,7 +66,7 @@ func writeProjectList(output io.Writer, projects []state.ProjectState) error {
 		return err
 	}
 	for _, project := range projects {
-		if _, err := fmt.Fprintf(writer, "%s\t%s\t%s\n", project.Name, project.Status, displayValue(project.CurrentPhase)); err != nil {
+		if _, err := fmt.Fprintf(writer, "%s\t%s%s\t%s\n", project.Name, project.Status, verificationStatusSuffix(project), displayValue(project.CurrentPhase)); err != nil {
 			return err
 		}
 	}

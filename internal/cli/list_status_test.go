@@ -117,6 +117,65 @@ func TestStatusDetailRetainsEverySkippedOccurrenceAndFailureEvidence(t *testing.
 	}
 }
 
+func TestStatusAndListRenderVerificationEvidenceAndMarkers(t *testing.T) {
+	projects := fixtureProjects()
+	projects[0].Verification = &state.VerificationState{
+		CurrentResults:      []state.VerificationCommandResult{{CheckName: "tests", Command: "go", Args: []string{"test", "./..."}, Status: "passed", LogPath: ".gg/logs/tests.log"}},
+		Warnings:            []state.VerificationFinding{{CheckName: "tests", Identity: "pkg/TestLegacy", Reason: "known failure", Classification: "unchanged_baseline"}},
+		RemediationAttempts: 1,
+		NextAction:          "continue; baseline warning retained",
+	}
+	app := New(WithLifecycleService(&listStatusProjects{projects: projects}), WithRootResolver(listFixedRoot{}))
+	var table bytes.Buffer
+	if err := app.statusCommand(context.Background(), &table, nil); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(table.String(), "running [warning]") {
+		t.Fatalf("status table did not mark warning: %q", table.String())
+	}
+	var detail bytes.Buffer
+	if err := app.statusCommand(context.Background(), &detail, []string{"Active"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"Verification:", "Check: tests", "Command: go test ./...", "Identity: pkg/TestLegacy", "Reason: known failure", "Classification: unchanged_baseline", "Attempts: 1/3", "Log: .gg/logs/tests.log", "Next action: continue; baseline warning retained"} {
+		if !strings.Contains(detail.String(), want) {
+			t.Fatalf("status detail missing %q:\n%s", want, detail.String())
+		}
+	}
+	var list bytes.Buffer
+	if err := app.listCommand(context.Background(), &list, nil); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(list.String(), "running [warning]") {
+		t.Fatalf("list did not mark warning: %q", list.String())
+	}
+}
+
+func TestStatusMarksUnavailableVerificationAsPaused(t *testing.T) {
+	projects := fixtureProjects()
+	projects[0].Verification = &state.VerificationState{
+		CurrentResults: []state.VerificationCommandResult{{CheckName: "tests", Command: "go", Args: []string{"test", "./..."}, Status: "unavailable", UnavailableErr: "go not found"}},
+		NextAction:     "install Go, then resume",
+	}
+	app := New(WithLifecycleService(&listStatusProjects{projects: projects}), WithRootResolver(listFixedRoot{}))
+	var out bytes.Buffer
+	if err := app.statusCommand(context.Background(), &out, nil); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "running [paused]") {
+		t.Fatalf("status did not mark paused verification: %q", out.String())
+	}
+	var detail bytes.Buffer
+	if err := app.statusCommand(context.Background(), &detail, []string{"Active"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"Verification:", "Check: tests", "Command: go test ./...", "Reason: go not found", "Classification: unavailable", "Next action: install Go, then resume"} {
+		if !strings.Contains(detail.String(), want) {
+			t.Fatalf("paused status missing %q: %s", want, detail.String())
+		}
+	}
+}
+
 func TestStatusMissingProjectAndUnconfiguredFolder(t *testing.T) {
 	missing := New(WithLifecycleService(&listStatusProjects{missing: true}), WithRootResolver(listFixedRoot{}))
 	var output bytes.Buffer

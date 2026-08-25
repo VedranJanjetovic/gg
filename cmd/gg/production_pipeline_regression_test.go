@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -47,15 +48,26 @@ func TestProductionCompositionRunsFakeAgentsGitStateAndPersistsAllEvents(t *test
 	}
 
 	binDir := t.TempDir()
-	fakeAgent := filepath.Join(binDir, "claude")
-	if err := os.WriteFile(fakeAgent, []byte(productionFakeAgentScript), 0o755); err != nil {
-		t.Fatal(err)
+	fakeAgent := filepath.Join(binDir, productionExecutableName("claude"))
+	moduleRoot := productionModuleRoot(t)
+	build := exec.Command("go", "build", "-o", fakeAgent, "./testdata/fake-agent")
+	build.Dir = moduleRoot
+	if output, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build production fake agent: %v\n%s", err, output)
+	}
+	fakeBytes, err := os.ReadFile(fakeAgent)
+	if err != nil {
+		t.Fatalf("read production fake agent: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(binDir, productionExecutableName("gh")), fakeBytes, 0o755); err != nil {
+		t.Fatalf("install production fake gh: %v", err)
 	}
 	fakeGH := filepath.Join(binDir, "gh")
 	if err := os.WriteFile(fakeGH, []byte(productionFakeGHScript), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("GG_PRODUCTION_FAKE", "1")
 
 	previous, err := os.Getwd()
 	if err != nil {
@@ -78,6 +90,9 @@ func TestProductionCompositionRunsFakeAgentsGitStateAndPersistsAllEvents(t *test
 	var stdout, stderr bytes.Buffer
 	if code := app.Run(ctx, []string{"run", "e2e-production"}, &stdout, &stderr); code != 0 {
 		t.Fatalf("production run exit=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if strings.Contains(strings.ToLower(stderr.String()), "pathspec") {
+		t.Fatalf("production fake-agent staging reported a pathspec error: %q", stderr.String())
 	}
 
 	stateStore, err := state.NewFileStore(repo)
@@ -215,6 +230,22 @@ func TestProductionCompositionRunsFakeAgentsGitStateAndPersistsAllEvents(t *test
 	}
 }
 
+func productionModuleRoot(t *testing.T) string {
+	t.Helper()
+	_, source, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("locate production fixture source")
+	}
+	return filepath.Clean(filepath.Join(filepath.Dir(source), "..", ".."))
+}
+
+func productionExecutableName(name string) string {
+	if runtime.GOOS == "windows" {
+		return name + ".exe"
+	}
+	return name
+}
+
 type productionEventRecord struct {
 	Type     string `json:"type"`
 	Phase    string `json:"phase"`
@@ -345,7 +376,7 @@ func runProductionGit(t *testing.T, dir string, args ...string) string {
 
 func containsProductionString(values []string, want string) bool {
 	for _, value := range values {
-		if value == want {
+		if value == want || (filepath.IsAbs(value) && filepath.IsAbs(want) && gggit.PathsEqual(value, want)) {
 			return true
 		}
 	}

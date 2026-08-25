@@ -18,9 +18,10 @@ import (
 )
 
 type persistedResumeState struct {
-	mu      sync.Mutex
-	project state.ProjectState
-	calls   []string
+	mu           sync.Mutex
+	project      state.ProjectState
+	calls        []string
+	resetActions []string
 }
 
 func (s *persistedResumeState) Load(context.Context, string) (state.ProjectState, error) {
@@ -55,6 +56,54 @@ func (s *persistedResumeState) snapshot() state.ProjectState {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.project
+}
+
+func (s *persistedResumeState) ResetVerificationRemediation(_ context.Context, _ string, nextAction string) (state.ProjectState, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.resetActions = append(s.resetActions, nextAction)
+	if s.project.Verification != nil {
+		s.project.Verification.RemediationAttempts = 0
+		s.project.Verification.NextAction = nextAction
+	}
+	return s.project, nil
+}
+
+// The verification report methods let this fake satisfy the optional
+// verificationReportState extension, which the boundary gate requires whenever
+// a project carries a verification contract.
+func (s *persistedResumeState) RecordVerificationBaselineReport(_ context.Context, _ string, results []state.VerificationCommandResult, baseline []state.VerificationFinding) (state.ProjectState, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.project.Verification != nil {
+		s.project.Verification.ParentBaselineCaptured = true
+		s.project.Verification.ParentResults = results
+		s.project.Verification.ParentBaseline = baseline
+	}
+	return s.project, nil
+}
+
+func (s *persistedResumeState) RecordVerificationResultReport(_ context.Context, _ string, results []state.VerificationCommandResult, findings, warnings []state.VerificationFinding, boundary string, attempts int, nextAction string) (state.ProjectState, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.project.Verification != nil {
+		s.project.Verification.CurrentResults = results
+		s.project.Verification.CurrentFindings = findings
+		s.project.Verification.Warnings = warnings
+		s.project.Verification.BoundaryCursor = boundary
+		s.project.Verification.RemediationAttempts = attempts
+		s.project.Verification.NextAction = nextAction
+	}
+	return s.project, nil
+}
+
+func (s *persistedResumeState) PromoteVerificationIdentity(_ context.Context, _ string, identity string) (state.ProjectState, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.project.Verification != nil {
+		s.project.Verification.PromotedRequiredGreen = append(s.project.Verification.PromotedRequiredGreen, identity)
+	}
+	return s.project, nil
 }
 
 type stopAwareRunner struct {
@@ -194,6 +243,37 @@ func TestResumeContinuesStoppedSubphaseWithoutReplay(t *testing.T) {
 	want := []string{"development/implement", "development/review", "rebase/", "qa/", "test_document/"}
 	if !reflect.DeepEqual(runner.calls, want) {
 		t.Fatalf("resume dispatches=%v, want=%v", runner.calls, want)
+	}
+}
+
+func TestResumeGrantsFreshVerificationBudgetAfterExhaustion(t *testing.T) {
+	plan := resolvedPipeline(t, config.PhaseQA)
+	project := state.ProjectState{
+		Slug: "verification-resume", OriginalGoal: "goal", AcceptanceCriteria: []string{"criterion"}, WorktreePath: t.TempDir(),
+		Status: state.StatusStopped, CurrentPhase: string(pipeline.PhaseDevelopment), CurrentSubphase: "implementation",
+		PhaseHistory: []state.PhaseRecord{{Phase: string(pipeline.PhaseAcceptanceCriteria), Status: state.StatusFinished}, {Phase: string(pipeline.PhaseDevelopment), Subphase: "implementation", Status: state.StatusStopped}},
+		Verification: &state.VerificationState{
+			PlannedSteps:           []state.VerificationStep{{Name: "tests", Command: "go", Adapter: state.VerificationAdapterGoTest}},
+			ParentBaselineCaptured: true,
+			RemediationAttempts:    state.MaxVerificationRemediationAttempts, BoundaryCursor: "final",
+		},
+	}
+	store := &persistedResumeState{project: project}
+	runner := &finiteRunner{}
+	request := resumeRequest(t, project, plan)
+	request.Subphases = pipeline.DevelopmentSubphaseGeneration{Mode: pipeline.DevelopmentSubphasesOverride, Subphases: []pipeline.DevelopmentSubphaseDefinition{{ID: "implementation", DisplayName: "Implement"}}}
+	if _, err := orchestrator.NewController(orchestrator.WithRunner(runner), orchestrator.WithPhaseState(store), orchestrator.WithPromptBuilder(fakePrompt{}), orchestrator.WithVerificationService(&boundaryVerification{})).Resume(context.Background(), orchestrator.ResumeRequest{ProjectSlug: project.Slug, RunID: request.RunID, Execution: request}); err != nil {
+		t.Fatal(err)
+	}
+	got := store.snapshot()
+	// The budget must be reset before the boundary re-runs, and the persisted
+	// cursor must survive the reset. NextAction is not asserted here because
+	// the boundary itself legitimately rewrites it once it passes.
+	if !reflect.DeepEqual(store.resetActions, []string{"resume at the persisted verification boundary with three fresh remediation attempts"}) {
+		t.Fatalf("reset actions=%v, want exactly one fresh-budget reset", store.resetActions)
+	}
+	if got.Verification.RemediationAttempts != 0 || got.Verification.BoundaryCursor != "final" {
+		t.Fatalf("verification resume state=%#v, want a fresh budget retaining the boundary", got.Verification)
 	}
 }
 

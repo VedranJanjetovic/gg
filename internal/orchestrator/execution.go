@@ -17,7 +17,9 @@ import (
 	"github.com/VedranJanjetovic/gg/internal/pipeline"
 	"github.com/VedranJanjetovic/gg/internal/pr"
 	"github.com/VedranJanjetovic/gg/internal/proof"
+	"github.com/VedranJanjetovic/gg/internal/resume"
 	"github.com/VedranJanjetovic/gg/internal/state"
+	"github.com/VedranJanjetovic/gg/internal/verification"
 )
 
 var errRebaseHasUnmergedPaths = errors.New("Rebase completed with unmerged Git paths")
@@ -57,6 +59,18 @@ type durableOrchestrationState interface {
 	UpdateQALoop(context.Context, string, int, string, []string) (state.ProjectState, error)
 	ResetQALoop(context.Context, string) (state.ProjectState, error)
 	SetRebaseConflict(context.Context, string, bool, []string) (state.ProjectState, error)
+}
+
+type verificationRepairModeState interface {
+	SetVerificationRepairMode(context.Context, string, bool) (state.ProjectState, error)
+}
+
+type verificationRemediationState interface {
+	BeginVerificationRemediation(context.Context, string, string, string) (state.ProjectState, error)
+}
+
+type verificationRemediationResetter interface {
+	ResetVerificationRemediation(context.Context, string, string) (state.ProjectState, error)
 }
 
 type durableRebaseCompletionState interface {
@@ -157,6 +171,9 @@ func WithRebaseAgent(rebaseAgent RebaseAgent) ControllerOption {
 func WithPRCILifecycleMonitor(monitor LifecycleMonitor) ControllerOption {
 	return func(c *sequentialController) { c.lifecycleMonitor = monitor }
 }
+func WithVerificationService(service VerificationService) ControllerOption {
+	return func(c *sequentialController) { c.verification = service }
+}
 
 type sequentialController struct {
 	runner             PhaseRunner
@@ -172,6 +189,7 @@ type sequentialController struct {
 	pullRequests       PullRequestService
 	checks             CIService
 	lifecycleMonitor   LifecycleMonitor
+	verification       VerificationService
 	mu                 sync.Mutex
 	active             map[string]context.CancelFunc
 	requests           map[string]Request
@@ -254,6 +272,16 @@ func (c *sequentialController) execute(ctx context.Context, request Request, res
 		go c.watchDurableStop(ctx, cancel, durable, request.Project.Slug, runID, stopWatchDone)
 		defer func() { cancel(); <-stopWatchDone }()
 	}
+	if request.RepairExistingVerification && request.Project.Verification != nil {
+		if repairer, ok := c.state.(verificationRepairModeState); ok {
+			updated, err := repairer.SetVerificationRepairMode(ctx, request.Project.Slug, true)
+			if err != nil {
+				cancel()
+				return nil, fmt.Errorf("persist explicit verification repair mode: %w", err)
+			}
+			request.Project = updated
+		}
+	}
 	if durable, ok := c.state.(durableOrchestrationState); ok {
 		if err := durable.ConfigureOrchestration(ctx, request.Project.Slug, maxAttempts); err != nil {
 			cancel()
@@ -264,6 +292,9 @@ func (c *sequentialController) execute(ctx context.Context, request Request, res
 
 	outcomes = make([]PhaseOutcome, 0, len(request.Pipeline.Phases()))
 	if finalizeOnly {
+		if err := c.verifyFinalBoundaryWithRemediation(context.WithoutCancel(ctx), &request, &outcomes); err != nil {
+			return outcomes, err
+		}
 		if err := c.finalizeProject(context.WithoutCancel(ctx), request.Project.Slug); err != nil {
 			return outcomes, err
 		}
@@ -387,6 +418,9 @@ func (c *sequentialController) execute(ctx context.Context, request Request, res
 		monitor = c.lifecycleMonitor
 	}
 	if monitor != nil && request.PullRequestURL != "" {
+		if err := c.verifyFinalBoundaryWithRemediation(context.WithoutCancel(ctx), &request, &outcomes); err != nil {
+			return outcomes, err
+		}
 		monitorResult, err := monitor.Monitor(context.WithoutCancel(ctx), PRCIRequest{ProjectSlug: request.Project.Slug, PullRequestURL: request.PullRequestURL, MaxPolls: maxAttempts})
 		if err != nil {
 			return outcomes, err
@@ -401,6 +435,9 @@ func (c *sequentialController) execute(ctx context.Context, request Request, res
 		// monitor has already persisted its cursor and idempotence state; only
 		// a merged result is allowed to finish the project.
 		return outcomes, nil
+	}
+	if err := c.verifyFinalBoundaryWithRemediation(context.WithoutCancel(ctx), &request, &outcomes); err != nil {
+		return outcomes, err
 	}
 	if err := c.finalizeProject(context.WithoutCancel(ctx), request.Project.Slug); err != nil {
 		return outcomes, err
@@ -427,6 +464,9 @@ func (c *sequentialController) closeFailedRun(slug string, cause error) error {
 		return cause
 	}
 	target := state.StatusFailed
+	if isVerificationPause(cause) {
+		target = state.StatusStopped
+	}
 	if isCancellation(cause) {
 		target = state.StatusStopped
 	}
@@ -836,6 +876,18 @@ func (c *sequentialController) retryCIFailure(ctx context.Context, request *Requ
 // every plan phase is already complete, one worktree-wide subphase pass runs
 // (the shape QA feedback fix passes use).
 func (c *sequentialController) executeDevelopmentLoop(ctx context.Context, request *Request, executable pipeline.ExecutablePhase, resumePhase, resumeSubphase string) ([]PhaseOutcome, error) {
+	if loader, ok := c.state.(interface {
+		Load(context.Context, string) (state.ProjectState, error)
+	}); ok {
+		project, loadErr := loader.Load(context.WithoutCancel(ctx), request.Project.Slug)
+		if loadErr != nil {
+			return nil, fmt.Errorf("load Development verification state: %w", loadErr)
+		}
+		request.Project = project
+	}
+	if err := c.ensureVerificationBaseline(context.WithoutCancel(ctx), request); err != nil {
+		return nil, err
+	}
 	subphases, err := c.subphases(pipeline.PhaseDevelopment, request.Subphases)
 	if err != nil {
 		return nil, fmt.Errorf("generate development subphases: %w", err)
@@ -845,7 +897,7 @@ func (c *sequentialController) executeDevelopmentLoop(ctx context.Context, reque
 		skipUntil = resumeSubphase
 	}
 	var outcomes []PhaseOutcome
-	runSequence := func(scope *PlanPhaseScope) error {
+	runSequence := func(scope *PlanPhaseScope, iteration int, feedback []string) error {
 		for _, subphase := range subphases {
 			if skipUntil != "" {
 				if subphase != skipUntil {
@@ -858,7 +910,7 @@ func (c *sequentialController) executeDevelopmentLoop(ctx context.Context, reque
 			}
 			scoped := *request
 			scoped.PlanScope = scope
-			outcome, err := c.executePhase(ctx, scoped, executable, subphase, 0, nil)
+			outcome, err := c.executePhase(ctx, scoped, executable, subphase, iteration, feedback)
 			outcomes = append(outcomes, outcome)
 			request.Project.ArtifactPaths = appendUnique(request.Project.ArtifactPaths, outcome.Result.ArtifactPaths...)
 			if err != nil {
@@ -869,12 +921,17 @@ func (c *sequentialController) executeDevelopmentLoop(ctx context.Context, reque
 	}
 	pending, total := c.pendingPlanPhases(ctx, request.Project.Slug)
 	if len(pending) == 0 {
-		return outcomes, runSequence(nil)
+		return outcomes, runSequence(nil, 0, nil)
 	}
 	completed := total - len(pending)
 	for index, name := range pending {
 		scope := &PlanPhaseScope{Name: name, Index: completed + index + 1, Total: total}
-		if err := runSequence(scope); err != nil {
+		if err := runSequence(scope, 0, nil); err != nil {
+			return outcomes, err
+		}
+		if err := c.verifyBoundaryWithRemediation(context.WithoutCancel(ctx), request, name, func(attempt int, feedback []string) error {
+			return runSequence(scope, attempt, feedback)
+		}); err != nil {
 			return outcomes, err
 		}
 		if recorder, ok := c.state.(planStateRecorder); ok {
@@ -919,6 +976,176 @@ func (c *sequentialController) executePlanningLoop(ctx context.Context, request 
 	return outcomes, errors.New("phase-limit-exceeded: Planning attempts exhausted")
 }
 
+// verifyBoundaryWithRemediation keeps the full verification set as the only
+// success gate. A regression gets a bounded Development sequence, then the
+// same boundary is rerun; no plan phase is marked complete until this method
+// returns nil.
+func (c *sequentialController) verifyBoundaryWithRemediation(ctx context.Context, request *Request, cursor string, dispatch func(int, []string) error) error {
+	err := c.verifyBoundary(ctx, request, cursor)
+	if err == nil {
+		return nil
+	}
+	var failure *verificationBoundaryError
+	if !errors.As(err, &failure) || !remediableVerificationBoundary(failure.report) {
+		return err
+	}
+	return c.remediateVerificationBoundary(ctx, request, cursor, failure, dispatch)
+}
+
+func remediableVerificationBoundary(report verification.BoundaryReport) bool {
+	if !report.Blocked || len(report.Findings) == 0 {
+		return false
+	}
+	for _, finding := range report.Findings {
+		switch finding.Classification {
+		case verification.ClassificationUnavailable, verification.ClassificationUnclassifiable:
+			return false
+		}
+	}
+	return true
+}
+
+func (c *sequentialController) remediateVerificationBoundary(ctx context.Context, request *Request, cursor string, failure *verificationBoundaryError, dispatch func(int, []string) error) error {
+	if request == nil || request.Project.Verification == nil {
+		return failure
+	}
+	verificationState := request.Project.Verification
+	for {
+		if verificationState.RemediationAttempts >= state.MaxVerificationRemediationAttempts {
+			action := fmt.Sprintf("resolve the verification regression at %s, then manually resume for three fresh remediation attempts", cursor)
+			if err := c.persistVerificationAction(ctx, request, action); err != nil {
+				return errors.Join(failure, err)
+			}
+			return &verificationPauseError{cause: fmt.Errorf("verification remediation exhausted at %s after %d attempt(s): %w", cursor, verificationState.RemediationAttempts, failure)}
+		}
+
+		attempt := verificationState.RemediationAttempts + 1
+		nextAction := fmt.Sprintf("run Development remediation attempt %d of %d for %s", attempt, state.MaxVerificationRemediationAttempts, cursor)
+		updated, err := c.beginVerificationRemediation(ctx, request, cursor, nextAction)
+		if err != nil {
+			return fmt.Errorf("persist verification remediation attempt %d: %w", attempt, err)
+		}
+		request.Project = updated
+		verificationState = request.Project.Verification
+
+		artifact, err := writeVerificationRemediationArtifact(*request, cursor, attempt, failure)
+		if err != nil {
+			return fmt.Errorf("write verification remediation evidence: %w", err)
+		}
+		if err := dispatch(attempt, []string{artifact}); err != nil {
+			return err
+		}
+
+		err = c.verifyBoundary(ctx, request, cursor)
+		if err == nil {
+			updated, resetErr := c.resetVerificationRemediation(ctx, request, "continue")
+			if resetErr != nil {
+				return fmt.Errorf("reset verification remediation budget: %w", resetErr)
+			}
+			request.Project = updated
+			return nil
+		}
+		var nextFailure *verificationBoundaryError
+		if !errors.As(err, &nextFailure) || !remediableVerificationBoundary(nextFailure.report) {
+			return err
+		}
+		failure = nextFailure
+		verificationState = request.Project.Verification
+	}
+}
+
+func (c *sequentialController) beginVerificationRemediation(ctx context.Context, request *Request, boundary, nextAction string) (state.ProjectState, error) {
+	if durable, ok := c.state.(verificationRemediationState); ok {
+		return durable.BeginVerificationRemediation(ctx, request.Project.Slug, boundary, nextAction)
+	}
+	reporter, ok := c.state.(verificationReportState)
+	if !ok || request.Project.Verification == nil {
+		return state.ProjectState{}, errors.New("phase state cannot persist verification remediation attempts")
+	}
+	verificationState := request.Project.Verification
+	attempt := verificationState.RemediationAttempts + 1
+	return reporter.RecordVerificationResultReport(ctx, request.Project.Slug, verificationState.CurrentResults, verificationState.CurrentFindings, verificationState.Warnings, boundary, attempt, nextAction)
+}
+
+func (c *sequentialController) resetVerificationRemediation(ctx context.Context, request *Request, nextAction string) (state.ProjectState, error) {
+	if durable, ok := c.state.(verificationRemediationResetter); ok {
+		return durable.ResetVerificationRemediation(ctx, request.Project.Slug, nextAction)
+	}
+	reporter, ok := c.state.(verificationReportState)
+	if !ok || request.Project.Verification == nil {
+		return state.ProjectState{}, errors.New("phase state cannot reset verification remediation attempts")
+	}
+	verificationState := request.Project.Verification
+	return reporter.RecordVerificationResultReport(ctx, request.Project.Slug, verificationState.CurrentResults, verificationState.CurrentFindings, verificationState.Warnings, verificationState.BoundaryCursor, 0, nextAction)
+}
+
+func (c *sequentialController) persistVerificationAction(ctx context.Context, request *Request, action string) error {
+	reporter, ok := c.state.(verificationReportState)
+	if !ok || request.Project.Verification == nil {
+		return errors.New("phase state cannot persist verification remediation action")
+	}
+	verificationState := request.Project.Verification
+	updated, err := reporter.RecordVerificationResultReport(ctx, request.Project.Slug, verificationState.CurrentResults, verificationState.CurrentFindings, verificationState.Warnings, verificationState.BoundaryCursor, verificationState.RemediationAttempts, action)
+	if err == nil {
+		request.Project = updated
+	}
+	return err
+}
+
+func writeVerificationRemediationArtifact(request Request, cursor string, attempt int, failure *verificationBoundaryError) (string, error) {
+	var content strings.Builder
+	fmt.Fprintf(&content, "# Verification remediation\n\n- Boundary: %s\n- Attempt: %d\n\n## Structured findings\n", cursor, attempt)
+	for _, finding := range failure.report.Findings {
+		command, args, logPath := finding.Key.CheckName, "", finding.LogPath
+		for _, result := range failure.current.Results {
+			if result.StepName == finding.Key.CheckName {
+				command = result.Command
+				args = strings.Join(result.Args, " ")
+				if logPath == "" {
+					logPath = result.LogPath
+				}
+				break
+			}
+		}
+		fmt.Fprintf(&content, "- check: %s\n  command: %s\n  args: %s\n  identity: %s\n  reason: %s\n  classification: %s\n  log: %s\n", finding.Key.CheckName, command, args, finding.Key.Identity, finding.Reason, finding.Classification, logPath)
+	}
+	name := strings.NewReplacer("/", "-", "\\", "-", " ", "-").Replace(cursor)
+	return writeGitOpsArtifact(request, fmt.Sprintf("verification-remediation-%s-%d.md", name, attempt), content.String())
+}
+
+func (c *sequentialController) verifyFinalBoundaryWithRemediation(ctx context.Context, request *Request, outcomes *[]PhaseOutcome) error {
+	err := c.verifyFinalBoundary(ctx, request)
+	if err == nil {
+		return nil
+	}
+	var failure *verificationBoundaryError
+	if !errors.As(err, &failure) || !remediableVerificationBoundary(failure.report) {
+		return err
+	}
+	development, ok := developmentExecutable(request.Pipeline)
+	if !ok {
+		return err
+	}
+	subphases, subphaseErr := c.subphases(pipeline.PhaseDevelopment, request.Subphases)
+	if subphaseErr != nil {
+		return subphaseErr
+	}
+	dispatch := func(attempt int, feedback []string) error {
+		for _, subphase := range subphases {
+			scoped := *request
+			scoped.PlanScope = nil
+			outcome, runErr := c.executePhase(ctx, scoped, development, subphase, attempt, feedback)
+			*outcomes = append(*outcomes, outcome)
+			request.Project.ArtifactPaths = appendUnique(request.Project.ArtifactPaths, outcome.Result.ArtifactPaths...)
+			if runErr != nil {
+				return runErr
+			}
+		}
+		return nil
+	}
+	return c.remediateVerificationBoundary(ctx, request, "final", failure, dispatch)
+}
+
 // pendingPlanPhases returns the plan phases not yet completed, freshly loaded
 // from durable state (planning records the plan earlier in the same run).
 func (c *sequentialController) pendingPlanPhases(ctx context.Context, slug string) (pending []string, total int) {
@@ -952,7 +1179,7 @@ func (c *sequentialController) executePhase(ctx context.Context, request Request
 	}
 	artifacts := appendUnique(request.Project.ArtifactPaths, feedback...)
 	invocationID := phaseInvocationID(request.RunID, phase, subphase, iteration)
-	promptInput := agent.PromptInput{Project: request.Project, Phase: phase, Subphase: subphase, PhaseContract: request.PhaseContracts[phase], ArtifactPaths: artifacts, WorkingDirectory: request.Project.WorktreePath, RunID: invocationID, Development: phase == pipeline.PhaseDevelopment}
+	promptInput := agent.PromptInput{Project: request.Project, Phase: phase, Subphase: subphase, PhaseContract: request.PhaseContracts[phase], ArtifactPaths: artifacts, WorkingDirectory: request.Project.WorktreePath, RunID: invocationID, Development: phase == pipeline.PhaseDevelopment, RepairExistingVerification: request.RepairExistingVerification}
 	if phase == pipeline.PhaseDevelopment && subphase == string(pipeline.DevelopmentSubphaseReview) {
 		promptInput.SkippedTestingEvidence = skippedTestingEvidence(request.Project)
 	}
@@ -1015,10 +1242,35 @@ func (c *sequentialController) executePhase(ctx context.Context, request Request
 	if !gitOpsHandled {
 		commitChecks = phase == pipeline.PhaseDevelopment && c.developmentCommits != nil && !request.AllowDevelopmentSubphaseWithoutCommit && !request.Project.GitDisabled
 		if commitChecks {
+			changes, inspectErr := c.developmentCommits.InspectDevelopmentWorktree(ctx, request.Project.WorktreePath)
+			if inspectErr != nil {
+				runResult = agent.RunResult{Phase: phase, Subphase: subphase, Status: state.StatusStopped}
+				return c.finishFailedPhase(context.Background(), request, phase, subphase, runResult, fmt.Errorf("inspect Development worktree ownership before %q/%q: %w", phase, subphase, inspectErr), iteration, feedback)
+			}
+			if len(changes) > 0 {
+				paths := make([]string, 0, len(changes))
+				for _, change := range changes {
+					path := change.Path
+					if change.OriginalPath != "" {
+						path = change.OriginalPath + " -> " + path
+					}
+					paths = append(paths, path)
+				}
+				runResult = agent.RunResult{Phase: phase, Subphase: subphase, Status: state.StatusStopped}
+				return c.finishFailedPhase(context.Background(), request, phase, subphase, runResult, fmt.Errorf("Development worktree has pre-existing changes; preserve and resolve before dispatch: %s", strings.Join(paths, ", ")), iteration, feedback)
+			}
 			previousHead, runErr = c.developmentCommits.HeadCommit(ctx, request.Project.WorktreePath)
 			if runErr != nil {
 				runResult = agent.RunResult{Phase: phase, Subphase: subphase, Status: state.StatusFailed}
 				return c.finishFailedPhase(ctx, request, phase, subphase, runResult, runErr, iteration, feedback, previousHead)
+			}
+			// Persist the ownership base before the dispatch claim and agent launch.
+			// If the process dies after this point, resume can verify any commits
+			// left by the interrupted subphase instead of treating them as unrelated
+			// work or silently replacing the ownership boundary.
+			if checkpointErr := c.persistDevelopmentOwnership(context.WithoutCancel(ctx), request.Project.Slug, phase, subphase, previousHead); checkpointErr != nil {
+				runResult = agent.RunResult{Phase: phase, Subphase: subphase, Status: state.StatusFailed}
+				return c.finishFailedPhase(context.WithoutCancel(ctx), request, phase, subphase, runResult, checkpointErr, iteration, feedback, previousHead)
 			}
 		}
 		if durable, ok := c.state.(durableDispatchState); ok {
@@ -1050,8 +1302,7 @@ func (c *sequentialController) executePhase(ctx context.Context, request Request
 		}
 	}
 	if commitChecks && dispatched {
-		requireCommit := runErr == nil && runResult.Status != state.StatusFailed && runResult.Status != state.StatusStopped
-		if requireCommit {
+		if runErr == nil && runResult.Status != state.StatusFailed && runResult.Status != state.StatusStopped {
 			// Preserve work the agent finished but forgot to commit instead
 			// of failing an otherwise successful subphase.
 			if commitErr := c.developmentCommits.AutoCommitUncommittedChanges(
@@ -1061,16 +1312,27 @@ func (c *sequentialController) executePhase(ctx context.Context, request Request
 			); commitErr != nil {
 				runErr = errors.Join(runErr, fmt.Errorf("auto-commit development changes for %q/%q: %w", phase, subphase, commitErr))
 				runResult.Status = state.StatusFailed
-				requireCommit = false
 			}
 		}
+		// A clean successful subphase is valid: ancestry and signature checks
+		// still run, but a subphase is not required to create an empty commit.
 		if verifyErr := c.developmentCommits.VerifyUnsignedDevelopmentCommits(
 			context.WithoutCancel(ctx),
 			request.Project.WorktreePath,
 			previousHead,
-			requireCommit,
+			false,
 		); verifyErr != nil {
 			runErr = errors.Join(runErr, fmt.Errorf("verify unsigned development commits for %q/%q: %w", phase, subphase, verifyErr))
+			runResult.Status = state.StatusFailed
+		}
+	}
+	if dispatched && (phase == pipeline.PhasePlanning || (phase == pipeline.PhaseDevelopment && request.PlanScope == nil)) {
+		// Scoped development runs are excluded: their plan-phase completion is
+		// orchestrator-owned (recorded after the phase's review passes), and an
+		// agent-reported early completion must not skip that phase's testing or
+		// review on resume.
+		if progressErr := c.recordPlanProgress(context.WithoutCancel(ctx), request, phase); progressErr != nil {
+			runErr = progressErr
 			runResult.Status = state.StatusFailed
 		}
 	}
@@ -1516,20 +1778,44 @@ type planStateRecorder interface {
 	RecordPlan(context.Context, string, []string, []string) (state.ProjectState, error)
 }
 
+type verificationContractRecorder interface {
+	SetVerificationContract(context.Context, string, state.VerificationContract, state.PipelineConfigSnapshot) (state.ProjectState, error)
+}
+
 // recordPlanProgress mirrors the plan-tracking frontmatter of the phase's
 // canonical artifact into project state so the attach view can show which
 // plan phases are done. It is best-effort display data: parsing or
 // persistence problems must never affect the phase outcome.
-func (c *sequentialController) recordPlanProgress(ctx context.Context, request Request, phase pipeline.PhaseID) {
+func (c *sequentialController) recordPlanProgress(ctx context.Context, request Request, phase pipeline.PhaseID) error {
+	if phase == pipeline.PhasePlanning {
+		if recorder, ok := c.state.(verificationContractRecorder); ok {
+			contract, err := agent.ReadVerificationContract(request.Project.WorktreePath)
+			if err != nil {
+				return fmt.Errorf("Planning must declare a valid executable verification contract; rerun Planning before Development: %w", err)
+			}
+			snapshot, err := pipeline.SnapshotExecutionWithVerification(request.Pipeline, request.Subphases, request.MaxIterations, contract, request.GitOps)
+			if err != nil {
+				return fmt.Errorf("persist Planning verification contract snapshot: %w", err)
+			}
+			updated, err := recorder.SetVerificationContract(ctx, request.Project.Slug, contract, snapshot)
+			if err != nil {
+				return fmt.Errorf("persist Planning verification contract: %w", err)
+			}
+			request.Project = updated
+		}
+	}
 	recorder, ok := c.state.(planStateRecorder)
 	if !ok {
-		return
+		return nil
 	}
 	phases, completed := agent.ReadPlanFrontmatter(request.Project.WorktreePath, phase)
 	if len(phases) == 0 && len(completed) == 0 {
-		return
+		return nil
 	}
-	_, _ = recorder.RecordPlan(ctx, request.Project.Slug, phases, completed)
+	if _, err := recorder.RecordPlan(ctx, request.Project.Slug, phases, completed); err != nil {
+		return fmt.Errorf("persist plan progress: %w", err)
+	}
+	return nil
 }
 
 func (c *sequentialController) recordResult(ctx context.Context, slug string, phase pipeline.PhaseID, subphase string, result agent.RunResult, status state.LifecycleStatus, developmentBaseCommit ...string) error {
@@ -1810,6 +2096,11 @@ func (c *sequentialController) Resume(ctx context.Context, request ResumeRequest
 	if err != nil {
 		return nil, fmt.Errorf("load project for resume: %w", err)
 	}
+	projectSlug := project.Slug
+	project, err = resume.Prepare(ctx, project, c.state)
+	if err != nil {
+		return nil, fmt.Errorf("prepare project %q for resume: %w", projectSlug, err)
+	}
 	reactivatedFinished := false
 	if project.Status.IsTerminal() {
 		if project.Status == state.StatusFinished && project.Terminal != nil && project.Terminal.Kind == state.TerminalPullRequestMerged {
@@ -1846,6 +2137,16 @@ func (c *sequentialController) Resume(ctx context.Context, request ResumeRequest
 	}
 	if project.QALoopStage == "exhausted" || (project.MaxQAAttempts > 0 && project.QACompletedAttempts >= project.MaxQAAttempts) {
 		return nil, fmt.Errorf("cannot resume project %q: QA feedback loop exhausted after %d attempt(s)", project.Slug, project.QACompletedAttempts)
+	}
+	if project.Verification != nil &&
+		project.Verification.RemediationAttempts >= state.MaxVerificationRemediationAttempts &&
+		strings.TrimSpace(project.Verification.BoundaryCursor) != "" {
+		if resetter, ok := c.state.(verificationRemediationResetter); ok {
+			project, err = resetter.ResetVerificationRemediation(ctx, project.Slug, "resume at the persisted verification boundary with three fresh remediation attempts")
+			if err != nil {
+				return nil, fmt.Errorf("reset verification remediation budget for resume: %w", err)
+			}
+		}
 	}
 	_, qaEnabled := qaExecutable(execution.Pipeline)
 	if (project.QALoopStage != "" || project.QACompletedAttempts > 0) && !qaEnabled {
@@ -1928,7 +2229,7 @@ func (c *sequentialController) verifyInterruptedDevelopment(ctx context.Context,
 		if record.Phase != string(pipeline.PhaseDevelopment) {
 			break
 		}
-		if (record.Status == state.StatusFailed || record.Status == state.StatusStopped) &&
+		if (record.Status == state.StatusRunning || record.Status == state.StatusFailed || record.Status == state.StatusStopped) &&
 			record.Outcome != nil &&
 			record.Outcome.DevelopmentBaseCommit != "" {
 			interrupted = record
@@ -1953,6 +2254,19 @@ func (c *sequentialController) verifyInterruptedDevelopment(ctx context.Context,
 			interrupted.Outcome.DevelopmentBaseCommit,
 			err,
 		)
+	}
+	return nil
+}
+
+func (c *sequentialController) persistDevelopmentOwnership(ctx context.Context, slug string, phase pipeline.PhaseID, subphase, baseCommit string) error {
+	if strings.TrimSpace(baseCommit) == "" {
+		return errors.New("development ownership checkpoint requires a base commit")
+	}
+	_, err := c.state.RecordPhase(ctx, slug, string(phase), subphase, state.StatusRunning, &state.ExecutionOutcome{
+		DevelopmentBaseCommit: baseCommit,
+	}, nil)
+	if err != nil {
+		return fmt.Errorf("persist Development ownership checkpoint: %w", err)
 	}
 	return nil
 }
