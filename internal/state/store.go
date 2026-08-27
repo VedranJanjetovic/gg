@@ -9,6 +9,8 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+
+	"github.com/VedranJanjetovic/gg/internal/robustio"
 )
 
 var (
@@ -318,7 +320,7 @@ func atomicReplace(ctx context.Context, path string, document []byte) (err error
 	if err = temporary.Close(); err != nil {
 		return fmt.Errorf("close temporary state file: %w", err)
 	}
-	if err = os.Rename(temporaryPath, path); err != nil {
+	if err = robustio.Rename(temporaryPath, path); err != nil {
 		return fmt.Errorf("replace state file: %w", err)
 	}
 	if directory, syncErr := os.Open(filepath.Dir(path)); syncErr == nil {
