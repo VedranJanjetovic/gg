@@ -4,19 +4,34 @@ import (
 	"context"
 	"errors"
 	"io"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 )
 
+// trustedInstallerPath returns the configured installer path in the host's own
+// absolute form. installer.go validates with filepath.IsAbs, which is the host
+// implementation, while the unix argv shape under test comes from the injected
+// platform field and stays assertable from any host.
+func trustedInstallerPath(t *testing.T) string {
+	t.Helper()
+	path, err := filepath.Abs("/trusted/gg-tool/install.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
 func TestPlatformInstallerUsesExplicitUnixArgvAndConfiguredPath(t *testing.T) {
 	var gotName string
 	var gotArgs []string
+	installerPath := trustedInstallerPath(t)
 	runner := &PlatformInstaller{
 		platform: "linux",
 		env: func(key string) string {
 			if key == InstallerPathEnv {
-				return "/trusted/gg-tool/install.sh"
+				return installerPath
 			}
 			return ""
 		},
@@ -28,7 +43,7 @@ func TestPlatformInstallerUsesExplicitUnixArgvAndConfiguredPath(t *testing.T) {
 	if err := runner.Install(context.Background(), "1.3.0", []string{"--version", "1.3.0"}); err != nil {
 		t.Fatal(err)
 	}
-	if gotName != "bash" || !reflect.DeepEqual(gotArgs, []string{"/trusted/gg-tool/install.sh", "--version", "1.3.0"}) {
+	if gotName != "bash" || !reflect.DeepEqual(gotArgs, []string{installerPath, "--version", "1.3.0"}) {
 		t.Fatalf("command=%q args=%v", gotName, gotArgs)
 	}
 }
@@ -45,7 +60,8 @@ func TestPlatformInstallerCancellationPreventsProcess(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	called := false
-	runner := &PlatformInstaller{platform: "linux", env: func(string) string { return "/trusted/install.sh" }, run: func(context.Context, string, []string, io.Writer) error {
+	installerPath := trustedInstallerPath(t)
+	runner := &PlatformInstaller{platform: "linux", env: func(string) string { return installerPath }, run: func(context.Context, string, []string, io.Writer) error {
 		called = true
 		return errors.New("must not run")
 	}}

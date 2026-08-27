@@ -58,7 +58,8 @@ func (f *ExecProcessFactory) Start(ctx context.Context, spec ProcessSpec) (Proce
 	cmd := exec.Command(spec.Command, spec.Args...)
 	cmd.Dir = worktree
 	cmd.Env = env
-	configureProcessGroup(cmd)
+	group := newProcessGroup()
+	group.configure(cmd)
 	stdoutReader, stdoutWriter, err := os.Pipe()
 	if err != nil {
 		return nil, fmt.Errorf("create stdout pipe: %w", err)
@@ -87,6 +88,17 @@ func (f *ExecProcessFactory) Start(ctx context.Context, spec ProcessSpec) (Proce
 		_ = stderrWriter.Close()
 		return nil, fmt.Errorf("start process: %w", err)
 	}
+	// A child that cannot be put in its process group is unstoppable, which is
+	// worse than a failed start: kill it and report the failure instead.
+	if err := group.attach(cmd); err != nil {
+		_ = cmd.Process.Kill()
+		_ = stdoutReader.Close()
+		_ = stdoutWriter.Close()
+		_ = stderrReader.Close()
+		_ = stderrWriter.Close()
+		_ = cmd.Wait()
+		return nil, fmt.Errorf("attach process group: %w", err)
+	}
 	_ = stdoutWriter.Close()
 	_ = stderrWriter.Close()
 
@@ -97,7 +109,7 @@ func (f *ExecProcessFactory) Start(ctx context.Context, spec ProcessSpec) (Proce
 	if spec.Logs != nil {
 		logs = spec.Logs
 	}
-	p := &execProcess{cmd: cmd, ctx: ctx, events: events, logs: logs, now: f.now, start: f.now(), pid: cmd.Process.Pid, done: make(chan struct{}), waitFinished: make(chan struct{}), cancelDone: make(chan struct{})}
+	p := &execProcess{cmd: cmd, ctx: ctx, events: events, logs: logs, now: f.now, start: f.now(), group: group, done: make(chan struct{}), waitFinished: make(chan struct{}), cancelDone: make(chan struct{})}
 	p.outputWG.Add(2)
 	go p.drain("stdout", stdoutReader)
 	go p.drain("stderr", stderrReader)
@@ -118,7 +130,7 @@ type execProcess struct {
 	logs         RawLogWriter
 	now          func() time.Time
 	start        time.Time
-	pid          int
+	group        *processGroup
 	done         chan struct{}
 	waitFinished chan struct{}
 
@@ -189,6 +201,9 @@ func (p *execProcess) Wait() (ProcessResult, error) {
 			_ = p.Cancel()
 			p.waitErr = errors.Join(p.waitErr, p.ctx.Err())
 		}
+		// Safe only here: the tree is gone, so releasing platform resources
+		// cannot take a live descendant down with it.
+		p.group.release()
 		close(p.done)
 	})
 	<-p.waitFinished
@@ -197,7 +212,7 @@ func (p *execProcess) Wait() (ProcessResult, error) {
 
 func (p *execProcess) Cancel() error {
 	p.cancelOnce.Do(func() {
-		err := terminateProcessGroup(p.pid)
+		err := p.group.terminate()
 		if err != nil {
 			err = fmt.Errorf("cancel process group: %w", err)
 		}

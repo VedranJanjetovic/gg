@@ -1,12 +1,15 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"errors"
-	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"reflect"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -63,34 +66,74 @@ func TestLaunchActionsReturnActionableConfigurationAndLaunchErrors(t *testing.T)
 	}
 }
 
+// launchChildEnv marks the re-executed test binary as the child process spawned
+// by TestExecCommandLauncherReapsStartedProcess.
+const launchChildEnv = "GG_TEST_LAUNCH_CHILD"
+
+// TestLaunchedChildProcess is not a test: it is the portable child process for
+// TestExecCommandLauncherReapsStartedProcess. It exits non-zero so the
+// launcher's Wait goroutine has something to report once it reaps the child.
+func TestLaunchedChildProcess(t *testing.T) {
+	if os.Getenv(launchChildEnv) != "1" {
+		t.Skip("helper process for TestExecCommandLauncherReapsStartedProcess")
+	}
+	os.Exit(7)
+}
+
+// lockedBuffer collects log output written by the launcher goroutine while the
+// test polls it.
+type lockedBuffer struct {
+	mu   sync.Mutex
+	data bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.data.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.data.String()
+}
+
 func TestExecCommandLauncherReapsStartedProcess(t *testing.T) {
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
 	previousCommandContext := commandContext
 	var started *exec.Cmd
 	commandContext = func(ctx context.Context, executable string, args ...string) *exec.Cmd {
 		started = exec.CommandContext(ctx, executable, args...)
+		started.Env = append(os.Environ(), launchChildEnv+"=1")
 		return started
 	}
 	t.Cleanup(func() { commandContext = previousCommandContext })
 
-	if err := (ExecCommandLauncher{}).Launch(context.Background(), "/bin/sh", []string{"-c", "exit 0"}, t.TempDir()); err != nil {
+	// The launcher reaps the child in a goroutine whose only observable signal
+	// on every platform is the log line it writes once Wait returns. Windows
+	// has no zombies and macOS has no /proc, so process-table probing cannot
+	// express this property portably.
+	logs := &lockedBuffer{}
+	previousWriter, previousFlags := log.Writer(), log.Flags()
+	log.SetOutput(logs)
+	log.SetFlags(0)
+	t.Cleanup(func() { log.SetOutput(previousWriter); log.SetFlags(previousFlags) })
+
+	if err := (ExecCommandLauncher{}).Launch(context.Background(), self, []string{"-test.run=TestLaunchedChildProcess"}, t.TempDir()); err != nil {
 		t.Fatalf("Launch() error = %v", err)
 	}
 	if started == nil || started.Process == nil {
 		t.Fatal("Launch() did not expose a started process")
 	}
 
-	procPath := fmt.Sprintf("/proc/%d", started.Process.Pid)
-	deadline := time.Now().Add(2 * time.Second)
-	for {
-		_, err := os.Stat(procPath)
-		if os.IsNotExist(err) {
-			return
-		}
-		if err != nil {
-			t.Fatalf("stat child process: %v", err)
-		}
+	deadline := time.Now().Add(30 * time.Second)
+	for !strings.Contains(logs.String(), "wait for launched") {
 		if time.Now().After(deadline) {
-			t.Fatalf("child process %d was not reaped", started.Process.Pid)
+			t.Fatalf("child process %d was not reaped; log = %q", started.Process.Pid, logs.String())
 		}
 		time.Sleep(10 * time.Millisecond)
 	}

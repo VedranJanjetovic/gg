@@ -19,6 +19,7 @@ import (
 	"github.com/VedranJanjetovic/gg/internal/pipeline"
 	"github.com/VedranJanjetovic/gg/internal/pr"
 	"github.com/VedranJanjetovic/gg/internal/state"
+	"github.com/VedranJanjetovic/gg/testdata/fakeagent"
 )
 
 type fakeSeqRunner struct {
@@ -331,20 +332,13 @@ func TestExecuteBuildsValidAgentRequestsForMandatoryPhasesAndPreservesOverrides(
 func TestProductionAgentRunnerDiscoversAndPropagatesCanonicalArtifacts(t *testing.T) {
 	stateRoot := t.TempDir()
 	worktree := t.TempDir()
-	script := filepath.Join(t.TempDir(), "fake-agent")
-	body := `#!/bin/sh
-printf '%s\n' "$*"
-artifact=
-case "$*" in
-  *test_document*) artifact=test-document.md ;;
-  *rebase*) artifact=rebase-report.md ;;
-  *development*) artifact=development.md ;;
-  *acceptance_criteria*) artifact=acceptance-criteria.md ;;
-esac
-run_id=$(printf '%s\n' "$*" | sed -n 's/^gg_run_id: "\(.*\)"$/\1/p' | head -n 1)
-printf '%s\n' '---' "gg_run_id: \"$run_id\"" 'gg_disposition: passed' '---' 'phase evidence' > ".gg/$artifact"
-`
-	if err := os.WriteFile(script, []byte(body), 0o700); err != nil {
+	script, err := fakeagent.Install(t.TempDir(), "fake-agent", fakeagent.Spec{
+		Stdout: "${PROMPT}\n",
+		Files: map[string]string{
+			"${PHASE_ARTIFACT}": "---\ngg_run_id: \"${RUN_ID}\"\ngg_disposition: passed\n---\nphase evidence\n",
+		},
+	})
+	if err != nil {
 		t.Fatal(err)
 	}
 	store, err := state.NewFileStore(stateRoot)

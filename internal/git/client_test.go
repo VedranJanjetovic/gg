@@ -29,17 +29,21 @@ func (f *fakeExecutor) Execute(ctx context.Context, command git.Command) (string
 }
 
 func TestRepositoryRootValidatesAndReturnsGitRoot(t *testing.T) {
-	executor := &fakeExecutor{output: "/repo\n"}
-	client := git.NewClient("/repo/project", executor)
+	repoRoot := git.NativeAbs(t, "repo")
+	project := git.NativeAbs(t, "repo", "project")
+	// git prints forward-slash paths on every platform ("D:/repo" on Windows);
+	// RepositoryRoot is what converts that into the native spelling.
+	executor := &fakeExecutor{output: filepath.ToSlash(repoRoot) + "\n"}
+	client := git.NewClient(project, executor)
 
 	root, err := client.RepositoryRoot(context.Background())
 	if err != nil {
 		t.Fatalf("RepositoryRoot() error = %v", err)
 	}
-	if root != "/repo" {
-		t.Fatalf("RepositoryRoot() = %q, want /repo", root)
+	if root != repoRoot {
+		t.Fatalf("RepositoryRoot() = %q, want %q", root, repoRoot)
 	}
-	want := git.Command{Dir: "/repo/project", Name: "git", Args: []string{"rev-parse", "--show-toplevel"}}
+	want := git.Command{Dir: project, Name: "git", Args: []string{"rev-parse", "--show-toplevel"}}
 	if !reflect.DeepEqual(executor.commands, []git.Command{want}) {
 		t.Fatalf("commands = %#v, want %#v", executor.commands, []git.Command{want})
 	}
@@ -61,8 +65,9 @@ func TestRepositoryRootRejectsNonGitDirectory(t *testing.T) {
 func TestRepositoryRootPropagatesContextCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	executor := &fakeExecutor{output: "/repo"}
-	client := git.NewClient("/repo", executor)
+	repoRoot := git.NativeAbs(t, "repo")
+	executor := &fakeExecutor{output: filepath.ToSlash(repoRoot)}
+	client := git.NewClient(repoRoot, executor)
 
 	_, err := client.RepositoryRoot(ctx)
 	if !errors.Is(err, context.Canceled) {
@@ -74,16 +79,17 @@ func TestRepositoryRootPropagatesContextCancellation(t *testing.T) {
 }
 
 func TestDryRunConstructsCommandsWithoutExecuting(t *testing.T) {
+	repoRoot := git.NativeAbs(t, "repo")
 	executor := &fakeExecutor{output: "unexpected"}
-	client := git.NewClient("/repo", executor, git.WithDryRun())
+	client := git.NewClient(repoRoot, executor, git.WithDryRun())
 
 	if _, err := client.Status(context.Background()); err != nil {
 		t.Fatalf("Status() error = %v", err)
 	}
 	commands := client.Commands()
 	want := []git.Command{
-		{Dir: "/repo", Name: "git", Args: []string{"rev-parse", "--show-toplevel"}},
-		{Dir: "/repo", Name: "git", Args: []string{"status", "--short", "--branch"}},
+		{Dir: repoRoot, Name: "git", Args: []string{"rev-parse", "--show-toplevel"}},
+		{Dir: repoRoot, Name: "git", Args: []string{"status", "--short", "--branch"}},
 	}
 	if !reflect.DeepEqual(commands, want) {
 		t.Fatalf("commands = %#v, want %#v", commands, want)
@@ -94,8 +100,9 @@ func TestDryRunConstructsCommandsWithoutExecuting(t *testing.T) {
 }
 
 func TestStatusPropagatesCommandFailure(t *testing.T) {
-	executor := &fakeExecutor{output: "/repo\n", err: errors.New("git failed")}
-	client := git.NewClient("/repo", executor)
+	repoRoot := git.NativeAbs(t, "repo")
+	executor := &fakeExecutor{output: filepath.ToSlash(repoRoot) + "\n", err: errors.New("git failed")}
+	client := git.NewClient(repoRoot, executor)
 
 	_, err := client.Status(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "validate git repository") || !errors.Is(err, executor.err) {
@@ -104,28 +111,38 @@ func TestStatusPropagatesCommandFailure(t *testing.T) {
 }
 
 func TestIsUncommittedNewFileUsesSafeGitStatusPathspec(t *testing.T) {
+	worktree := git.NativeAbs(t, "repo", "worktree")
 	executor := &fakeExecutor{output: "?? PROOF.md\x00"}
-	client := git.NewClient("/repo", executor)
+	client := git.NewClient(git.NativeAbs(t, "repo"), executor)
 
-	got, err := client.IsUncommittedNewFile(context.Background(), "/repo/worktree", "PROOF.md")
+	// The pathspec stays forward-slash: it is a git argument, not an OS path.
+	got, err := client.IsUncommittedNewFile(context.Background(), worktree, "PROOF.md")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !got {
 		t.Fatal("IsUncommittedNewFile() = false, want true")
 	}
-	want := git.Command{Dir: "/repo/worktree", Name: "git", Args: []string{"status", "--porcelain=v1", "--untracked-files=all", "--ignored=matching", "-z", "--", "PROOF.md"}}
+	want := git.Command{Dir: worktree, Name: "git", Args: []string{"status", "--porcelain=v1", "--untracked-files=all", "--ignored=matching", "-z", "--", "PROOF.md"}}
 	if !reflect.DeepEqual(executor.commands, []git.Command{want}) {
 		t.Fatalf("commands = %#v, want %#v", executor.commands, []git.Command{want})
 	}
 }
 
 func TestIsUncommittedNewFileRejectsUnsafePath(t *testing.T) {
-	for _, path := range []string{"../PROOF.md", "/tmp/PROOF.md", "./PROOF.md"} {
+	// The backslash and drive-letter cases must be rejected on every platform,
+	// not just Windows: the pathspec rules git enforces do not vary by host.
+	for _, path := range []string{
+		"../PROOF.md", "/tmp/PROOF.md", "./PROOF.md", "..",
+		`..\PROOF.md`, `.gg\PROOF.md`, "C:/PROOF.md", `C:\PROOF.md`,
+	} {
 		t.Run(path, func(t *testing.T) {
+			// The worktree must be a genuinely absolute OS path, otherwise the
+			// worktree guard rejects the call first and the pathspec rule under
+			// test is never reached.
 			executor := &fakeExecutor{output: "?? PROOF.md\x00"}
-			client := git.NewClient("/repo", executor)
-			if _, err := client.IsUncommittedNewFile(context.Background(), "/repo/worktree", path); err == nil {
+			client := git.NewClient(git.NativeAbs(t, "repo"), executor)
+			if _, err := client.IsUncommittedNewFile(context.Background(), git.NativeAbs(t, "repo", "worktree"), path); err == nil {
 				t.Fatalf("path %q was accepted", path)
 			}
 			if len(executor.commands) != 0 {
@@ -135,12 +152,38 @@ func TestIsUncommittedNewFileRejectsUnsafePath(t *testing.T) {
 	}
 }
 
+// TestIsUncommittedNewFileAcceptsNestedSlashPathspec pins the pathspec contract
+// that broke QA proof validation and PR creation on Windows: proof.ArtifactName
+// is the forward-slash constant ".gg/PROOF.md", and validating it with filepath
+// rewrote it to ".gg\PROOF.md" on Windows and rejected it. The path must be
+// accepted and forwarded to git byte-for-byte, because git's porcelain output is
+// forward-slash on every platform and is compared against this exact string.
+func TestIsUncommittedNewFileAcceptsNestedSlashPathspec(t *testing.T) {
+	const artifact = ".gg/PROOF.md"
+	executor := &fakeExecutor{output: "?? " + artifact + "\x00"}
+	client := git.NewClient(git.NativeAbs(t, "repo"), executor)
+
+	got, err := client.IsUncommittedNewFile(context.Background(), git.NativeAbs(t, "repo", "worktree"), artifact)
+	if err != nil {
+		t.Fatalf("IsUncommittedNewFile(%q) error = %v, want accepted", artifact, err)
+	}
+	if !got {
+		t.Fatalf("IsUncommittedNewFile(%q) = false, want true", artifact)
+	}
+	if len(executor.commands) != 1 {
+		t.Fatalf("commands = %#v, want exactly one", executor.commands)
+	}
+	if gotArgs := executor.commands[0].Args; gotArgs[len(gotArgs)-1] != artifact {
+		t.Fatalf("pathspec = %q, want %q unmodified", gotArgs[len(gotArgs)-1], artifact)
+	}
+}
+
 func TestIsUncommittedNewFilePropagatesCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	executor := &fakeExecutor{output: "?? PROOF.md\x00"}
-	client := git.NewClient("/repo", executor)
-	if _, err := client.IsUncommittedNewFile(ctx, "/repo/worktree", "PROOF.md"); !errors.Is(err, context.Canceled) {
+	client := git.NewClient(git.NativeAbs(t, "repo"), executor)
+	if _, err := client.IsUncommittedNewFile(ctx, git.NativeAbs(t, "repo", "worktree"), "PROOF.md"); !errors.Is(err, context.Canceled) {
 		t.Fatalf("error = %v, want context.Canceled", err)
 	}
 	if len(executor.commands) != 0 {
@@ -170,24 +213,25 @@ func TestRepositoryRootRejectsActualNonGitDirectory(t *testing.T) {
 }
 
 func TestHasUnresolvedConflictsUsesGitConflictIndex(t *testing.T) {
+	worktree := git.NativeAbs(t, "repo", "worktree")
 	executor := &fakeExecutor{output: "conflicted.txt\n"}
-	client := git.NewClient("/repo", executor)
-	got, err := client.HasUnresolvedConflicts(context.Background(), "/repo/worktree")
+	client := git.NewClient(git.NativeAbs(t, "repo"), executor)
+	got, err := client.HasUnresolvedConflicts(context.Background(), worktree)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !got {
 		t.Fatal("HasUnresolvedConflicts() = false, want true")
 	}
-	want := git.Command{Dir: "/repo/worktree", Name: "git", Args: []string{"diff", "--name-only", "--diff-filter=U", "--"}}
+	want := git.Command{Dir: worktree, Name: "git", Args: []string{"diff", "--name-only", "--diff-filter=U", "--"}}
 	if !reflect.DeepEqual(executor.commands, []git.Command{want}) {
 		t.Fatalf("commands = %#v, want %#v", executor.commands, []git.Command{want})
 	}
 }
 
 func TestHasUnresolvedConflictsReturnsFalseForCleanIndex(t *testing.T) {
-	client := git.NewClient("/repo", &fakeExecutor{})
-	got, err := client.HasUnresolvedConflicts(context.Background(), "/repo/worktree")
+	client := git.NewClient(git.NativeAbs(t, "repo"), &fakeExecutor{})
+	got, err := client.HasUnresolvedConflicts(context.Background(), git.NativeAbs(t, "repo", "worktree"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -215,19 +259,20 @@ func (e *queuedExecutor) Execute(_ context.Context, command git.Command) (string
 }
 
 func TestVerifyUnsignedDevelopmentCommitAcceptsAdvancedUnsignedHead(t *testing.T) {
+	worktree := git.NativeAbs(t, "repo", "worktree")
 	executor := &queuedExecutor{outputs: []string{"old-head\n", "", "newer-head\x00N\nnew-head\x00N\n"}}
-	client := git.NewClient("/repo", executor)
-	previous, err := client.HeadCommit(context.Background(), "/repo/worktree")
+	client := git.NewClient(git.NativeAbs(t, "repo"), executor)
+	previous, err := client.HeadCommit(context.Background(), worktree)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := client.VerifyUnsignedDevelopmentCommit(context.Background(), "/repo/worktree", previous); err != nil {
+	if err := client.VerifyUnsignedDevelopmentCommit(context.Background(), worktree, previous); err != nil {
 		t.Fatal(err)
 	}
 	want := []git.Command{
-		{Dir: "/repo/worktree", Name: "git", Args: []string{"rev-parse", "HEAD"}},
-		{Dir: "/repo/worktree", Name: "git", Args: []string{"merge-base", "--is-ancestor", "old-head", "HEAD"}},
-		{Dir: "/repo/worktree", Name: "git", Args: []string{"log", "--format=%H%x00%G?", "old-head..HEAD"}},
+		{Dir: worktree, Name: "git", Args: []string{"rev-parse", "HEAD"}},
+		{Dir: worktree, Name: "git", Args: []string{"merge-base", "--is-ancestor", "old-head", "HEAD"}},
+		{Dir: worktree, Name: "git", Args: []string{"log", "--format=%H%x00%G?", "old-head..HEAD"}},
 	}
 	if !reflect.DeepEqual(executor.calls, want) {
 		t.Fatalf("commands = %#v, want %#v", executor.calls, want)
@@ -235,22 +280,22 @@ func TestVerifyUnsignedDevelopmentCommitAcceptsAdvancedUnsignedHead(t *testing.T
 }
 
 func TestVerifyUnsignedDevelopmentCommitRejectsSignedHead(t *testing.T) {
-	client := git.NewClient("/repo", &queuedExecutor{outputs: []string{"", "signed-head\x00G\n"}})
-	if err := client.VerifyUnsignedDevelopmentCommit(context.Background(), "/repo/worktree", "old-head"); err == nil || !strings.Contains(err.Error(), "signed") {
+	client := git.NewClient(git.NativeAbs(t, "repo"), &queuedExecutor{outputs: []string{"", "signed-head\x00G\n"}})
+	if err := client.VerifyUnsignedDevelopmentCommit(context.Background(), git.NativeAbs(t, "repo", "worktree"), "old-head"); err == nil || !strings.Contains(err.Error(), "signed") {
 		t.Fatalf("error = %v, want signed-commit rejection", err)
 	}
 }
 
 func TestVerifyUnsignedDevelopmentCommitRejectsUnchangedHead(t *testing.T) {
-	client := git.NewClient("/repo", &queuedExecutor{outputs: []string{"", ""}})
-	if err := client.VerifyUnsignedDevelopmentCommit(context.Background(), "/repo/worktree", "old-head"); err == nil || !strings.Contains(err.Error(), "did not create a commit") {
+	client := git.NewClient(git.NativeAbs(t, "repo"), &queuedExecutor{outputs: []string{"", ""}})
+	if err := client.VerifyUnsignedDevelopmentCommit(context.Background(), git.NativeAbs(t, "repo", "worktree"), "old-head"); err == nil || !strings.Contains(err.Error(), "did not create a commit") {
 		t.Fatalf("error = %v, want no-commit rejection", err)
 	}
 }
 
 func TestVerifyUnsignedDevelopmentCommitsAllowsNoCommitForFailedProcess(t *testing.T) {
-	client := git.NewClient("/repo", &queuedExecutor{outputs: []string{"", ""}})
-	if err := client.VerifyUnsignedDevelopmentCommits(context.Background(), "/repo/worktree", "old-head", false); err != nil {
+	client := git.NewClient(git.NativeAbs(t, "repo"), &queuedExecutor{outputs: []string{"", ""}})
+	if err := client.VerifyUnsignedDevelopmentCommits(context.Background(), git.NativeAbs(t, "repo", "worktree"), "old-head", false); err != nil {
 		t.Fatalf("VerifyUnsignedDevelopmentCommits() error = %v, want unchanged failed process accepted", err)
 	}
 }
@@ -258,8 +303,8 @@ func TestVerifyUnsignedDevelopmentCommitsAllowsNoCommitForFailedProcess(t *testi
 func TestVerifyUnsignedDevelopmentCommitRejectsUnrelatedHead(t *testing.T) {
 	ancestorErr := errors.New("not ancestor")
 	executor := &queuedExecutor{errs: []error{ancestorErr}}
-	client := git.NewClient("/repo", executor)
-	err := client.VerifyUnsignedDevelopmentCommit(context.Background(), "/repo/worktree", "old-head")
+	client := git.NewClient(git.NativeAbs(t, "repo"), executor)
+	err := client.VerifyUnsignedDevelopmentCommit(context.Background(), git.NativeAbs(t, "repo", "worktree"), "old-head")
 	if err == nil || !errors.Is(err, ancestorErr) || !strings.Contains(err.Error(), "not an ancestor") {
 		t.Fatalf("error = %v, want unrelated-head rejection", err)
 	}
@@ -269,8 +314,8 @@ func TestVerifyUnsignedDevelopmentCommitRejectsUnrelatedHead(t *testing.T) {
 }
 
 func TestVerifyUnsignedDevelopmentCommitRejectsSignedIntermediateCommit(t *testing.T) {
-	client := git.NewClient("/repo", &queuedExecutor{outputs: []string{"", "head\x00N\nintermediate\x00G\n"}})
-	err := client.VerifyUnsignedDevelopmentCommit(context.Background(), "/repo/worktree", "old-head")
+	client := git.NewClient(git.NativeAbs(t, "repo"), &queuedExecutor{outputs: []string{"", "head\x00N\nintermediate\x00G\n"}})
+	err := client.VerifyUnsignedDevelopmentCommit(context.Background(), git.NativeAbs(t, "repo", "worktree"), "old-head")
 	if err == nil || !strings.Contains(err.Error(), "intermediate") || !strings.Contains(err.Error(), "signed") {
 		t.Fatalf("error = %v, want signed intermediate rejection", err)
 	}
@@ -318,8 +363,8 @@ func TestVerifyUnsignedDevelopmentCommitPropagatesCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	executor := &queuedExecutor{outputs: []string{"new-head\x00N\n"}}
-	client := git.NewClient("/repo", executor)
-	if err := client.VerifyUnsignedDevelopmentCommit(ctx, "/repo/worktree", "old-head"); !errors.Is(err, context.Canceled) {
+	client := git.NewClient(git.NativeAbs(t, "repo"), executor)
+	if err := client.VerifyUnsignedDevelopmentCommit(ctx, git.NativeAbs(t, "repo", "worktree"), "old-head"); !errors.Is(err, context.Canceled) {
 		t.Fatalf("error = %v, want context.Canceled", err)
 	}
 	if len(executor.calls) != 0 {
@@ -329,8 +374,9 @@ func TestVerifyUnsignedDevelopmentCommitPropagatesCancellation(t *testing.T) {
 
 func TestInspectDevelopmentWorktreeReturnsMeaningfulChangesAndIgnoresArtifacts(t *testing.T) {
 	executor := &fakeExecutor{output: " M tracked.go\x00A  added.go\x00 D deleted.go\x00R  renamed.go\x00old.go\x00?? new.go\x00 M .gg/development.md\x00?? .gg/PROOF.md\x00"}
-	client := git.NewClient("/repo/worktree", executor)
-	changes, err := client.InspectDevelopmentWorktree(context.Background(), "/repo/worktree")
+	worktree := git.NativeAbs(t, "repo", "worktree")
+	client := git.NewClient(worktree, executor)
+	changes, err := client.InspectDevelopmentWorktree(context.Background(), worktree)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -344,15 +390,16 @@ func TestInspectDevelopmentWorktreeReturnsMeaningfulChangesAndIgnoresArtifacts(t
 	if !reflect.DeepEqual(changes, want) {
 		t.Fatalf("changes = %#v, want %#v", changes, want)
 	}
-	wantCommand := git.Command{Dir: "/repo/worktree", Name: "git", Args: []string{"status", "--porcelain=v1", "--untracked-files=all", "-z", "--"}}
+	wantCommand := git.Command{Dir: worktree, Name: "git", Args: []string{"status", "--porcelain=v1", "--untracked-files=all", "-z", "--"}}
 	if !reflect.DeepEqual(executor.commands, []git.Command{wantCommand}) {
 		t.Fatalf("commands = %#v, want %#v", executor.commands, []git.Command{wantCommand})
 	}
 }
 
 func TestInspectDevelopmentWorktreeCleanWhenOnlyArtifactWorkspaceIsDirty(t *testing.T) {
-	client := git.NewClient("/repo/worktree", &fakeExecutor{output: " M .gg/development.md\x00?? .gg/verification-logs/run.log\x00"})
-	changes, err := client.InspectDevelopmentWorktree(context.Background(), "/repo/worktree")
+	worktree := git.NativeAbs(t, "repo", "worktree")
+	client := git.NewClient(worktree, &fakeExecutor{output: " M .gg/development.md\x00?? .gg/verification-logs/run.log\x00"})
+	changes, err := client.InspectDevelopmentWorktree(context.Background(), worktree)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -413,11 +460,12 @@ func TestInspectDevelopmentWorktreeTemporaryRepositoryReportsAllSourceChanges(t 
 
 func TestPushBranchUsesExactArgv(t *testing.T) {
 	executor := &fakeExecutor{}
-	client := git.NewClient("/repo", executor)
-	if err := client.PushBranchToRemote(context.Background(), "/repo/worktree", "origin", "feature/name"); err != nil {
+	worktree := git.NativeAbs(t, "repo", "worktree")
+	client := git.NewClient(git.NativeAbs(t, "repo"), executor)
+	if err := client.PushBranchToRemote(context.Background(), worktree, "origin", "feature/name"); err != nil {
 		t.Fatal(err)
 	}
-	want := git.Command{Dir: "/repo/worktree", Name: "git", Args: []string{"push", "origin", "feature/name"}}
+	want := git.Command{Dir: worktree, Name: "git", Args: []string{"push", "origin", "feature/name"}}
 	if !reflect.DeepEqual(executor.commands, []git.Command{want}) {
 		t.Fatalf("commands = %#v, want %#v", executor.commands, []git.Command{want})
 	}
@@ -471,8 +519,8 @@ func TestIsUncommittedNewFileAcceptsTrackedModifications(t *testing.T) {
 	// A proof accidentally committed by an earlier phase but modified by the
 	// current attempt still counts as uncommitted work.
 	executor := &fakeExecutor{output: " M PROOF.md\x00"}
-	client := git.NewClient("/repo", executor)
-	got, err := client.IsUncommittedNewFile(context.Background(), "/repo/worktree", "PROOF.md")
+	client := git.NewClient(git.NativeAbs(t, "repo"), executor)
+	got, err := client.IsUncommittedNewFile(context.Background(), git.NativeAbs(t, "repo", "worktree"), "PROOF.md")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -480,8 +528,8 @@ func TestIsUncommittedNewFileAcceptsTrackedModifications(t *testing.T) {
 		t.Fatal("tracked file with uncommitted modifications = false, want true")
 	}
 	clean := &fakeExecutor{output: ""}
-	client = git.NewClient("/repo", clean)
-	got, err = client.IsUncommittedNewFile(context.Background(), "/repo/worktree", "PROOF.md")
+	client = git.NewClient(git.NativeAbs(t, "repo"), clean)
+	got, err = client.IsUncommittedNewFile(context.Background(), git.NativeAbs(t, "repo", "worktree"), "PROOF.md")
 	if err != nil || got {
 		t.Fatalf("clean file = %v %v, want false", got, err)
 	}

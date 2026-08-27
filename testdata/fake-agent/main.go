@@ -8,9 +8,22 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/VedranJanjetovic/gg/testdata/fakeagent"
 )
 
 func main() {
+	spec, installed, err := fakeagent.Installed()
+	if err != nil {
+		fatal(err)
+	}
+	if installed {
+		code, err := spec.Run(os.Args[1:])
+		if err != nil {
+			fatal(err)
+		}
+		os.Exit(code)
+	}
 	prompt := lastArgument(os.Args[1:])
 	if agentName() == "gh" {
 		if err := runGH(os.Args[1:]); err != nil {

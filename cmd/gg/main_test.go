@@ -53,7 +53,7 @@ func TestProductionBinaryUpdateFromUnconfiguredDirectory(t *testing.T) {
 		t.Fatal("locate test source")
 	}
 	sourceDir := filepath.Dir(sourceFile)
-	binary := filepath.Join(t.TempDir(), "gg")
+	binary := filepath.Join(t.TempDir(), productionExecutableName("gg"))
 	build := exec.Command("go", "build", "-o", binary, ".")
 	build.Dir = sourceDir
 	if output, err := build.CombinedOutput(); err != nil {

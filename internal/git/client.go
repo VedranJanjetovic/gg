@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	slashpath "path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -175,7 +176,7 @@ func (c *Client) IsUncommittedNewFile(ctx context.Context, worktreePath, relativ
 		return false, errors.New("git worktree path must be absolute")
 	}
 	relativePath = strings.TrimSpace(relativePath)
-	if relativePath == "" || relativePath == "." || filepath.IsAbs(relativePath) || filepath.Clean(relativePath) != relativePath || strings.HasPrefix(relativePath, ".."+string(filepath.Separator)) {
+	if !isSafeGitRelativePath(relativePath) {
 		return false, errors.New("git file path must be a safe relative path")
 	}
 	command := Command{Dir: worktreePath, Name: "git", Args: []string{"status", "--porcelain=v1", "--untracked-files=all", "--ignored=matching", "-z", "--", relativePath}}
@@ -189,6 +190,34 @@ func (c *Client) IsUncommittedNewFile(ctx context.Context, worktreePath, relativ
 		}
 	}
 	return false, nil
+}
+
+// isSafeGitRelativePath reports whether p may be handed to git as a pathspec:
+// a clean, forward-slash, relative path that cannot escape the worktree.
+//
+// Git pathspecs — and the porcelain output they are compared against — are
+// forward-slash on every platform, so validation deliberately uses slash
+// semantics rather than filepath. Validating with filepath would reject
+// legitimate pathspecs on Windows, where filepath.Clean rewrites
+// ".gg/PROOF.md" to ".gg\PROOF.md" and filepath.IsAbs("/x") is false.
+//
+// The absolute-path and volume checks are spelled out rather than delegated to
+// filepath.IsAbs so the rule is identical on every platform: a pathspec that
+// git would reject on Windows must not be accepted on Linux either. This makes
+// the guard stricter than strictly necessary on Unix — a file whose name
+// contains a colon or a backslash is refused — which is the safe direction for
+// a boundary that exists to keep callers inside the worktree.
+func isSafeGitRelativePath(p string) bool {
+	if p == "" || p == "." || slashpath.Clean(p) != p {
+		return false
+	}
+	if strings.HasPrefix(p, "/") || strings.Contains(p, `\`) {
+		return false
+	}
+	if len(p) >= 2 && p[1] == ':' {
+		return false
+	}
+	return p != ".." && !strings.HasPrefix(p, "../")
 }
 
 // PushBranchToRemote pushes branch to the requested remote using separate argv values.

@@ -14,6 +14,7 @@ import (
 	"github.com/VedranJanjetovic/gg/internal/config"
 	"github.com/VedranJanjetovic/gg/internal/pipeline"
 	"github.com/VedranJanjetovic/gg/internal/state"
+	"github.com/VedranJanjetovic/gg/testdata/fakeagent"
 )
 
 type runnerEvents struct {
@@ -37,13 +38,25 @@ func runnerProject(root string) state.ProjectState {
 	now := time.Now().UTC()
 	return state.ProjectState{SchemaVersion: state.CurrentSchemaVersion, Name: "Runner", Slug: "runner", OriginalGoal: "run fake executable", AcceptanceCriteria: []string{"artifact exists"}, PipelineConfig: state.PipelineConfigSnapshot{SchemaVersion: 1, Data: []byte(`{}`)}, CurrentPhase: "development", Status: state.StatusRunning, WorktreePath: root, BranchName: "runner", CreatedAt: now, UpdatedAt: now, StatusChangedAt: now}
 }
-func fakeRunner(t *testing.T, body string) string {
+
+// fakeRunner installs a compiled fake agent that performs spec. It is compiled
+// rather than scripted so the same fixture runs on every supported platform.
+func fakeRunner(t *testing.T, spec fakeagent.Spec) string {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "fake-agent")
-	if err := os.WriteFile(path, []byte("#!/bin/sh\n"+body), 0700); err != nil {
+	path, err := fakeagent.Install(t.TempDir(), "fake-agent", spec)
+	if err != nil {
 		t.Fatal(err)
 	}
 	return path
+}
+
+// runnerCanonical renders the canonical phase artifact a fake agent writes.
+func runnerCanonical(runID, disposition, body string) string {
+	artifact := "---\ngg_run_id: \"" + runID + "\"\ngg_disposition: " + disposition + "\n---\n"
+	if body != "" {
+		artifact += body + "\n"
+	}
+	return artifact
 }
 func runnerSettings() config.AgentSettings {
 	return config.AgentSettings{Agent: config.AgentClaude, Model: "fake", Effort: config.EffortLow}
@@ -54,8 +67,14 @@ func runnerRequest(project state.ProjectState, path string, prompt string) RunRe
 
 func TestAgentRunnerEndToEndSuccessPersistsPromptLogsArtifactsAndReloadsState(t *testing.T) {
 	root := t.TempDir()
-	script := fakeRunner(t, `printf 'prompt=%s\n' "$9"; printf 'stderr-output\n' >&2; printf 'artifact\n' > ARTIFACT.md
-printf '%s\n' '---' 'gg_run_id: "runner-test"' 'gg_disposition: passed' '---' 'development evidence' > .gg/development.md`)
+	script := fakeRunner(t, fakeagent.Spec{
+		Stdout: "prompt=${PROMPT}\n",
+		Stderr: "stderr-output\n",
+		Files: map[string]string{
+			"ARTIFACT.md":        "artifact\n",
+			".gg/development.md": runnerCanonical("runner-test", "passed", "development evidence"),
+		},
+	})
 	store, err := state.NewFileStore(root)
 	if err != nil {
 		t.Fatal(err)
@@ -103,7 +122,7 @@ printf '%s\n' '---' 'gg_run_id: "runner-test"' 'gg_disposition: passed' '---' 'd
 
 func TestAgentRunnerEndToEndFailureRecordsOutcome(t *testing.T) {
 	root := t.TempDir()
-	script := fakeRunner(t, `printf 'failure-output\n'; exit 9`)
+	script := fakeRunner(t, fakeagent.Spec{Stdout: "failure-output\n", ExitCode: 9})
 	project := runnerProject(root)
 	events := &runnerEvents{}
 	runner := NewAgentRunner(AgentRunnerOptions{Factory: NewExecProcessFactory(nil, nil), Lookup: func(string) (string, error) { return script, nil }, Events: events})
@@ -118,7 +137,7 @@ func TestAgentRunnerEndToEndFailureRecordsOutcome(t *testing.T) {
 
 func TestAgentRunnerCancelStopsActiveProcessAndRegistry(t *testing.T) {
 	root := t.TempDir()
-	script := fakeRunner(t, `printf 'started\n'; trap 'exit 143' TERM; while true; do sleep 1; done`)
+	script := fakeRunner(t, fakeagent.Spec{Stdout: "started\n", Block: true})
 	project := runnerProject(root)
 	registry := NewStopRegistry()
 	runner := NewAgentRunner(AgentRunnerOptions{Factory: NewExecProcessFactory(nil, nil), Lookup: func(string) (string, error) { return script, nil }, Registry: registry})
@@ -157,8 +176,10 @@ func TestAgentRunnerUsesDurableLogRootOutsideExecutionWorktree(t *testing.T) {
 	}
 	runRunnerGit(t, worktree, "add", "tracked.txt", ".gg/development.md")
 	runRunnerGit(t, worktree, "-c", "commit.gpgsign=false", "commit", "-qm", "initial")
-	script := fakeRunner(t, `printf 'explicit-cwd\n'
-printf '%s\n' '---' 'gg_run_id: "runner-test"' 'gg_disposition: passed' '---' 'development evidence' > .gg/development.md`)
+	script := fakeRunner(t, fakeagent.Spec{
+		Stdout: "explicit-cwd\n",
+		Files:  map[string]string{".gg/development.md": runnerCanonical("runner-test", "passed", "development evidence")},
+	})
 	project := runnerProject(stateRoot)
 	runner := NewAgentRunner(AgentRunnerOptions{
 		Factory: NewExecProcessFactory(nil, nil),
@@ -194,7 +215,9 @@ func TestAgentRunnerDiscoversCanonicalArtifactAndRejectsEscapingPaths(t *testing
 	if err := os.Symlink(outside, filepath.Join(worktree, "escape.md")); err != nil {
 		t.Fatal(err)
 	}
-	script := fakeRunner(t, `printf '%s\n' '---' 'gg_run_id: "runner-test"' 'gg_disposition: passed' '---' 'qa evidence' > .gg/qa-report.md`)
+	script := fakeRunner(t, fakeagent.Spec{
+		Files: map[string]string{".gg/qa-report.md": runnerCanonical("runner-test", "passed", "qa evidence")},
+	})
 	project := runnerProject(worktree)
 	req := runnerRequest(project, worktree, "qa prompt")
 	req.Phase = pipeline.PhaseQA
@@ -226,8 +249,10 @@ func TestAgentRunnerRejectsContainedSymlinkAndNonRegularArtifacts(t *testing.T) 
 	if err := os.Mkdir(filepath.Join(worktree, "directory.md"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	script := fakeRunner(t, `printf 'complete\n'
-printf '%s\n' '---' 'gg_run_id: "runner-test"' 'gg_disposition: passed' '---' 'development evidence' > .gg/development.md`)
+	script := fakeRunner(t, fakeagent.Spec{
+		Stdout: "complete\n",
+		Files:  map[string]string{".gg/development.md": runnerCanonical("runner-test", "passed", "development evidence")},
+	})
 	project := runnerProject(worktree)
 	req := runnerRequest(project, worktree, "artifact validation prompt")
 	req.ArtifactPaths = []string{"inside-link.md", "directory.md"}
@@ -307,7 +332,8 @@ func TestAgentRunnerStartedEventPrecedesFastOutputForSuccessFailureAndCancellati
 			project := runnerProject(root)
 			events := &runnerEvents{}
 			factory := &orderedOutputFactory{ready: make(chan struct{}), exitCode: tt.exitCode, waitForCancel: tt.waitForCancel}
-			runner := NewAgentRunner(AgentRunnerOptions{Factory: factory, Events: events, Lookup: func(string) (string, error) { return fakeRunner(t, "exit 0"), nil }})
+			script := fakeRunner(t, fakeagent.Spec{})
+			runner := NewAgentRunner(AgentRunnerOptions{Factory: factory, Events: events, Lookup: func(string) (string, error) { return script, nil }})
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			done := make(chan error, 1)

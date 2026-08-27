@@ -1,4 +1,4 @@
-//go:build darwin || dragonfly || freebsd || linux || netbsd || openbsd || solaris || aix
+//go:build unix || windows
 
 package tui
 
@@ -10,9 +10,13 @@ import (
 )
 
 // prepareRawMode owns raw-mode setup for the wrapped input. Bubble Tea 0.25
-// only discovers a Unix console when its input is *os.File; our EOF wrapper
-// must remain in the input path so EOF notification and cancelreader support
-// are preserved. Set and restore raw mode here instead.
+// only discovers a console when its input is a concrete *os.File; our EOF
+// wrapper must remain in the input path so EOF notification and cancelreader
+// support are preserved. Set and restore raw mode here instead.
+//
+// golang.org/x/term backs this on every unix target and on Windows, where
+// MakeRaw/Restore are implemented with GetConsoleMode/SetConsoleMode, so the
+// same code is correct on all of them.
 func prepareRawMode(input io.Reader) (func() error, error) {
 	file, ok := input.(cancelreader.File)
 	if !ok {

@@ -33,13 +33,7 @@ func TestStoreGlobalRoundTripUsesStableSecurePath(t *testing.T) {
 	if err != nil || gotPath != path {
 		t.Fatalf("GlobalConfigPath() = %q, %v; want %q", gotPath, err, path)
 	}
-	info, err := os.Stat(path)
-	if err != nil {
-		t.Fatalf("stat global config: %v", err)
-	}
-	if got := info.Mode().Perm(); got != 0600 {
-		t.Errorf("global config mode = %o, want 600", got)
-	}
+	assertMode(t, path, 0600)
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
@@ -73,13 +67,7 @@ func TestStoreProjectRoundTripCreatesRuntimeDirectoryAndDetectsConfiguration(t *
 			t.Errorf("required path %q: %v", path, err)
 		}
 	}
-	info, err := os.Stat(store.ProjectConfigPath(root))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if info.Mode().Perm() != 0600 {
-		t.Errorf("project config mode = %o, want 600", info.Mode().Perm())
-	}
+	assertMode(t, store.ProjectConfigPath(root), 0600)
 	configured, err = store.IsConfigured(root)
 	if err != nil || !configured {
 		t.Fatalf("IsConfigured after save = %v, %v; want true, nil", configured, err)
@@ -116,13 +104,7 @@ func TestStoreSecuresExistingConfigurationDirectories(t *testing.T) {
 	}
 
 	for _, path := range []string{globalDir, projectDir, runtimeDir} {
-		info, err := os.Stat(path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if got := info.Mode().Perm(); got != 0700 {
-			t.Errorf("directory %q mode = %o, want 700", path, got)
-		}
+		assertMode(t, path, 0700)
 	}
 }
 
@@ -243,13 +225,7 @@ func TestStoreSaveConfigurationRejectsSymlinkedProjectDirectoryWithoutOutsideMut
 	if !reflect.DeepEqual(after, original) {
 		t.Fatalf("outside file changed: got %q, want %q", after, original)
 	}
-	info, statErr := os.Stat(outside)
-	if statErr != nil {
-		t.Fatal(statErr)
-	}
-	if got := info.Mode().Perm(); got != 0755 {
-		t.Fatalf("outside directory mode = %o, want unchanged 755", got)
-	}
+	assertMode(t, outside, 0755)
 	if _, err := os.Stat(filepath.Join(outside, projectsDirectory)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("outside runtime directory was created: %v", err)
 	}
@@ -282,13 +258,7 @@ func TestStoreSaveConfigurationRejectsCanonicalGlobalProjectCollisionBeforeMutat
 	if !reflect.DeepEqual(after, original) {
 		t.Fatalf("colliding config changed: got %q, want %q", after, original)
 	}
-	info, statErr := os.Stat(projectDir)
-	if statErr != nil {
-		t.Fatal(statErr)
-	}
-	if got := info.Mode().Perm(); got != 0755 {
-		t.Fatalf("project directory mode = %o, want unchanged 755", got)
-	}
+	assertMode(t, projectDir, 0755)
 }
 
 func TestStoreSaveConfigurationRejectsSymlinkedProjectChildren(t *testing.T) {
@@ -316,16 +286,11 @@ func TestStoreSaveConfigurationRejectsSymlinkedProjectChildren(t *testing.T) {
 			if err := store.SaveConfiguration(root, validGlobal(), validProject()); err == nil || !strings.Contains(err.Error(), "symbolic link") {
 				t.Fatalf("SaveConfiguration error = %v, want symlink rejection", err)
 			}
-			info, err := os.Stat(target)
-			if err != nil {
-				t.Fatal(err)
+			unchanged := os.FileMode(0755)
+			if child == configFileName {
+				unchanged = 0644
 			}
-			if got := info.Mode().Perm(); got != 0755 && child == projectsDirectory {
-				t.Fatalf("outside runtime mode = %o, want unchanged 755", got)
-			}
-			if got := info.Mode().Perm(); got != 0644 && child == configFileName {
-				t.Fatalf("outside config mode = %o, want unchanged 644", got)
-			}
+			assertMode(t, target, unchanged)
 		})
 	}
 }
@@ -410,13 +375,7 @@ func TestStoreSaveConfigurationRollsBackGlobalBytesWhenProjectSaveFails(t *testi
 	if !reflect.DeepEqual(after, before) {
 		t.Fatalf("global bytes changed after rollback:\ngot:  %q\nwant: %q", after, before)
 	}
-	info, err := os.Stat(globalPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if info.Mode().Perm() != 0600 {
-		t.Fatalf("restored global mode = %o, want 600", info.Mode().Perm())
-	}
+	assertMode(t, globalPath, 0600)
 }
 
 func TestStoreConfiguredDetectionRejectsBrokenProject(t *testing.T) {
