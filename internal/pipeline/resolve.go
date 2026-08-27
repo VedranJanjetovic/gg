@@ -28,6 +28,10 @@ func (p ExecutablePhase) Settings() (config.AgentSettings, bool) {
 // ExecutablePipeline is an ordered plan containing only enabled phases.
 type ExecutablePipeline struct {
 	phases []ExecutablePhase
+	// legacyOrder marks a plan restored from a snapshot written before Rebase
+	// moved ahead of QA. Re-snapshotting such a plan must record that order as
+	// deliberate instead of validating it against the current phase order.
+	legacyOrder bool
 }
 
 // Phases returns the executable phases in order.
@@ -49,7 +53,7 @@ func (p ExecutablePipeline) GitOpsOnly() ExecutablePipeline {
 			selected = append(selected, phase)
 		}
 	}
-	return ExecutablePipeline{phases: selected}
+	return ExecutablePipeline{phases: selected, legacyOrder: p.legacyOrder}
 }
 
 // PhaseContracts returns the canonical contract text for each enabled phase.

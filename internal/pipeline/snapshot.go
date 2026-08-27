@@ -251,6 +251,7 @@ func SnapshotExecution(plan ExecutablePipeline, subphases DevelopmentSubphaseGen
 	}
 	snapshot := executionSnapshot{
 		SchemaVersion:    executionSnapshotSchemaVersion,
+		LegacyOrder:      plan.legacyOrder,
 		PlanningContract: PlanningContractVersion,
 		Subphases:        cloneSubphaseGeneration(subphases),
 		MaxQAAttempts:    maxQAAttempts,
@@ -343,6 +344,7 @@ func UpgradeLegacyExecutionSnapshot(snapshot state.PipelineConfigSnapshot, contr
 	if persisted.SchemaVersion != legacyExecutionSnapshotSchemaVersion && persisted.SchemaVersion != executionSnapshotSchemaVersion {
 		return state.PipelineConfigSnapshot{}, fmt.Errorf("unsupported legacy pipeline execution snapshot schema %d", persisted.SchemaVersion)
 	}
+	persisted.LegacyOrder = isLegacyOrderSnapshot(persisted)
 	persisted.SchemaVersion = executionSnapshotSchemaVersion
 	persisted.VerificationSteps = cloneVerificationSteps(contract.Steps)
 	persisted.RepairMode = contract.RepairMode
@@ -411,7 +413,8 @@ func RestoreExecutionWithVerification(snapshot state.PipelineConfigSnapshot) (Ex
 			return ExecutablePipeline{}, DevelopmentSubphaseGeneration{}, 0, state.VerificationContract{}, fmt.Errorf("pipeline verification contract: %w", err)
 		}
 	}
-	return ExecutablePipeline{phases: executable}, cloneSubphaseGeneration(persisted.Subphases), persisted.MaxQAAttempts, contract, nil
+	restored := ExecutablePipeline{phases: executable, legacyOrder: isLegacyOrderSnapshot(persisted)}
+	return restored, cloneSubphaseGeneration(persisted.Subphases), persisted.MaxQAAttempts, contract, nil
 }
 
 // RestoreResolvedConfiguration exposes the immutable configuration carried by
@@ -511,8 +514,14 @@ func validateExecutionSnapshot(snapshot executionSnapshot) error {
 	return nil
 }
 
+// isLegacyOrderSnapshot reports whether the persisted phases follow the phase
+// order that predates Rebase moving ahead of QA.
+func isLegacyOrderSnapshot(snapshot executionSnapshot) bool {
+	return snapshot.LegacyOrder || snapshot.SchemaVersion == legacyExecutionSnapshotSchemaVersion
+}
+
 func executionPhaseOrderForSnapshot(snapshot executionSnapshot) ([]PhaseID, error) {
-	if snapshot.SchemaVersion == projectExecutionSnapshotSchemaVersion && snapshot.LegacyOrder {
+	if snapshot.LegacyOrder && snapshot.SchemaVersion != legacyExecutionSnapshotSchemaVersion {
 		return executionPhaseOrder(legacyExecutionSnapshotSchemaVersion)
 	}
 	return executionPhaseOrder(snapshot.SchemaVersion)
