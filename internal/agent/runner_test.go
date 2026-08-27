@@ -307,7 +307,7 @@ func TestAgentRunnerStartedEventPrecedesFastOutputForSuccessFailureAndCancellati
 			project := runnerProject(root)
 			events := &runnerEvents{}
 			factory := &orderedOutputFactory{ready: make(chan struct{}), exitCode: tt.exitCode, waitForCancel: tt.waitForCancel}
-			runner := NewAgentRunner(AgentRunnerOptions{Factory: factory, Events: events})
+			runner := NewAgentRunner(AgentRunnerOptions{Factory: factory, Events: events, Lookup: func(string) (string, error) { return fakeRunner(t, "exit 0"), nil }})
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			done := make(chan error, 1)
@@ -315,7 +315,11 @@ func TestAgentRunnerStartedEventPrecedesFastOutputForSuccessFailureAndCancellati
 				_, err := runner.Run(ctx, runnerRequest(project, root, "ordering prompt"))
 				done <- err
 			}()
-			<-factory.ready
+			select {
+			case <-factory.ready:
+			case err := <-done:
+				t.Fatalf("run returned before the process started: %v", err)
+			}
 			if tt.cancel {
 				cancel()
 			}

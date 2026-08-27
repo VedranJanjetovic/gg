@@ -2,7 +2,14 @@ name: Go CI
 
 on:
   push:
+    branches: [main]
   pull_request:
+
+# A PR branch pushed to this repo matches both triggers, which ran every job
+# twice. Restricting push to main leaves pull_request as the only PR trigger.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   linux:
