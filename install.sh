@@ -8,6 +8,10 @@ prefix="${GG_INSTALL_PREFIX:-${XDG_BIN_HOME:-${HOME:-}/.local/bin}}"
 override_url="${GG_INSTALL_URL:-}"
 temp_dir=""
 staged_file=""
+# Root of the repository tree this run installs from (a source checkout or the
+# fetched snapshot); persist_installer takes its trusted copy from here when the
+# script itself is not a file on disk, as with a curl-piped install.
+source_root=""
 
 fail() { printf 'gg installer: error: %s\n' "$*" >&2; exit 1; }
 usage() { cat <<'EOF'
@@ -165,6 +169,7 @@ install_skills() {
     local script_dir snapshot_ref snapshot_url snapshot_dir
     script_dir="$(cd "$(dirname "${BASH_SOURCE[0]:-.}")" 2>/dev/null && pwd || true)"
     if [[ -n "$script_dir" && -d "$script_dir/skills/canonical" ]]; then
+        source_root="$script_dir"
         install_skills_from "$script_dir/skills"
         return
     fi
@@ -179,13 +184,42 @@ install_skills() {
     local assets
     assets=$(find "$snapshot_dir" -mindepth 2 -maxdepth 2 -type d -name skills | head -1)
     [[ -n "$assets" ]] || { printf 'gg installer: skill assets not found in repository snapshot\n' >&2; return 1; }
+    source_root="$(dirname "$assets")"
     install_skills_from "$assets"
+}
+
+# persist_installer: keep a trusted copy of this installer at ~/.gg/install.sh
+# so `gg update` runs a script the user already executed deliberately instead of
+# requiring GG_INSTALLER_PATH or downloading shell text at update time. A
+# curl-piped run has no script file on disk, so the copy comes from the
+# repository tree this run installed from.
+persist_installer() {
+    local self source="" dir="$HOME/.gg" dest="$HOME/.gg/install.sh" staged
+    self="${BASH_SOURCE[0]:-}"
+    if [[ -n "$self" && -f "$self" && -r "$self" ]]; then
+        source="$self"
+    elif [[ -n "$source_root" && -f "$source_root/install.sh" ]]; then
+        source="$source_root/install.sh"
+    fi
+    [[ -n "$source" ]] || { printf 'gg installer: no installer source to persist; gg update will need GG_INSTALLER_PATH\n' >&2; return 1; }
+    mkdir -p -- "$dir"
+    assert_no_symlink_components "$dir"
+    [[ ! -L "$dest" ]] || fail 'refusing symlink installer destination'
+    [[ ! -e "$dest" || -f "$dest" ]] || fail 'installer destination is not a regular file'
+    staged="$dest.gg-tmp.$$"
+    cp -- "$source" "$staged" || { rm -f -- "$staged"; printf 'gg installer: could not stage the trusted installer copy\n' >&2; return 1; }
+    chmod 0644 "$staged"
+    mv -f -- "$staged" "$dest" || { rm -f -- "$staged"; printf 'gg installer: could not persist the trusted installer copy\n' >&2; return 1; }
+    printf 'gg installer: trusted installer copy at %s (used by gg update)\n' "$dest"
 }
 
 main() {
     parse_args "$@"; validate_inputs; select_target; check_dependencies; prepare_prefix; archive_url; install_archive
     printf 'gg installer: installed %s\n' "$destination"
     install_skills || printf 'gg installer: agent skill installation failed; re-run install.sh from a repository checkout\n' >&2
+    # A failure here leaves the binary installed and reports its own reason; gg
+    # update then falls back to GG_INSTALLER_PATH.
+    persist_installer || true
     case ":${PATH:-}:" in *:"$prefix":*) ;; *) printf 'gg installer: add %s to PATH\n' "$prefix" >&2 ;; esac
 }
 [[ "${BASH_SOURCE[0]:-$0}" != "$0" ]] || main "$@"

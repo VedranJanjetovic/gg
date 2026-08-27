@@ -7,6 +7,10 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $repository = if ($env:GG_INSTALL_REPOSITORY) { $env:GG_INSTALL_REPOSITORY } else { 'VedranJanjetovic/gg' }
+# Root of the repository tree this run installs from (a source checkout or the
+# fetched snapshot); Persist-Installer takes its trusted copy from here when the
+# script itself is not a file on disk, as with an IEX-piped install.
+$script:SourceRoot = $null
 
 function Fail([string]$Message) { throw "gg installer: $Message" }
 function Assert-NoReparsePoint([string]$Path) {
@@ -82,6 +86,7 @@ function Install-SkillsFrom([string]$Dir) {
 function Install-Skills([string]$TempDir) {
     $local = if ($PSScriptRoot) { Join-Path $PSScriptRoot 'skills' } else { $null }
     if ($local -and (Test-Path -LiteralPath (Join-Path $local 'canonical'))) {
+        $script:SourceRoot = $PSScriptRoot
         Install-SkillsFrom $local
         return
     }
@@ -95,7 +100,35 @@ function Install-Skills([string]$TempDir) {
         Where-Object { Test-Path -LiteralPath $_ } |
         Select-Object -First 1
     if (-not $assets) { Fail 'skill assets not found in repository snapshot' }
+    $script:SourceRoot = Split-Path -Parent $assets
     Install-SkillsFrom $assets
+}
+
+# Persist-Installer: keep a trusted copy of this installer at ~/.gg/install.ps1
+# so `gg update` runs a script the user already executed deliberately instead of
+# requiring GG_INSTALLER_PATH or downloading shell text at update time. An
+# IEX-piped run has no script file on disk, so the copy comes from the
+# repository tree this run installed from.
+function Persist-Installer {
+    $source = $null
+    $self = if ($PSCommandPath) { $PSCommandPath } else { $null }
+    if ($self -and (Test-Path -LiteralPath $self -PathType Leaf)) {
+        $source = $self
+    } elseif ($script:SourceRoot) {
+        $candidate = Join-Path $script:SourceRoot 'install.ps1'
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) { $source = $candidate }
+    }
+    if (-not $source) { Fail 'no installer source to persist; gg update will need GG_INSTALLER_PATH' }
+    $dir = Join-Path $HOME '.gg'
+    New-Item -ItemType Directory -Force -Path $dir | Out-Null
+    Assert-NoReparsePoint $dir
+    $dest = Join-Path $dir 'install.ps1'
+    Assert-NoReparsePoint $dest
+    if ((Test-Path -LiteralPath $dest) -and (Get-Item -Force -LiteralPath $dest).PSIsContainer) {
+        Fail 'installer destination is not a regular file'
+    }
+    Copy-Item -LiteralPath $source -Destination $dest -Force
+    Write-Output "gg installer: trusted installer copy at $dest (used by gg update)"
 }
 
 if ($Version -notmatch '^(latest|[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?)$') { Fail "invalid version: $Version" }
@@ -154,6 +187,9 @@ try {
     $stage = $null
     Write-Output "gg installer: installed $destination"
     try { Install-Skills $temp } catch { Write-Warning "agent skill installation failed: $_" }
+    # A failure here leaves the binary installed; gg update then falls back to
+    # GG_INSTALLER_PATH.
+    try { Persist-Installer } catch { Write-Warning "$_" }
     if (-not (($env:Path -split ';') -contains $Prefix)) { Write-Warning "add $Prefix to PATH" }
 } finally {
     if ($stage -and (Test-Path -LiteralPath $stage)) { Remove-Item -Force -LiteralPath $stage -ErrorAction SilentlyContinue }
