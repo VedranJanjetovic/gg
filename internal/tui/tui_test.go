@@ -496,6 +496,68 @@ func TestResumeFailureRestoresStoppedControlsAndSurfacesError(t *testing.T) {
 	}
 }
 
+// A failed action is the only explanation the user gets for "nothing
+// happened", so it must outlive the background poll refresh that reloads
+// durable state every DefaultPollInterval.
+func TestActionErrorSurvivesPollRefreshUntilKeyPress(t *testing.T) {
+	snapshot := testSnapshot(t)
+	failedProject := testProject(snapshot, state.StatusFailed, string(pipeline.PhaseDevelopment), "testing", nil)
+	resumeErr := errors.New("resume: plan.md has no gg_verification_steps")
+	model, err := NewModel(context.Background(), failedProject, func(context.Context) (state.ProjectState, error) {
+		return failedProject, nil
+	}, Actions{Resume: func(context.Context) error { return resumeErr }}, WithColor(false))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	updated, command := model.Update(key('r'))
+	if command == nil {
+		t.Fatal("r did not start Resume")
+	}
+	updated, _ = updated.(Model).Update(command())
+	if !strings.Contains(updated.(Model).View(), "Error: "+resumeErr.Error()) {
+		t.Fatalf("Resume failure was not surfaced:\n%s", updated.(Model).View())
+	}
+
+	// Three successful refreshes: the durable state is fine, only the resume
+	// attempt failed. None of them may erase the error.
+	for range 3 {
+		updated, _ = updated.(Model).Update(projectLoadedMsg{project: failedProject})
+		if !errors.Is(updated.(Model).LastError(), resumeErr) || !strings.Contains(updated.(Model).View(), "Error: "+resumeErr.Error()) {
+			t.Fatalf("poll refresh erased the resume failure:\n%s", updated.(Model).View())
+		}
+	}
+
+	acknowledged := func() Model {
+		next, _ := updated.(Model).Update(key('d'))
+		return next.(Model)
+	}()
+	if acknowledged.LastError() != nil || strings.Contains(acknowledged.View(), "Error: ") {
+		t.Fatalf("key press did not dismiss the resume failure:\n%s", acknowledged.View())
+	}
+}
+
+// A transient refresh failure keeps its old self-clearing lifetime: the next
+// successful poll must remove it without a key press.
+func TestRefreshErrorClearsOnNextSuccessfulPoll(t *testing.T) {
+	snapshot := testSnapshot(t)
+	project := testProject(snapshot, state.StatusRunning, string(pipeline.PhaseDevelopment), "testing", nil)
+	model, err := NewModel(context.Background(), project, func(context.Context) (state.ProjectState, error) {
+		return project, nil
+	}, Actions{}, WithColor(false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated, _ := model.Update(projectLoadedMsg{err: errors.New("state unavailable")})
+	if !strings.Contains(updated.(Model).View(), "Error: refresh project: state unavailable") {
+		t.Fatalf("refresh error was not surfaced:\n%s", updated.(Model).View())
+	}
+	updated, _ = updated.(Model).Update(projectLoadedMsg{project: project})
+	if updated.(Model).LastError() != nil || strings.Contains(updated.(Model).View(), "Error: ") {
+		t.Fatalf("refresh error outlived a successful poll:\n%s", updated.(Model).View())
+	}
+}
+
 func TestStopOwnsActionUntilItReturns(t *testing.T) {
 	snapshot := testSnapshot(t)
 	running := testProject(snapshot, state.StatusRunning, string(pipeline.PhaseDevelopment), "testing", nil)

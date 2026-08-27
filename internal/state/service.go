@@ -1122,6 +1122,34 @@ func (s *LifecycleService) SetQAFixNextSubphase(ctx context.Context, slug, subph
 	return result, err
 }
 
+// RequireReplan rewinds the resume cursor to phase because a durable input
+// that phase produces is missing and cannot be recovered from its artifact.
+// The project stays stopped/failed: the caller is preparing a resume that has
+// not reserved a run yet.
+func (s *LifecycleService) RequireReplan(ctx context.Context, slug, phase string) (ProjectState, error) {
+	var result ProjectState
+	err := s.withProjectLock(ctx, slug, func(locked context.Context) error {
+		project, err := s.store.Load(locked, slug)
+		if err != nil {
+			return err
+		}
+		if strings.TrimSpace(phase) == "" {
+			return errors.New("replan continuation phase is required")
+		}
+		if project.Status != StatusStopped && project.Status != StatusFailed {
+			return fmt.Errorf("replan continuation requires a stopped or failed project, got %s", project.Status)
+		}
+		project.ReplanContinuationPhase = phase
+		project.UpdatedAt = s.clock.Now()
+		if err := s.store.Save(locked, project); err != nil {
+			return err
+		}
+		result = project
+		return nil
+	})
+	return result, err
+}
+
 // ResetQALoop clears completed-loop state after a successful QA disposition.
 func (s *LifecycleService) ResetQALoop(ctx context.Context, slug string) (ProjectState, error) {
 	var result ProjectState
@@ -1329,6 +1357,9 @@ func (s *LifecycleService) RecordPhase(ctx context.Context, slug, phase, subphas
 		current.CurrentPhase, current.CurrentSubphase = phase, subphase
 		if status == StatusRunning && current.PostRebaseContinuationPhase == phase {
 			current.PostRebaseContinuationPhase = ""
+		}
+		if status == StatusRunning && current.ReplanContinuationPhase == phase {
+			current.ReplanContinuationPhase = ""
 		}
 		current.PhaseHistory = updatePhaseHistory(current.PhaseHistory, phase, subphase, status, now, artifacts, occurrenceID)
 		current.ArtifactPaths = appendUnique(current.ArtifactPaths, artifacts...)

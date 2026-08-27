@@ -1008,3 +1008,63 @@ func TestRewindForFeedbackAppendsCriterionAndMovesCursor(t *testing.T) {
 		t.Fatalf("interview must re-open: %#v", updated.Interview)
 	}
 }
+
+// RequireReplan rewinds the resume cursor; RecordPhase must clear it once that
+// phase actually starts, or every later resume would rewind again forever.
+func TestRequireReplanRewindsCursorAndClearsWhenPhaseStarts(t *testing.T) {
+	root := t.TempDir()
+	store, err := NewFileStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := NewLifecycleService(store, &testClock{now: time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)}, store.Locker())
+	project := validProjectState()
+	project.Status = StatusFailed
+	if err := svc.Create(context.Background(), project); err != nil {
+		t.Fatal(err)
+	}
+
+	rewound, err := svc.RequireReplan(context.Background(), project.Slug, "planning")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rewound.ReplanContinuationPhase != "planning" {
+		t.Fatalf("replan cursor = %q, want planning", rewound.ReplanContinuationPhase)
+	}
+
+	// An unrelated phase starting must not consume the rewind.
+	other, err := svc.RecordPhase(context.Background(), project.Slug, "development", "testing", StatusRunning, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if other.ReplanContinuationPhase != "planning" {
+		t.Fatalf("unrelated phase consumed the rewind: %q", other.ReplanContinuationPhase)
+	}
+
+	started, err := svc.RecordPhase(context.Background(), project.Slug, "planning", "", StatusRunning, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if started.ReplanContinuationPhase != "" {
+		t.Fatalf("replan cursor survived its own phase starting: %q", started.ReplanContinuationPhase)
+	}
+}
+
+// The rewind is prepared before a run is reserved, so it must not be accepted
+// against a project that is already running.
+func TestRequireReplanRejectsRunningProject(t *testing.T) {
+	root := t.TempDir()
+	store, err := NewFileStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := NewLifecycleService(store, &testClock{now: time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)}, store.Locker())
+	project := validProjectState()
+	project.Status = StatusRunning
+	if err := svc.Create(context.Background(), project); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.RequireReplan(context.Background(), project.Slug, "planning"); err == nil {
+		t.Fatal("replan rewind was accepted for a running project")
+	}
+}

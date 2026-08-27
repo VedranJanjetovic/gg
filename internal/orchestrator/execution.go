@@ -2333,6 +2333,15 @@ func resumeExecutionCursor(project state.ProjectState, plan pipeline.ExecutableP
 		}
 		return project.PostRebaseContinuationPhase, "", false, nil
 	}
+	// A replan rewind outranks the history cursor by construction: the phase it
+	// names sits behind the failed phase, so the history-agreement check below
+	// would reject it.
+	if project.ReplanContinuationPhase != "" {
+		if !pipelineContains(plan, pipeline.PhaseID(project.ReplanContinuationPhase)) {
+			return "", "", false, fmt.Errorf("replan continuation phase %q is not in the persisted pipeline", project.ReplanContinuationPhase)
+		}
+		return project.ReplanContinuationPhase, "", false, nil
+	}
 	switch project.QALoopStage {
 	case "qa":
 		return string(pipeline.PhaseQA), "", false, nil

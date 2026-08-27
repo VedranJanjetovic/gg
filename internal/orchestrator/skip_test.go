@@ -182,3 +182,42 @@ func TestResumeCursorContinuesAfterOnlyTheSkippedOccurrence(t *testing.T) {
 		})
 	}
 }
+
+// The replan cursor names a phase behind the failed one, so the history-
+// agreement check would reject it. It must win instead — that is the whole
+// point of rewinding a project whose verification contract cannot be recovered.
+func TestResumeCursorHonorsReplanRewindOverHistoryCursor(t *testing.T) {
+	plan := skipTestPipeline(t, config.PhasePlanning)
+	project := state.ProjectState{
+		Status:                  state.StatusFailed,
+		CurrentPhase:            string(pipeline.PhaseDevelopment),
+		CurrentSubphase:         string(pipeline.DevelopmentSubphaseTesting),
+		ReplanContinuationPhase: string(pipeline.PhasePlanning),
+		PhaseHistory: []state.PhaseRecord{{
+			Phase:    string(pipeline.PhaseDevelopment),
+			Subphase: string(pipeline.DevelopmentSubphaseTesting),
+			Status:   state.StatusFailed,
+		}},
+	}
+	phase, subphase, finalize, err := resumeExecutionCursor(project, plan, pipeline.DevelopmentSubphaseGeneration{}, false)
+	if err != nil {
+		t.Fatalf("replan rewind was rejected: %v", err)
+	}
+	if phase != string(pipeline.PhasePlanning) || subphase != "" || finalize {
+		t.Fatalf("cursor = %q/%q finalize=%t, want planning", phase, subphase, finalize)
+	}
+}
+
+// A rewind to a phase the project's own pipeline does not run is a corrupt
+// cursor, not a silent no-op.
+func TestResumeCursorRejectsReplanRewindOutsidePipeline(t *testing.T) {
+	plan := skipTestPipeline(t)
+	project := state.ProjectState{
+		Status:                  state.StatusFailed,
+		CurrentPhase:            string(pipeline.PhaseDevelopment),
+		ReplanContinuationPhase: string(pipeline.PhasePlanning),
+	}
+	if _, _, _, err := resumeExecutionCursor(project, plan, pipeline.DevelopmentSubphaseGeneration{}, false); err == nil {
+		t.Fatal("disabled Planning rewind was accepted")
+	}
+}

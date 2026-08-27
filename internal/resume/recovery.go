@@ -26,6 +26,10 @@ type planRecorder interface {
 	RecordPlan(context.Context, string, []string, []string) (state.ProjectState, error)
 }
 
+type replanRequirer interface {
+	RequireReplan(context.Context, string, string) (state.ProjectState, error)
+}
+
 // Prepare migrates legacy verification declarations from the completed
 // Planning artifact and refreshes a failed Development plan from its current
 // artifact. Existing completion names and phase history are never discarded.
@@ -72,6 +76,36 @@ func Prepare(ctx context.Context, project state.ProjectState, persistence any) (
 	return updated, nil
 }
 
+// requireReplanAtPlanning persists a rewind of the resume cursor to Planning.
+// It reports false when the rewind is not available — the persistence layer
+// cannot record it, or the project's own pipeline has no Planning phase to
+// rewind to — so the caller keeps its original error.
+func requireReplanAtPlanning(ctx context.Context, project state.ProjectState, persistence any) (state.ProjectState, bool, error) {
+	requirer, ok := persistence.(replanRequirer)
+	if !ok {
+		return state.ProjectState{}, false, nil
+	}
+	plan, _, _, err := pipeline.RestoreExecution(project.PipelineConfig)
+	if err != nil {
+		return state.ProjectState{}, false, nil
+	}
+	planningEnabled := false
+	for _, executable := range plan.Phases() {
+		if executable.Phase().ID() == pipeline.PhasePlanning {
+			planningEnabled = true
+			break
+		}
+	}
+	if !planningEnabled {
+		return state.ProjectState{}, false, nil
+	}
+	updated, err := requirer.RequireReplan(ctx, project.Slug, string(pipeline.PhasePlanning))
+	if err != nil {
+		return state.ProjectState{}, false, err
+	}
+	return updated, true, nil
+}
+
 func migrateLegacyVerification(ctx context.Context, project state.ProjectState, persistence any) (state.ProjectState, error) {
 	contract, err := pipeline.SnapshotVerification(project.PipelineConfig)
 	if err != nil {
@@ -87,6 +121,14 @@ func migrateLegacyVerification(ctx context.Context, project state.ProjectState, 
 	}
 	contract, err = agent.ReadVerificationContract(project.WorktreePath)
 	if err != nil {
+		// The artifact cannot supply the contract — it predates the declaration
+		// or the agent wrote it wrong. Only Planning can produce it, so rewind
+		// there instead of leaving the project permanently unresumable.
+		if replanned, ok, replanErr := requireReplanAtPlanning(ctx, project, persistence); replanErr != nil {
+			return state.ProjectState{}, fmt.Errorf("rewind project %q to Planning for a missing verification contract: %w", project.Slug, replanErr)
+		} else if ok {
+			return replanned, nil
+		}
 		return state.ProjectState{}, fmt.Errorf("legacy project %q requires migration from .gg/plan.md; write valid gg_verification_steps and gg_repair_mode declarations, then resume: %w", project.Slug, err)
 	}
 	snapshot, err := pipeline.UpgradeLegacyExecutionSnapshot(project.PipelineConfig, contract)

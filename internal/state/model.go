@@ -382,6 +382,13 @@ type ProjectState struct {
 	// PostRebaseContinuationPhase is recorded only after post-conflict QA has
 	// succeeded. It bridges the restart window before the next phase starts.
 	PostRebaseContinuationPhase string `json:"postRebaseContinuationPhase,omitempty"`
+	// ReplanContinuationPhase rewinds the resume cursor to the phase that must
+	// re-derive a durable input resume found missing — today only Planning, when
+	// no executable verification contract exists and the Planning artifact
+	// cannot supply one. Recovery must never dead-end on an input that only
+	// forward execution can produce, so resume rewinds instead of failing. Like
+	// PostRebaseContinuationPhase it is cleared once that phase starts running.
+	ReplanContinuationPhase string `json:"replanContinuationPhase,omitempty"`
 	// PRCIMonitor is the restart-safe cursor and terminal outcome for the
 	// post-pipeline pull-request lifecycle monitor.
 	PRCIMonitor *PRCIMonitorState `json:"prCiMonitor,omitempty"`

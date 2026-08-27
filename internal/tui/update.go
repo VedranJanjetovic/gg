@@ -50,6 +50,10 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = message.Width
 		return m, nil
 	case tea.KeyMsg:
+		// A key press acknowledges a failed action: until one arrives the
+		// failure stays on screen, so the poll loop can never wipe the only
+		// explanation the user has.
+		m.actionErr = nil
 		if m.skipConfirm {
 			switch message.String() {
 			case "y", "enter":
@@ -196,9 +200,10 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.terminalPending = false
 		}
 		if message.err != nil {
-			m.lastErr = message.err
+			m.actionErr = message.err
 			m.notice = ""
 		} else {
+			m.actionErr = nil
 			m.notice = actionDoneNotice(message.kind)
 		}
 	}
