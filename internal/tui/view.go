@@ -68,8 +68,8 @@ func (m Model) render(interactive bool) string {
 	if m.interviewOpen() {
 		fmt.Fprintf(&output, "\n%s\n", m.styles.running.Render(wrapToWidth("Waiting for grooming answers — press g to answer the questions", width-2)))
 	}
-	if m.lastErr != nil {
-		fmt.Fprintf(&output, "\n%s\n", m.styles.errorText.Render(wrapToWidth("Error: "+m.lastErr.Error(), width-2)))
+	if err := m.LastError(); err != nil {
+		fmt.Fprintf(&output, "\n%s\n", m.styles.errorText.Render(wrapToWidth("Error: "+err.Error(), width-2)))
 	}
 	if m.notice != "" {
 		fmt.Fprintf(&output, "\n%s\n", m.styles.muted.Render(wrapToWidth(m.notice, width-2)))

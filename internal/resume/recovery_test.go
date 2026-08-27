@@ -15,7 +15,14 @@ import (
 )
 
 type persistence struct {
-	project state.ProjectState
+	project     state.ProjectState
+	replanPhase string
+}
+
+func (p *persistence) RequireReplan(_ context.Context, _ string, phase string) (state.ProjectState, error) {
+	p.replanPhase = phase
+	p.project.ReplanContinuationPhase = phase
+	return p.project, nil
 }
 
 func (p *persistence) MigrateVerificationContract(_ context.Context, _ string, contract state.VerificationContract, snapshot state.PipelineConfigSnapshot) (state.ProjectState, error) {
@@ -82,6 +89,29 @@ func legacyProject(t *testing.T, root, slug string) state.ProjectState {
 	}
 }
 
+// planningEnabledLegacyProject mirrors legacyProject but keeps Planning in the
+// pipeline, which is what makes a rewind to Planning possible.
+func planningEnabledLegacyProject(t *testing.T, root, slug string) state.ProjectState {
+	t.Helper()
+	resolved := config.ResolvedConfig{Defaults: config.AgentSettings{Agent: config.AgentClaude, Model: "model", Effort: config.EffortMedium}}
+	resolved.Phases = map[config.Phase]config.ResolvedPhase{}
+	for _, phase := range []config.Phase{config.PhaseGrooming, config.PhaseQA, config.PhaseBuildChecker, config.PhasePR, config.PhaseCI} {
+		resolved.Phases[phase] = config.ResolvedPhase{Enabled: false, AgentSettings: resolved.Defaults}
+	}
+	resolved.Phases[config.PhasePlanning] = config.ResolvedPhase{Enabled: true, AgentSettings: resolved.Defaults}
+	plan, err := pipeline.Resolve(pipeline.DefaultPipeline(), resolved)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := pipeline.SnapshotExecution(plan, pipeline.DevelopmentSubphaseGeneration{}, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	project := legacyProject(t, root, slug)
+	project.PipelineConfig = snapshot
+	return project
+}
+
 func writePlan(t *testing.T, root, planning string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Join(root, ".gg"), 0o755); err != nil {
@@ -144,6 +174,8 @@ func TestPrepareDoesNotReplacePlanWhenReplanArtifactHasNoPhaseList(t *testing.T)
 	}
 }
 
+// Planning is disabled in this pipeline, so there is no phase to rewind to and
+// the concrete manual action stays the answer.
 func TestPreparePausesLegacyResumeWhenPlanLacksMigrationContract(t *testing.T) {
 	root := t.TempDir()
 	writePlan(t, root, "---\ngg_plan_phases: [\"P1\"]\n---\n")
@@ -151,6 +183,52 @@ func TestPreparePausesLegacyResumeWhenPlanLacksMigrationContract(t *testing.T) {
 	_, err := resume.Prepare(context.Background(), persistence.project, persistence)
 	if err == nil || !strings.Contains(err.Error(), "requires migration from .gg/plan.md") {
 		t.Fatalf("err=%v, want concrete migration action", err)
+	}
+	if persistence.replanPhase != "" {
+		t.Fatalf("rewound to %q with Planning disabled", persistence.replanPhase)
+	}
+}
+
+// A project planned before the verification contract existed cannot satisfy it
+// from its artifact. Resume must rewind to Planning — which re-declares the
+// contract — instead of leaving the project permanently unresumable.
+func TestPrepareRewindsToPlanningWhenArtifactCannotSupplyContract(t *testing.T) {
+	for _, planning := range map[string]string{
+		"pre-contract frontmatter": "---\ngg_plan_phases: [\"P1\"]\n---\n",
+		"empty step array":         "---\ngg_verification_steps: []\ngg_repair_mode: false\n---\n",
+		"missing repair mode":      "---\ngg_verification_steps: [{\"name\":\"t\",\"command\":\"go\",\"args\":[\"test\"],\"adapter\":\"go-test\"}]\n---\n",
+	} {
+		root := t.TempDir()
+		writePlan(t, root, planning)
+		persistence := &persistence{project: planningEnabledLegacyProject(t, root, "very-project-gg-tool")}
+		got, err := resume.Prepare(context.Background(), persistence.project, persistence)
+		if err != nil {
+			t.Fatalf("resume dead-ended instead of rewinding: %v", err)
+		}
+		if persistence.replanPhase != string(pipeline.PhasePlanning) {
+			t.Fatalf("persisted replan phase = %q, want planning", persistence.replanPhase)
+		}
+		if got.ReplanContinuationPhase != string(pipeline.PhasePlanning) {
+			t.Fatalf("prepared state lost the replan cursor: %#v", got.ReplanContinuationPhase)
+		}
+	}
+}
+
+// The rewind is a fallback, not the default: an artifact that does declare a
+// valid contract must still migrate in place and keep the original cursor.
+func TestPrepareDoesNotRewindWhenArtifactSuppliesContract(t *testing.T) {
+	root := t.TempDir()
+	writePlan(t, root, "---\ngg_verification_steps: [{\"name\":\"tests\",\"command\":\"go\",\"args\":[\"test\",\"./...\"],\"adapter\":\"go-test\"}]\ngg_repair_mode: false\n---\n")
+	persistence := &persistence{project: planningEnabledLegacyProject(t, root, "very-project-gg-tool")}
+	got, err := resume.Prepare(context.Background(), persistence.project, persistence)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persistence.replanPhase != "" || got.ReplanContinuationPhase != "" {
+		t.Fatalf("rewound despite a valid contract: %q/%q", persistence.replanPhase, got.ReplanContinuationPhase)
+	}
+	if got.Verification == nil || len(got.Verification.PlannedSteps) != 1 {
+		t.Fatalf("valid contract was not migrated: %#v", got.Verification)
 	}
 }
 

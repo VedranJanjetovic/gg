@@ -171,8 +171,14 @@ type Model struct {
 	pollInterval time.Duration
 	poll         pollScheduler
 	lastErr      error
-	notice       string
-	width        int
+	// actionErr holds the failure of the last lifecycle action the user
+	// requested. It is deliberately separate from lastErr: refresh errors are
+	// transient and self-clear on the next good poll, while an action failure
+	// is the answer to "why did nothing happen" and must survive polling until
+	// the user presses a key.
+	actionErr error
+	notice    string
+	width     int
 	// groomingPending marks a project parked on unanswered grooming
 	// questions; groomingRequested records that the user pressed g to
 	// re-enter the interview (the session quits and the caller re-runs it).
@@ -247,8 +253,15 @@ func (m Model) Project() state.ProjectState { return m.project }
 // Phases returns a copy of the current presentation projection.
 func (m Model) Phases() []PhaseView { return clonePhaseViews(m.phases) }
 
-// LastError returns the latest loader or lifecycle action error.
-func (m Model) LastError() error { return m.lastErr }
+// LastError returns the latest lifecycle action error, or the latest loader
+// error when no action has failed. An action failure takes precedence: it is
+// what the user just asked for.
+func (m Model) LastError() error {
+	if m.actionErr != nil {
+		return m.actionErr
+	}
+	return m.lastErr
+}
 
 func projectPipeline(project state.ProjectState, pending *PendingPipeline) ([]phaseDefinition, error) {
 	plan, generation, _, err := pipeline.RestoreExecution(project.PipelineConfig)
