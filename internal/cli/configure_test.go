@@ -186,13 +186,7 @@ func TestConfigureReconfigurationPreflightFailurePreservesConfigBytes(t *testing
 		t.Fatal("reconfiguration failure changed prior global or project bytes")
 	}
 	for _, path := range []string{globalPath, projectPath} {
-		info, err := os.Stat(path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if got := info.Mode().Perm(); got != 0600 {
-			t.Fatalf("configuration file %s mode = %o after failure, want 600", path, got)
-		}
+		assertMode(t, path, 0600)
 	}
 }
 

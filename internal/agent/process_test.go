@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -223,6 +224,19 @@ func TestFakeAgentProcess(t *testing.T) {
 	default:
 		runPlatformFakeAgent(t, mode)
 	}
+}
+
+// processPID reads a "<marker> pid=<n>" readiness line out of captured output.
+func processPID(output, marker string) int {
+	for _, line := range strings.Split(output, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 2 && fields[0] == marker && strings.HasPrefix(fields[1], "pid=") {
+			var pid int
+			_, _ = fmt.Sscanf(fields[1], "pid=%d", &pid)
+			return pid
+		}
+	}
+	return 0
 }
 
 func contains(values []string, want string) bool {

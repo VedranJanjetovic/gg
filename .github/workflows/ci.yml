@@ -1,0 +1,80 @@
+name: Go CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A PR branch pushed to this repo matches both triggers, which ran every job
+# twice. Restricting push to main leaves pull_request as the only PR trigger.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: 1.22.12
+      - name: Check formatting
+        run: test -z "$(gofmt -l .)"
+      - name: Run tests
+        run: go test ./...
+      - name: Run race tests
+        run: go test -race ./...
+      - name: Run vet
+        run: go vet ./...
+      - name: Build gg
+        run: go build -o "${RUNNER_TEMP}/gg" ./cmd/gg
+      - name: Check diff
+        run: git diff --check
+
+  macos:
+    runs-on: macos-latest
+    env:
+      CGO_ENABLED: "1"
+      GOFLAGS: -ldflags=-linkmode=external
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: 1.22.12
+      - name: Check formatting
+        run: test -z "$(gofmt -l .)"
+      - name: Run tests
+        run: go test ./...
+      - name: Run race tests
+        run: go test -race ./...
+      - name: Run vet
+        run: go vet ./...
+      - name: Build gg
+        run: go build -o "${RUNNER_TEMP}/gg" ./cmd/gg
+      - name: Check diff
+        run: git diff --check
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: 1.22.12
+      - name: Check formatting
+        shell: pwsh
+        run: |
+          $files = gofmt -l .
+          if ($files) { Write-Error ($files -join "`n") }
+      - name: Run tests
+        run: go test ./...
+      - name: Run race tests
+        run: go test -race ./...
+      - name: Run vet
+        run: go vet ./...
+      - name: Build gg
+        shell: pwsh
+        run: go build -o (Join-Path $env:RUNNER_TEMP "gg.exe") ./cmd/gg
+      - name: Check diff
+        run: git diff --check

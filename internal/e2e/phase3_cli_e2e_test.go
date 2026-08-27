@@ -1,9 +1,8 @@
-//go:build linux || darwin
-
 package e2e
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"os"
 	"os/exec"
@@ -21,86 +20,7 @@ import (
 
 func phase3FakeBin(t *testing.T, env *Environment) string {
 	t.Helper()
-	bin := filepath.Join(env.Root, "phase3-bin")
-	if err := os.MkdirAll(bin, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	script := `#!/bin/sh
-set -eu
-agent=$(basename "$0")
-prompt=
-for arg do prompt=$arg; done
-phase_line=$(printf '%s\n' "$prompt" | sed -n '/^## Phase$/ {n; p;}' | head -n 1)
-phase=$(printf '%s\n' "$phase_line" | sed 's/^"//; s/" \/ ".*"$//; s/"$//')
-subphase=$(printf '%s\n' "$phase_line" | sed -n 's/^".*" \/ "\(.*\)"$/\1/p')
-run_id=$(printf '%s\n' "$prompt" | sed -n 's/^gg_run_id: "\(.*\)"$/\1/p' | head -n 1)
-log=${GG_FAKE_AGENT_LOG:-}
-if [ -n "$log" ]; then
-  { printf 'agent=%s\n' "$agent"; printf 'phase=%s\n' "$phase"; printf 'subphase=%s\n' "$subphase"; printf 'run_id=%s\n' "$run_id"; for arg do printf 'arg=%s\n' "$arg"; done; } >>"$log"
-fi
-if [ "${GG_FAKE_BLOCK_FILE:-}" != "" ] && [ -e "$GG_FAKE_BLOCK_FILE" ]; then
-  while [ -e "$GG_FAKE_BLOCK_FILE" ]; do sleep 0.02; done
-fi
-artifact=
-case "$phase" in
- acceptance_criteria) artifact=acceptance-criteria.md;; grooming) artifact=grooming.md;; planning) artifact=plan.md;; development) artifact=development.md;; qa) artifact=qa-report.md;; rebase) artifact=rebase-report.md;; test_document) artifact=test-document.md;; build_checker) artifact=build-checker.md;;
-esac
-if [ -n "$artifact" ]; then
-  cat >"$artifact" <<EOF
----
-gg_run_id: "$run_id"
-gg_disposition: passed
----
-
-Deterministic fake $agent result for $phase $subphase.
-EOF
-fi
-if [ "$phase" = development ]; then
-  git add development.md
-  git -c commit.gpgsign=false commit -m "fake: $subphase development" >/dev/null
-fi
-if [ "$phase" = qa ]; then
-  tick=$(printf '\140')
-  qa_status=pass
-  if [ "${GG_FAKE_QA_ALWAYS_FAIL:-}" = 1 ]; then qa_status=feedback; fi
-  if [ "${GG_FAKE_QA_FAIL_ONCE:-}" = 1 ] && [ ! -e "${GG_FAKE_QA_MARKER:-}" ]; then qa_status=feedback; : >"${GG_FAKE_QA_MARKER:-.fake-qa-failed}"; fi
-  proof_mode=${GG_FAKE_PROOF_MODE:-valid}
-  if [ "$proof_mode" != missing ]; then
-    if [ "$proof_mode" = malformed ]; then
-      printf '%s\n' '# malformed proof' >PROOF.md
-    else
-      proof_run_id=$run_id
-      if [ "$proof_mode" = stale ]; then proof_run_id=stale-run; fi
-      cat >PROOF.md <<EOF
----
-gg_run_id: "$proof_run_id"
----
-
-## Validation: fake QA
-- Status: $qa_status
-- Test location: internal/e2e/phase3_cli_e2e_test.go
-- Test name: real fake pipeline
-- Flow/Scenario: deterministic CLI pipeline
-- What it verifies: the fake QA executable produced canonical evidence
-- Proof it passed: ${tick}go test ./...${tick} returned result $qa_status
-- Manual run instructions: run the focused E2E test
-EOF
-      if [ "$proof_mode" = tracked ]; then git add PROOF.md; fi
-    fi
-  fi
-fi
-printf 'fake-%s: deterministic response\n' "$agent"
-`
-	scriptPath := filepath.Join(bin, "fake-agent")
-	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	for _, agent := range []string{"claude", "codex"} {
-		if err := os.Symlink(scriptPath, filepath.Join(bin, agent)); err != nil {
-			t.Fatal(err)
-		}
-	}
-	return bin
+	return env.Bin
 }
 
 func phase3Env(env *Environment, bin, log string) []string {
@@ -108,6 +28,7 @@ func phase3Env(env *Environment, bin, log string) []string {
 	// proxy environment convention. The configured phases below also assert
 	// that PR/CI/build-checker are disabled and absent from the invocation log.
 	return append(env.Env(),
+		"GG_PHASE3_FAKE=1",
 		"PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"),
 		"GG_FAKE_AGENT_LOG="+log,
 		"GIT_TERMINAL_PROMPT=0", "GIT_SSH_COMMAND=false",
@@ -127,7 +48,15 @@ func phase3Configure(t *testing.T, binary string, env *Environment, repo *GitRep
 	if result.Err != nil {
 		t.Fatalf("configure: %+v", result)
 	}
-	data, err := yaml.Marshal(cfg)
+	global := config.GlobalConfig{
+		Version:  config.CurrentSchemaVersion,
+		Defaults: config.AgentSettings{Agent: config.AgentCodex, Model: "gpt-5", Effort: config.EffortHigh},
+	}
+	complete, err := config.MaterializeCompleteProjectConfig(global, &cfg)
+	if err != nil {
+		t.Fatalf("materialize phase 3 configuration: %v", err)
+	}
+	data, err := yaml.Marshal(complete)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -156,7 +85,7 @@ func phase3WaitProjectStatus(t *testing.T, store *state.FileStore, slug string, 
 	var last state.ProjectState
 	var lastErr error
 	for time.Now().Before(deadline) {
-		project, err := store.Load(t.Context(), slug)
+		project, err := store.Load(context.Background(), slug)
 		if err == nil {
 			last = project
 			lastErr = nil
@@ -216,7 +145,7 @@ func TestRealCLIFakePipelineOrdersAgentsAndCopiesCanonicalProof(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"acceptance_criteria", "development", "development", "development", "rebase", "qa", "development", "development", "development", "rebase", "qa", "test_document"}
+	want := []string{"acceptance_criteria", "grooming", "planning", "development", "development", "development", "rebase", "qa", "development", "development", "development", "rebase", "qa", "test_document"}
 	if got := phase3Phases(t, data); !equalStrings(got, want) {
 		t.Fatalf("phase order = %v, want %v\nlog=%s", got, want, data)
 	}
@@ -240,19 +169,19 @@ func TestRealCLIFakePipelineOrdersAgentsAndCopiesCanonicalProof(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	project, err := store.Load(t.Context(), "ship-a-dashboard")
+	project, err := store.Load(context.Background(), "ship-dashboard")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if project.Status != state.StatusFinished {
 		t.Fatalf("status = %s", project.Status)
 	}
-	for _, name := range []string{"acceptance-criteria.md", "development.md", "qa-report.md", "rebase-report.md", "test-document.md"} {
-		if _, err := os.Stat(filepath.Join(project.WorktreePath, name)); err != nil {
+	for _, name := range []string{"acceptance-criteria.md", "development.md", "qa-report.md", "test-document.md"} {
+		if _, err := os.Stat(filepath.Join(project.WorktreePath, ".gg", name)); err != nil {
 			t.Fatalf("missing canonical %s: %v", name, err)
 		}
 	}
-	proofPath := filepath.Join(repo.Root, ".gg", "projects", project.Slug, "artifacts", proof.ArtifactName)
+	proofPath := filepath.Join(repo.Root, ".gg", "projects", project.Slug, "artifacts", filepath.Base(proof.ArtifactName))
 	sourceProofPath := filepath.Join(project.WorktreePath, proof.ArtifactName)
 	sourceProof, err := os.ReadFile(sourceProofPath)
 	if err != nil {
@@ -295,7 +224,7 @@ func TestRealCLIFailureProofsAreTerminalAndNotCopied(t *testing.T) {
 				t.Fatalf("invalid %s proof unexpectedly succeeded: %+v", mode, result)
 			}
 			phases := phase3Phases(t, mustRead(t, log))
-			want := []string{"acceptance_criteria", "development", "development", "development", "qa"}
+			want := []string{"acceptance_criteria", "grooming", "planning", "development", "development", "development", "rebase", "qa"}
 			if !equalStrings(phases, want) {
 				t.Fatalf("phases = %v, want terminal QA without Development retry", phases)
 			}
@@ -303,14 +232,14 @@ func TestRealCLIFailureProofsAreTerminalAndNotCopied(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			project, err := store.Load(t.Context(), "reject-invalid-proof")
+			project, err := store.Load(context.Background(), "reject-invalid-proof")
 			if err != nil {
 				t.Fatal(err)
 			}
 			if project.Status != state.StatusFailed {
 				t.Fatalf("persisted status = %s, want failed", project.Status)
 			}
-			artifact := filepath.Join(repo.Root, ".gg", "projects", project.Slug, "artifacts", proof.ArtifactName)
+			artifact := filepath.Join(repo.Root, ".gg", "projects", project.Slug, "artifacts", filepath.Base(proof.ArtifactName))
 			if _, err := os.Stat(artifact); !os.IsNotExist(err) {
 				t.Fatalf("durable proof artifact exists for %s failure: err=%v", mode, err)
 			}
@@ -330,7 +259,18 @@ func TestRealCLIFakePipelineStopsAndResumesPersistedState(t *testing.T) {
 	processEnv := append(phase3Env(env, bin, log), "GG_FAKE_BLOCK_FILE="+block)
 	cmd, stdout, stderr := phase3Start(t, repo.Root, binary, processEnv, "Stop and resume.\nstate is durable\n\n", "run")
 	phase3WaitLog(t, log, "phase=acceptance_criteria")
-	stop := RunWithTimeout(t, repo.Root, processEnv, binary, "stop", "stop-and-resume")
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		project, loadErr := state.NewFileStore(repo.Root)
+		if loadErr == nil {
+			current, stateErr := project.Load(context.Background(), "stop-resume")
+			if stateErr == nil && current.Status == state.StatusRunning && current.ActiveRunID != "" {
+				break
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	stop := RunWithTimeout(t, repo.Root, processEnv, binary, "stop", "stop-resume")
 	if stop.Err != nil {
 		t.Fatalf("stop: %+v", stop)
 	}
@@ -338,7 +278,7 @@ func TestRealCLIFakePipelineStopsAndResumesPersistedState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	stopped := phase3WaitProjectStatus(t, store, "stop-and-resume", state.StatusStopped)
+	stopped := phase3WaitProjectStatus(t, store, "stop-resume", state.StatusStopped)
 	if stopped.CurrentPhase != string(pipeline.PhaseAcceptanceCriteria) || stopped.ActiveRunID != "" || stopped.DispatchClaimRunID != "" {
 		t.Fatalf("stopped cursor/run = phase=%q active=%q claim=%q", stopped.CurrentPhase, stopped.ActiveRunID, stopped.DispatchClaimRunID)
 	}
@@ -348,11 +288,11 @@ func TestRealCLIFakePipelineStopsAndResumesPersistedState(t *testing.T) {
 	if err := os.Remove(block); err != nil {
 		t.Fatalf("remove blocker: %v", err)
 	}
-	resumed := RunWithTimeout(t, repo.Root, phase3Env(env, bin, log), binary, "resume", "stop-and-resume")
+	resumed := RunWithTimeout(t, repo.Root, phase3Env(env, bin, log), binary, "resume", "stop-resume")
 	if resumed.Err != nil {
 		t.Fatalf("resume: %+v\n%s", resumed, resumed.Stderr)
 	}
-	finished, err := store.Load(t.Context(), "stop-and-resume")
+	finished, err := store.Load(context.Background(), "stop-resume")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -375,14 +315,14 @@ func TestRealCLIFakePipelineBoundsQAAttempts(t *testing.T) {
 		t.Fatalf("bounded run unexpectedly succeeded: %+v", result)
 	}
 	phases := phase3Phases(t, mustRead(t, log))
-	if len(phases) != 9 || phases[4] != "qa" || phases[8] != "qa" {
+	if len(phases) != 13 || phases[7] != "qa" || phases[12] != "qa" {
 		t.Fatalf("bounded phases = %v", phases)
 	}
 	store, err := state.NewFileStore(repo.Root)
 	if err != nil {
 		t.Fatal(err)
 	}
-	project, err := store.Load(t.Context(), "bound-qa-retries")
+	project, err := store.Load(context.Background(), "bound-qa-retries")
 	if err != nil {
 		t.Fatal(err)
 	}

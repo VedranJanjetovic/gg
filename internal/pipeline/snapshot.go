@@ -22,16 +22,18 @@ const projectExecutionSnapshotSchemaVersion = 3
 const PlanningContractVersion = 1
 
 type executionSnapshot struct {
-	SchemaVersion    int                           `json:"schemaVersion"`
-	LegacyOrder      bool                          `json:"legacyOrder,omitempty"`
-	PlanningContract int                           `json:"planningContractVersion,omitempty"`
-	Phases           []executionSnapshotPhase      `json:"phases"`
-	Subphases        DevelopmentSubphaseGeneration `json:"developmentSubphases"`
-	MaxQAAttempts    int                           `json:"maxQaAttempts"`
-	GitOps           config.GitOpsConfig           `json:"gitOps"`
-	GitOpsConfigured bool                          `json:"gitOpsConfigured"`
-	ProjectDefault   config.AgentSettings          `json:"projectDefault,omitempty"`
-	PhaseStructure   []executionSnapshotStructure  `json:"phaseStructure,omitempty"`
+	SchemaVersion     int                           `json:"schemaVersion"`
+	LegacyOrder       bool                          `json:"legacyOrder,omitempty"`
+	PlanningContract  int                           `json:"planningContractVersion,omitempty"`
+	Phases            []executionSnapshotPhase      `json:"phases"`
+	Subphases         DevelopmentSubphaseGeneration `json:"developmentSubphases"`
+	MaxQAAttempts     int                           `json:"maxQaAttempts"`
+	GitOps            config.GitOpsConfig           `json:"gitOps"`
+	GitOpsConfigured  bool                          `json:"gitOpsConfigured"`
+	ProjectDefault    config.AgentSettings          `json:"projectDefault,omitempty"`
+	PhaseStructure    []executionSnapshotStructure  `json:"phaseStructure,omitempty"`
+	VerificationSteps []state.VerificationStep      `json:"verificationSteps,omitempty"`
+	RepairMode        bool                          `json:"repairMode,omitempty"`
 }
 
 type executionSnapshotPhase struct {
@@ -235,12 +237,6 @@ func SnapshotProjectExecution(plan ExecutablePipeline, subphases DevelopmentSubp
 	return state.PipelineConfigSnapshot{SchemaVersion: pipelineSnapshotWrapperVersion, Data: data}, nil
 }
 
-// SnapshotExecutionWithConfiguration is the descriptive alias used by
-// callers that already treat the project configuration as the source object.
-func SnapshotExecutionWithConfiguration(plan ExecutablePipeline, subphases DevelopmentSubphaseGeneration, maxQAAttempts int, project config.ProjectConfig, gitops ...config.GitOpsConfig) (state.PipelineConfigSnapshot, error) {
-	return SnapshotProjectExecution(plan, subphases, maxQAAttempts, project, gitops...)
-}
-
 // SnapshotExecution serializes the exact executable plan and run-level knobs.
 func SnapshotExecution(plan ExecutablePipeline, subphases DevelopmentSubphaseGeneration, maxQAAttempts int, gitops ...config.GitOpsConfig) (state.PipelineConfigSnapshot, error) {
 	effectiveGitOps := config.DefaultGitOpsConfig()
@@ -292,27 +288,102 @@ func PlanningContractEnforced(snapshot state.PipelineConfigSnapshot) bool {
 	return persisted.PlanningContract >= PlanningContractVersion
 }
 
-// RestoreExecution restores only persisted execution data. Ambient
-// configuration is deliberately not consulted.
-func RestoreExecution(snapshot state.PipelineConfigSnapshot) (ExecutablePipeline, DevelopmentSubphaseGeneration, int, error) {
-	if snapshot.SchemaVersion != pipelineSnapshotWrapperVersion {
-		return ExecutablePipeline{}, DevelopmentSubphaseGeneration{}, 0, fmt.Errorf("unsupported pipeline snapshot wrapper version %d", snapshot.SchemaVersion)
+// SnapshotExecutionWithVerification persists a Planning-produced executable
+// verification contract. Both it and SnapshotExecution stamp schema 2; the
+// difference is only whether verification steps are present, which is what
+// LoadExecution keys off when it decides to rehydrate a contract.
+func SnapshotExecutionWithVerification(plan ExecutablePipeline, subphases DevelopmentSubphaseGeneration, maxQAAttempts int, contract state.VerificationContract, gitops ...config.GitOpsConfig) (state.PipelineConfigSnapshot, error) {
+	if err := contract.Validate(); err != nil {
+		return state.PipelineConfigSnapshot{}, err
 	}
-	if len(bytes.TrimSpace(snapshot.Data)) == 0 || bytes.Equal(bytes.TrimSpace(snapshot.Data), []byte("{}")) {
-		return ExecutablePipeline{}, DevelopmentSubphaseGeneration{}, 0, errors.New("project has no persisted executable pipeline snapshot; start a new run to initialize it")
+	wrapped, err := SnapshotExecution(plan, subphases, maxQAAttempts, gitops...)
+	if err != nil {
+		return state.PipelineConfigSnapshot{}, err
+	}
+	var snapshot executionSnapshot
+	if err := json.Unmarshal(wrapped.Data, &snapshot); err != nil {
+		return state.PipelineConfigSnapshot{}, fmt.Errorf("decode pipeline execution snapshot: %w", err)
+	}
+	snapshot.VerificationSteps = cloneVerificationSteps(contract.Steps)
+	snapshot.RepairMode = contract.RepairMode
+	if err := validateExecutionSnapshot(snapshot); err != nil {
+		return state.PipelineConfigSnapshot{}, err
+	}
+	data, err := json.Marshal(snapshot)
+	if err != nil {
+		return state.PipelineConfigSnapshot{}, fmt.Errorf("encode pipeline verification snapshot: %w", err)
+	}
+	return state.PipelineConfigSnapshot{SchemaVersion: pipelineSnapshotWrapperVersion, Data: data}, nil
+}
+
+// UpgradeLegacyExecutionSnapshot adds a Planning-produced verification
+// contract to a schema-1 execution snapshot without changing its resolved
+// phases, subphases, or run limits. Callers must obtain the contract from the
+// completed worktree Planning artifact rather than infer it from project text.
+func UpgradeLegacyExecutionSnapshot(snapshot state.PipelineConfigSnapshot, contract state.VerificationContract) (state.PipelineConfigSnapshot, error) {
+	if snapshot.SchemaVersion != legacyExecutionSnapshotSchemaVersion {
+		return state.PipelineConfigSnapshot{}, fmt.Errorf("unsupported pipeline snapshot wrapper version %d", snapshot.SchemaVersion)
+	}
+	if err := contract.Validate(); err != nil {
+		return state.PipelineConfigSnapshot{}, fmt.Errorf("legacy execution snapshot verification contract: %w", err)
 	}
 	var persisted executionSnapshot
 	decoder := json.NewDecoder(bytes.NewReader(snapshot.Data))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&persisted); err != nil {
-		return ExecutablePipeline{}, DevelopmentSubphaseGeneration{}, 0, fmt.Errorf("decode pipeline execution snapshot: %w", err)
+		return state.PipelineConfigSnapshot{}, fmt.Errorf("decode legacy pipeline execution snapshot: %w", err)
 	}
 	var trailing any
 	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
-		return ExecutablePipeline{}, DevelopmentSubphaseGeneration{}, 0, errors.New("pipeline execution snapshot contains trailing JSON")
+		return state.PipelineConfigSnapshot{}, errors.New("legacy pipeline execution snapshot contains trailing JSON")
 	}
 	if err := validateExecutionSnapshot(persisted); err != nil {
-		return ExecutablePipeline{}, DevelopmentSubphaseGeneration{}, 0, err
+		return state.PipelineConfigSnapshot{}, err
+	}
+	if persisted.SchemaVersion != legacyExecutionSnapshotSchemaVersion && persisted.SchemaVersion != executionSnapshotSchemaVersion {
+		return state.PipelineConfigSnapshot{}, fmt.Errorf("unsupported legacy pipeline execution snapshot schema %d", persisted.SchemaVersion)
+	}
+	persisted.SchemaVersion = executionSnapshotSchemaVersion
+	persisted.VerificationSteps = cloneVerificationSteps(contract.Steps)
+	persisted.RepairMode = contract.RepairMode
+	if err := validateExecutionSnapshot(persisted); err != nil {
+		return state.PipelineConfigSnapshot{}, err
+	}
+	data, err := json.Marshal(persisted)
+	if err != nil {
+		return state.PipelineConfigSnapshot{}, fmt.Errorf("encode upgraded pipeline execution snapshot: %w", err)
+	}
+	return state.PipelineConfigSnapshot{SchemaVersion: legacyExecutionSnapshotSchemaVersion, Data: data}, nil
+}
+
+// RestoreExecution restores only persisted execution data. Ambient
+// configuration is deliberately not consulted.
+func RestoreExecution(snapshot state.PipelineConfigSnapshot) (ExecutablePipeline, DevelopmentSubphaseGeneration, int, error) {
+	executable, subphases, maxAttempts, _, err := RestoreExecutionWithVerification(snapshot)
+	return executable, subphases, maxAttempts, err
+}
+
+// RestoreExecutionWithVerification restores schema 2 verification data and
+// supplies an empty legacy contract for schema-1 snapshots.
+func RestoreExecutionWithVerification(snapshot state.PipelineConfigSnapshot) (ExecutablePipeline, DevelopmentSubphaseGeneration, int, state.VerificationContract, error) {
+	if snapshot.SchemaVersion != pipelineSnapshotWrapperVersion {
+		return ExecutablePipeline{}, DevelopmentSubphaseGeneration{}, 0, state.VerificationContract{}, fmt.Errorf("unsupported pipeline snapshot wrapper version %d", snapshot.SchemaVersion)
+	}
+	if len(bytes.TrimSpace(snapshot.Data)) == 0 || bytes.Equal(bytes.TrimSpace(snapshot.Data), []byte("{}")) {
+		return ExecutablePipeline{}, DevelopmentSubphaseGeneration{}, 0, state.VerificationContract{}, errors.New("project has no persisted executable pipeline snapshot; start a new run to initialize it")
+	}
+	var persisted executionSnapshot
+	decoder := json.NewDecoder(bytes.NewReader(snapshot.Data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&persisted); err != nil {
+		return ExecutablePipeline{}, DevelopmentSubphaseGeneration{}, 0, state.VerificationContract{}, fmt.Errorf("decode pipeline execution snapshot: %w", err)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return ExecutablePipeline{}, DevelopmentSubphaseGeneration{}, 0, state.VerificationContract{}, errors.New("pipeline execution snapshot contains trailing JSON")
+	}
+	if err := validateExecutionSnapshot(persisted); err != nil {
+		return ExecutablePipeline{}, DevelopmentSubphaseGeneration{}, 0, state.VerificationContract{}, err
 	}
 	canonical := DefaultPipeline().Phases()
 	byID := make(map[PhaseID]Phase, len(canonical))
@@ -334,7 +405,13 @@ func RestoreExecution(snapshot state.PipelineConfigSnapshot) (ExecutablePipeline
 			executable = append(executable, ExecutablePhase{phase: byID[phase.ID], settings: &settings})
 		}
 	}
-	return ExecutablePipeline{phases: executable}, cloneSubphaseGeneration(persisted.Subphases), persisted.MaxQAAttempts, nil
+	contract := state.VerificationContract{Steps: cloneVerificationSteps(persisted.VerificationSteps), RepairMode: persisted.RepairMode}
+	if len(persisted.VerificationSteps) > 0 {
+		if err := contract.Validate(); err != nil {
+			return ExecutablePipeline{}, DevelopmentSubphaseGeneration{}, 0, state.VerificationContract{}, fmt.Errorf("pipeline verification contract: %w", err)
+		}
+	}
+	return ExecutablePipeline{phases: executable}, cloneSubphaseGeneration(persisted.Subphases), persisted.MaxQAAttempts, contract, nil
 }
 
 // RestoreResolvedConfiguration exposes the immutable configuration carried by
@@ -370,6 +447,12 @@ func validateExecutionSnapshot(snapshot executionSnapshot) error {
 	}
 	if snapshot.MaxQAAttempts <= 0 {
 		return errors.New("pipeline execution snapshot requires a positive QA attempt maximum")
+	}
+	if snapshot.SchemaVersion == executionSnapshotSchemaVersion && len(snapshot.VerificationSteps) > 0 {
+		contract := state.VerificationContract{Steps: snapshot.VerificationSteps, RepairMode: snapshot.RepairMode}
+		if err := contract.Validate(); err != nil {
+			return fmt.Errorf("pipeline execution snapshot verification contract: %w", err)
+		}
 	}
 	if snapshot.GitOps == (config.GitOpsConfig{}) {
 		snapshot.GitOps = config.DefaultGitOpsConfig()
@@ -572,6 +655,24 @@ func cloneSubphaseGeneration(generation DevelopmentSubphaseGeneration) Developme
 	return generation
 }
 
+func cloneVerificationSteps(steps []state.VerificationStep) []state.VerificationStep {
+	if steps == nil {
+		return nil
+	}
+	cloned := make([]state.VerificationStep, len(steps))
+	for index, step := range steps {
+		cloned[index] = step
+		cloned[index].Args = append([]string(nil), step.Args...)
+		if step.Env != nil {
+			cloned[index].Env = make(map[string]string, len(step.Env))
+			for key, value := range step.Env {
+				cloned[index].Env[key] = value
+			}
+		}
+	}
+	return cloned
+}
+
 // SnapshotGitOps returns the GitOps settings persisted with an execution snapshot.
 func SnapshotGitOps(snapshot state.PipelineConfigSnapshot) (config.GitOpsConfig, error) {
 	if snapshot.SchemaVersion != pipelineSnapshotWrapperVersion {
@@ -583,4 +684,12 @@ func SnapshotGitOps(snapshot state.PipelineConfigSnapshot) (config.GitOpsConfig,
 	}
 	persisted.GitOps.Configured = persisted.GitOpsConfigured
 	return persisted.GitOps, nil
+}
+
+// SnapshotVerification returns the persisted contract. Legacy schema-1
+// snapshots intentionally return defaults so resume can report the migration
+// requirement without inventing executable checks.
+func SnapshotVerification(snapshot state.PipelineConfigSnapshot) (state.VerificationContract, error) {
+	_, _, _, contract, err := RestoreExecutionWithVerification(snapshot)
+	return contract, err
 }

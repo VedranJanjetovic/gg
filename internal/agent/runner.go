@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -461,6 +462,120 @@ func ReadPlanFrontmatter(root string, phase pipeline.PhaseID) (phases, completed
 		}
 	}
 	return phases, completed
+}
+
+// ReadVerificationContract reads the Planning artifact's executable
+// verification declaration. Unlike the display-only plan progress parser
+// above, this parser is strict because its result controls whether
+// Development may start.
+func ReadVerificationContract(root string) (state.VerificationContract, error) {
+	name, ok := pipeline.CanonicalArtifactName(pipeline.PhasePlanning)
+	if !ok {
+		return state.VerificationContract{}, errors.New("planning phase has no canonical artifact")
+	}
+	data, err := os.ReadFile(filepath.Join(filepath.Clean(root), name))
+	if err != nil {
+		return state.VerificationContract{}, fmt.Errorf("read planning artifact: %w", err)
+	}
+	return ParseVerificationContract(data)
+}
+
+// ParseVerificationContract validates the single-line JSON frontmatter fields
+// required by Planning. The body and unrelated frontmatter remain opaque.
+func ParseVerificationContract(data []byte) (state.VerificationContract, error) {
+	lines := strings.Split(strings.ReplaceAll(string(data), "\r\n", "\n"), "\n")
+	if len(lines) < 2 || lines[0] != "---" {
+		return state.VerificationContract{}, errors.New("planning artifact must begin with frontmatter")
+	}
+	var stepsValue, repairValue string
+	foundSteps, foundRepair := false, false
+	closed := false
+	for _, line := range lines[1:] {
+		if line == "---" {
+			closed = true
+			break
+		}
+		key, value, found := strings.Cut(line, ":")
+		if !found {
+			continue
+		}
+		switch strings.TrimSpace(key) {
+		case "gg_verification_steps":
+			if foundSteps {
+				return state.VerificationContract{}, errors.New("planning artifact repeats gg_verification_steps")
+			}
+			foundSteps, stepsValue = true, strings.TrimSpace(value)
+		case "gg_repair_mode":
+			if foundRepair {
+				return state.VerificationContract{}, errors.New("planning artifact repeats gg_repair_mode")
+			}
+			foundRepair, repairValue = true, strings.TrimSpace(value)
+		}
+	}
+	if !closed {
+		return state.VerificationContract{}, errors.New("planning artifact has unterminated frontmatter")
+	}
+	if !foundSteps || stepsValue == "" {
+		return state.VerificationContract{}, errors.New("planning artifact requires non-empty gg_verification_steps")
+	}
+	if !foundRepair || repairValue == "" {
+		return state.VerificationContract{}, errors.New("planning artifact requires explicit gg_repair_mode")
+	}
+	var rawSteps []json.RawMessage
+	decoder := json.NewDecoder(strings.NewReader(stepsValue))
+	if err := decoder.Decode(&rawSteps); err != nil || len(rawSteps) == 0 {
+		if err == nil {
+			err = errors.New("array is empty")
+		}
+		return state.VerificationContract{}, fmt.Errorf("invalid gg_verification_steps: %w", err)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return state.VerificationContract{}, errors.New("gg_verification_steps contains trailing JSON")
+	}
+	steps := make([]state.VerificationStep, 0, len(rawSteps))
+	for index, raw := range rawSteps {
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &fields); err != nil {
+			return state.VerificationContract{}, fmt.Errorf("verification step %d is not an object: %w", index, err)
+		}
+		for field := range fields {
+			switch field {
+			case "name", "command", "args", "env", "adapter":
+			default:
+				return state.VerificationContract{}, fmt.Errorf("verification step %d has unknown field %q", index, field)
+			}
+		}
+		if _, ok := fields["args"]; !ok {
+			return state.VerificationContract{}, fmt.Errorf("verification step %d requires an args array", index)
+		}
+		if trimmed := strings.TrimSpace(string(fields["args"])); len(trimmed) == 0 || trimmed[0] != '[' {
+			return state.VerificationContract{}, fmt.Errorf("verification step %d args must be a JSON array", index)
+		}
+		if env, ok := fields["env"]; ok {
+			trimmed := strings.TrimSpace(string(env))
+			if trimmed == "" || trimmed[0] != '{' {
+				return state.VerificationContract{}, fmt.Errorf("verification step %d env must be a JSON object", index)
+			}
+		}
+		var step state.VerificationStep
+		stepDecoder := json.NewDecoder(strings.NewReader(string(raw)))
+		stepDecoder.DisallowUnknownFields()
+		if err := stepDecoder.Decode(&step); err != nil {
+			return state.VerificationContract{}, fmt.Errorf("invalid verification step %d: %w", index, err)
+		}
+		step.Name, step.Command = strings.TrimSpace(step.Name), strings.TrimSpace(step.Command)
+		steps = append(steps, step)
+	}
+	if repairValue != "true" && repairValue != "false" {
+		return state.VerificationContract{}, errors.New("gg_repair_mode must be an explicit boolean")
+	}
+	repairMode := repairValue == "true"
+	contract := state.VerificationContract{Steps: steps, RepairMode: repairMode}
+	if err := contract.Validate(); err != nil {
+		return state.VerificationContract{}, err
+	}
+	return contract, nil
 }
 
 // ReadOpenQuestions extracts the optional `gg_open_questions` frontmatter

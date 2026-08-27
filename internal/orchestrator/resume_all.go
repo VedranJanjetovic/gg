@@ -86,7 +86,9 @@ func (c *AllResumeCoordinator) ResumeAll(ctx context.Context, request ResumeAllR
 				mu.Unlock()
 				continue
 			}
-			_, dispatchErr := c.controller.Resume(ctx, ResumeRequest{ProjectSlug: candidate.Project.Slug, RunID: request.RunID, Execution: candidate.Execution})
+			execution := candidate.Execution
+			execution.RepairExistingVerification = request.RepairExistingVerification
+			_, dispatchErr := c.controller.Resume(ctx, ResumeRequest{ProjectSlug: candidate.Project.Slug, RunID: request.RunID, Execution: execution})
 			result.Err = dispatchErr
 			if dispatchErr != nil && candidate.Reservation != nil {
 				_ = candidate.Reservation.Rollback(context.WithoutCancel(ctx))

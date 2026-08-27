@@ -22,6 +22,9 @@ func (m Model) render(interactive bool) string {
 	skipAvailable, _ := m.skipTarget()
 	fmt.Fprintf(&output, "%s\n", m.styles.title.Render("gg · "+m.project.Name))
 	fmt.Fprintf(&output, "Status: %s\n\n", projectStatus(m.project.Status))
+	for _, line := range verificationLines(m.project, width) {
+		fmt.Fprintf(&output, "  %s\n", line)
+	}
 	if line := m.interviewLine(); line != "" {
 		fmt.Fprintf(&output, "  %s\n", line)
 	}
@@ -158,6 +161,35 @@ func (m Model) render(interactive bool) string {
 		}
 	}
 	return output.String()
+}
+
+func verificationLines(project state.ProjectState, width int) []string {
+	findings := state.VerificationDisplay(project)
+	if len(findings) == 0 && (project.Verification == nil || strings.TrimSpace(project.Verification.NextAction) == "") {
+		return nil
+	}
+	lines := []string{"Verification:"}
+	for _, finding := range findings {
+		label := "finding"
+		if finding.Warning {
+			label = "warning"
+		}
+		part := fmt.Sprintf("%s: check=%s command=%s identity=%s reason=%s classification=%s attempts=%d/%d log=%s", label, displayVerificationValue(finding.CheckName), displayVerificationValue(finding.Command), displayVerificationValue(finding.Identity), displayVerificationValue(finding.Reason), displayVerificationValue(finding.Classification), finding.Attempts, finding.MaxAttempts, displayVerificationValue(finding.LogPath))
+		for _, wrapped := range strings.Split(wrapToWidth(part, width-4), "\n") {
+			lines = append(lines, wrapped)
+		}
+	}
+	if project.Verification != nil && strings.TrimSpace(project.Verification.NextAction) != "" {
+		lines = append(lines, "Next action: "+project.Verification.NextAction)
+	}
+	return lines
+}
+
+func displayVerificationValue(value string) string {
+	if strings.TrimSpace(value) == "" {
+		return "-"
+	}
+	return value
 }
 
 // totalTokens sums the agent-reported token usage across all recorded phase

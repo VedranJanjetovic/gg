@@ -131,7 +131,7 @@ func runWithTimeout(t *testing.T, dir string, env []string, input io.Reader, nam
 // BuildBinary builds the real cmd/gg executable outside the source tree.
 func BuildBinary(t *testing.T) string {
 	t.Helper()
-	output := filepath.Join(t.TempDir(), "gg")
+	output := filepath.Join(t.TempDir(), executableName("gg"))
 	result := RunWithTimeout(t, moduleRoot(t), nil, "go", "build", "-o", output, "./cmd/gg")
 	if result.Err != nil {
 		t.Fatalf("build gg: %v\nstdout:\n%s\nstderr:\n%s", result.Err, result.Stdout, result.Stderr)
@@ -167,6 +167,15 @@ func NewGitRepository(t *testing.T) *GitRepository {
 	}
 	repo.git(t, "add", "README.md")
 	repo.git(t, "commit", "-m", "initial fixture")
+	remote := filepath.Join(t.TempDir(), "origin.git")
+	if err := os.MkdirAll(remote, 0o755); err != nil {
+		t.Fatalf("create fixture remote: %v", err)
+	}
+	if result := RunWithTimeout(t, remote, nil, "git", "init", "--bare", "-q"); result.Err != nil {
+		t.Fatalf("initialize fixture remote: %v\n%s", result.Err, result.Stderr)
+	}
+	repo.git(t, "remote", "add", "origin", remote)
+	repo.git(t, "push", "-q", "-u", "origin", "HEAD:main")
 	return repo
 }
 
@@ -195,11 +204,26 @@ func (r *GitRepository) git(t *testing.T, args ...string) string {
 
 func fakeBinDir(t *testing.T) string {
 	t.Helper()
-	_, source, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("locate e2e fixture source")
+	bin := filepath.Join(t.TempDir(), "fake-bin")
+	if err := os.MkdirAll(bin, 0o755); err != nil {
+		t.Fatalf("create fake-agent directory: %v", err)
 	}
-	return filepath.Join(filepath.Dir(source), "..", "..", "testdata", "fake-bin")
+	built := filepath.Join(t.TempDir(), executableName("fake-agent"))
+	result := RunWithTimeout(t, moduleRoot(t), nil, "go", "build", "-o", built, "./testdata/fake-agent")
+	if result.Err != nil {
+		t.Fatalf("build fake agent: %v\nstdout:\n%s\nstderr:\n%s", result.Err, result.Stdout, result.Stderr)
+	}
+	data, err := os.ReadFile(built)
+	if err != nil {
+		t.Fatalf("read fake agent: %v", err)
+	}
+	for _, agent := range []string{"claude", "codex"} {
+		path := filepath.Join(bin, executableName(agent))
+		if err := os.WriteFile(path, data, 0o755); err != nil {
+			t.Fatalf("install fake %s agent: %v", agent, err)
+		}
+	}
+	return bin
 }
 
 func moduleRoot(t *testing.T) string {
@@ -224,13 +248,29 @@ func resolveCommand(name string, env []string) string {
 		}
 	}
 	for _, dir := range filepath.SplitList(pathValue) {
-		candidate := filepath.Join(dir, name)
-		info, err := os.Stat(candidate)
-		if err == nil && !info.IsDir() && info.Mode()&0o111 != 0 {
-			return candidate
+		for _, candidateName := range executableCandidates(name) {
+			candidate := filepath.Join(dir, candidateName)
+			info, err := os.Stat(candidate)
+			if err == nil && !info.IsDir() && (runtime.GOOS == "windows" || info.Mode()&0o111 != 0) {
+				return candidate
+			}
 		}
 	}
 	return name
+}
+
+func executableName(name string) string {
+	if runtime.GOOS == "windows" && filepath.Ext(name) == "" {
+		return name + ".exe"
+	}
+	return name
+}
+
+func executableCandidates(name string) []string {
+	if runtime.GOOS != "windows" || filepath.Ext(name) != "" {
+		return []string{name}
+	}
+	return []string{name, name + ".exe", name + ".com", name + ".cmd", name + ".bat"}
 }
 
 func mergeEnv(base, overrides []string) []string {

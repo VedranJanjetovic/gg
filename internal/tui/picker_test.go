@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -339,6 +340,15 @@ func TestEOFNotifyingFilePreservesInterruptibleCancelReader(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer reader.Close()
+
+	if runtime.GOOS == "windows" {
+		// cancelreader v0.2.2 can only interrupt CONIN$ on Windows: NewReader
+		// falls back to fallbackCancelReader for any descriptor other than
+		// os.Stdin's, and that reader's Cancel is hardcoded to false. Pipe
+		// interruptibility is a property of the dependency on unix, not of the
+		// EOF wrapper, so only the wrapper contract is asserted here.
+		t.Skip("cancelreader cannot interrupt non-console handles on Windows")
+	}
 
 	readDone := make(chan error, 1)
 	go func() {

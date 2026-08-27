@@ -9,7 +9,6 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
-	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -84,18 +83,6 @@ func runPlatformFakeAgent(t *testing.T, mode string) {
 			time.Sleep(time.Second)
 		}
 	}
-}
-
-func processPID(output, marker string) int {
-	for _, line := range strings.Split(output, "\n") {
-		fields := strings.Fields(line)
-		if len(fields) == 2 && fields[0] == marker && strings.HasPrefix(fields[1], "pid=") {
-			var pid int
-			_, _ = fmt.Sscanf(fields[1], "pid=%d", &pid)
-			return pid
-		}
-	}
-	return 0
 }
 
 func waitForProcessExit(t *testing.T, pid int) {

@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -299,10 +301,19 @@ type cliConflictRunner struct {
 	calls []agent.RunRequest
 }
 
+func writeValidPlanningArtifact(request agent.RunRequest) error {
+	path := filepath.Join(request.WorkingDirectory, ".gg", "plan.md")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	content := fmt.Sprintf("---\ngg_run_id: %q\ngg_disposition: passed\ngg_plan_complexity: \"Trivial\"\ngg_plan_complexity_evidence: [\"The test scope is one cohesive outcome.\"]\ngg_plan_phases: [\"Phase 1: test scope\"]\ngg_plan_phase_boundaries: [{\"phase\":\"Phase 1: test scope\",\"justification\":\"The test scope has no dependency ordering.\"}]\ngg_verification_steps: [{\"name\":\"tests\",\"command\":\"go\",\"args\":[\"test\",\"./...\"],\"adapter\":\"go-test\"}]\ngg_repair_mode: false\n---\n# Implementation Plan\n\n## Complexity assessment\n\n- Complexity category: **Trivial**\n- Selected phase count: **1**\n\nSupporting evidence:\n\n1. The test scope is one cohesive outcome.\n\n## Phase 1: test scope\n\nBoundary justification: The test scope has no dependency ordering.\n", request.RunID)
+	return os.WriteFile(path, []byte(content), 0o644)
+}
+
 func (r *cliConflictRunner) Run(_ context.Context, req agent.RunRequest) (agent.RunResult, error) {
 	r.calls = append(r.calls, req)
 	if req.Phase == pipeline.PhasePlanning {
-		if err := writeMinimalValidPlanningArtifact(req.WorkingDirectory); err != nil {
+		if err := writeValidPlanningArtifact(req); err != nil {
 			return agent.RunResult{ProjectSlug: req.Project.Slug, Phase: req.Phase, Subphase: req.Subphase, Status: state.StatusFailed}, err
 		}
 	}
@@ -321,7 +332,7 @@ func TestProductionControllerThroughCLIStopsOnOrdinaryRebaseFailure(t *testing.T
 	store := mustStateStore(t, root)
 	lifecycle := state.NewLifecycleService(store, nil, store.Locker())
 	runner := &cliConflictRunner{}
-	controller := orchestrator.NewProductionController(runner, lifecycle, cliConflictReader{}, orchestrator.WithPromptBuilder(agent.StandalonePromptBuilder{}))
+	controller := orchestrator.NewProductionController(runner, lifecycle, cliConflictReader{}, orchestrator.WithPromptBuilder(agent.StandalonePromptBuilder{}), orchestrator.WithVerificationService(passingVerification{}))
 	app := New(WithRootResolver(fixedRoot{root: root}), WithConfigStore(configuredMemoryStore()), WithLifecycleService(lifecycle), WithGitClient(git.NewClient(root, nil)), WithOrchestratorController(controller))
 	var stdout, stderr bytes.Buffer
 	if code := app.Run(context.Background(), []string{"run", "ordinary-rebase-failure"}, &stdout, &stderr); code == 0 {

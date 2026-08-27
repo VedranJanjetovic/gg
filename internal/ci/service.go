@@ -12,6 +12,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/VedranJanjetovic/gg/internal/robustio"
 )
 
 const (
@@ -293,7 +295,7 @@ func atomicWrite(path string, data []byte) error {
 	if err = tmp.Close(); err != nil {
 		return err
 	}
-	return os.Rename(name, path)
+	return robustio.Rename(name, path)
 }
 func wait(ctx context.Context, d time.Duration) error {
 	if d == 0 {

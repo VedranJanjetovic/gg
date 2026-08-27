@@ -24,6 +24,9 @@ type PromptInput struct {
 	ArtifactPaths      []string
 	WorkingDirectory   string
 	RunID              string
+	// RepairExistingVerification is the explicit CLI selection for repairing
+	// parent verification failures; it is never inferred from project prose.
+	RepairExistingVerification bool
 	// Development is retained as a compatibility hint for callers that use a
 	// custom development phase identifier. The canonical development phase
 	// always receives development instructions regardless of this value.
@@ -235,6 +238,13 @@ func BuildPrompt(input PromptInput) (string, error) {
 	b.WriteString(". Do not read from, write to, execute changes from, or create artifacts in another worktree or the main repository.\n")
 
 	if input.Phase == pipeline.PhasePlanning {
+		b.WriteString("\n## Verification contract instruction\n")
+		b.WriteString("Planning MUST add a non-empty single-line JSON `gg_verification_steps` array to the plan frontmatter. Each entry must contain a unique non-empty `name`, direct executable `command`, an `args` JSON array (never a shell command string), and one supported `adapter` (`gofmt-empty`, `go-test`, `go-diagnostic`, or `git-diff-check`); an optional `env` object may contain fixed KEY/value pairs. Planning MUST also add an explicit boolean `gg_repair_mode` field; do not infer repair intent from the project goal.\n")
+		if input.RepairExistingVerification {
+			b.WriteString("The caller explicitly selected repair of existing verification failures, so set `gg_repair_mode: true`.\n")
+		} else {
+			b.WriteString("This invocation did not explicitly select repair of existing verification failures, so set `gg_repair_mode: false`.\n")
+		}
 		b.WriteString("\n## Plan tracking instruction\n")
 		b.WriteString("Classify the complete requested work before choosing phases. Use the highest applicable signal: Trivial is one cohesive localized outcome with no migration, public-contract change, or dependency ordering; Simple is one localized component with routine backward-compatible behavior and tests; Moderate means multiple components, meaningful ordering, new public behavior, or a contained data/config migration; Complex means cross-service work, breaking contracts, substantial migration or rollback concerns, security-critical changes, or several independently deliverable outcomes.\n")
 		b.WriteString("Use advisory phase bands of exactly 1 for Trivial, usually 1–2 for Simple, usually 2–4 for Moderate, and usually 5–10 for Complex. Only Trivial exactly one and the hard maximum of 10 phases are enforced; do not create artificial splits to satisfy an advisory band. Preserve the complete scope.\n")

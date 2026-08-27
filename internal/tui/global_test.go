@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -16,9 +17,22 @@ func globalProject(slug string, status state.LifecycleStatus) state.ProjectState
 	return state.ProjectState{Slug: slug, Name: slug, Status: status}
 }
 
+// absoluteFolder mirrors the normalization NewGlobalController applies to
+// listed folders. Relative-to-drive inputs such as "/a" only become absolute
+// once filepath.Abs runs, so tests must compare against the same form.
+func absoluteFolder(t *testing.T, folder string) string {
+	t.Helper()
+	absolute, err := filepath.Abs(folder)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return filepath.Clean(absolute)
+}
+
 func TestGlobalControllerGroupsSortsAndClassifiesProjects(t *testing.T) {
+	first := absoluteFolder(t, "/a")
 	controller, err := NewGlobalController(func(context.Context) ([]string, error) { return []string{"/z", "/a", "/a"}, nil }, func(_ context.Context, folder string) ([]state.ProjectState, error) {
-		if folder == "/a" {
+		if folder == first {
 			return []state.ProjectState{globalProject("z", state.StatusFinished), globalProject("a", state.StatusRunning), globalProject("s", state.StatusStopped)}, nil
 		}
 		return []state.ProjectState{globalProject("f", state.StatusFailed)}, nil
@@ -30,7 +44,7 @@ func TestGlobalControllerGroupsSortsAndClassifiesProjects(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(snapshot.Folders) != 2 || snapshot.Folders[0].Folder != "/a" {
+	if len(snapshot.Folders) != 2 || snapshot.Folders[0].Folder != first {
 		t.Fatalf("folders = %#v", snapshot.Folders)
 	}
 	projects := snapshot.Folders[0].Projects

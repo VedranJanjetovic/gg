@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/VedranJanjetovic/gg/internal/robustio"
 )
 
 // ArtifactName is the worktree-relative path of the QA proof. It lives in
@@ -149,7 +151,7 @@ func (s *ArtifactService) DiscoverAndCopy(ctx context.Context, worktree, slug st
 	if err = tmp.Close(); err != nil {
 		return Artifact{}, err
 	}
-	if err = os.Rename(tmpName, dst); err != nil {
+	if err = robustio.Rename(tmpName, dst); err != nil {
 		return Artifact{}, err
 	}
 	return Artifact{Path: dst, Classification: parsed.Classify(), Proof: parsed, DeferredChecks: parsed.DeferredChecks()}, nil

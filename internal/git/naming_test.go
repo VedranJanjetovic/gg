@@ -60,7 +60,7 @@ func TestValidateProjectSlug(t *testing.T) {
 }
 
 func TestProjectNamingFor(t *testing.T) {
-	naming, err := ProjectNamingFor("/projects/developer_ai", "My Project")
+	naming, err := ProjectNamingFor(NativeAbs(t, "projects", "developer_ai"), "My Project")
 	if err != nil {
 		t.Fatalf("ProjectNamingFor returned error: %v", err)
 	}
@@ -68,7 +68,7 @@ func TestProjectNamingFor(t *testing.T) {
 	want := ProjectNaming{
 		Slug:         "my-project",
 		BranchName:   "gg/my-project",
-		WorktreePath: filepath.Join("/projects", ".gg-worktrees", "my-project"),
+		WorktreePath: NativeAbs(t, "projects", ".gg-worktrees", "my-project"),
 	}
 	if naming != want {
 		t.Fatalf("ProjectNamingFor returned %#v, want %#v", naming, want)
@@ -76,11 +76,11 @@ func TestProjectNamingFor(t *testing.T) {
 }
 
 func TestProjectNamingForCollidingNamesIsDeterministic(t *testing.T) {
-	first, err := ProjectNamingFor("/projects/developer_ai", "Project A")
+	first, err := ProjectNamingFor(NativeAbs(t, "projects", "developer_ai"), "Project A")
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := ProjectNamingFor("/projects/developer_ai", "project-a")
+	second, err := ProjectNamingFor(NativeAbs(t, "projects", "developer_ai"), "project-a")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,9 +97,9 @@ func TestProjectNamingForRejectsUnsafeAndNestedPaths(t *testing.T) {
 		wantErr    error
 		wantWithin bool
 	}{
-		{name: "unsafe slug", root: "/projects/developer_ai", slug: "../escape", wantErr: ErrInvalidProjectSlug},
-		{name: "main checkout is not parent", root: "/projects/developer_ai", slug: "safe", wantWithin: false},
-		{name: "generated path cannot nest", root: "/projects/.gg-worktrees", slug: "safe", wantErr: ErrNestedWorktreeRoot},
+		{name: "unsafe slug", root: NativeAbs(t, "projects", "developer_ai"), slug: "../escape", wantErr: ErrInvalidProjectSlug},
+		{name: "main checkout is not parent", root: NativeAbs(t, "projects", "developer_ai"), slug: "safe", wantWithin: false},
+		{name: "generated path cannot nest", root: NativeAbs(t, "projects", ".gg-worktrees"), slug: "safe", wantErr: ErrNestedWorktreeRoot},
 	}
 
 	for _, test := range tests {

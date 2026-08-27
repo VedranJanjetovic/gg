@@ -147,6 +147,10 @@ func TestProjectStateCarriesNormalizedDeferredChecks(t *testing.T) {
 	project := validProjectState()
 	project.DeferredChecks = []proof.DeferredCheck{check}
 	project.PhaseHistory = []PhaseRecord{{Phase: "qa", Status: StatusFinished, StartedAt: project.CreatedAt, DeferredChecks: []proof.DeferredCheck{check}, Outcome: &ExecutionOutcome{DeferredChecks: []proof.DeferredCheck{check}}}}
+	project.Verification = &VerificationState{
+		PlannedSteps: []VerificationStep{{Name: "tests", Command: "go", Args: []string{"test"}, Env: map[string]string{"GO": "1.22"}, Adapter: VerificationAdapterGoTest}},
+		RepairMode:   true,
+	}
 	got, err := NewProjectState(project)
 	if err != nil {
 		t.Fatal(err)
@@ -160,5 +164,19 @@ func TestProjectStateCarriesNormalizedDeferredChecks(t *testing.T) {
 	encoded, err := json.Marshal(got)
 	if err != nil || !strings.Contains(string(encoded), "deferredChecks") {
 		t.Fatalf("encoded project = %s, error = %v", encoded, err)
+	}
+	project.Verification.PlannedSteps[0].Args[0] = "mutated"
+	project.Verification.PlannedSteps[0].Env["GO"] = "mutated"
+	if got.Verification.PlannedSteps[0].Args[0] != "test" || got.Verification.PlannedSteps[0].Env["GO"] != "1.22" {
+		t.Fatalf("verification state was not deeply copied: %#v", got.Verification)
+	}
+	invalid := got
+	invalid.Verification = &VerificationState{PlannedSteps: []VerificationStep{{Name: "tests", Command: "go", Args: []string{"test"}, Adapter: VerificationAdapter("unknown")}}}
+	if _, err := NewProjectState(invalid); err == nil {
+		t.Fatal("invalid verification adapter was accepted")
+	}
+	invalid.Verification = &VerificationState{PlannedSteps: []VerificationStep{{Name: "tests", Command: "go", Args: []string{"test"}, Adapter: VerificationAdapterGoTest}}, RemediationAttempts: MaxVerificationRemediationAttempts + 1}
+	if _, err := NewProjectState(invalid); err == nil {
+		t.Fatal("remediation attempts beyond the fixed budget were accepted")
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -32,11 +33,16 @@ func (f *worktreeExecutor) Execute(_ context.Context, c git.Command) (string, er
 }
 
 func TestParseAndEnsureWorktreeCommands(t *testing.T) {
-	root := filepath.Join(string(filepath.Separator), "repo")
-	path := filepath.Join(string(filepath.Separator), "tmp", "owned")
-	listing := "worktree /repo\nHEAD abc\nbranch refs/heads/main\n\n"
-	createdListing := listing + "worktree " + path + "\nHEAD def\nbranch refs/heads/gg/owned\n\n"
-	f := &worktreeExecutor{outputs: []string{"/repo\n", listing, "", "/repo\n", createdListing}}
+	// A leading separator is not enough on Windows: "\repo" is drive-relative,
+	// so production's filepath.Abs would rewrite it and every Dir comparison
+	// below would see a drive-prefixed path instead.
+	root := git.NativeAbs(t, "repo")
+	path := git.NativeAbs(t, "tmp", "owned")
+	// git's own output is forward-slash on every platform ("D:/repo").
+	rootOutput := filepath.ToSlash(root) + "\n"
+	listing := "worktree " + filepath.ToSlash(root) + "\nHEAD abc\nbranch refs/heads/main\n\n"
+	createdListing := listing + "worktree " + filepath.ToSlash(path) + "\nHEAD def\nbranch refs/heads/gg/owned\n\n"
+	f := &worktreeExecutor{outputs: []string{rootOutput, listing, "", rootOutput, createdListing}}
 	c := git.NewClient(root, f)
 	got, created, err := c.EnsureWorktree(context.Background(), git.WorktreeRequest{Path: path, Branch: "gg/owned", BaseRef: "main"})
 	if err != nil {
@@ -55,17 +61,20 @@ func TestParseAndEnsureWorktreeCommands(t *testing.T) {
 }
 
 func TestEnsureRejectsPathAndBranchCollisions(t *testing.T) {
-	listing := "worktree /repo\nHEAD abc\nbranch refs/heads/main\n\nworktree /other\nHEAD def\nbranch refs/heads/gg/other\n\n"
+	root := git.NativeAbs(t, "repo")
+	rootOutput := filepath.ToSlash(root) + "\n"
+	listing := "worktree " + filepath.ToSlash(root) + "\nHEAD abc\nbranch refs/heads/main\n\nworktree " +
+		filepath.ToSlash(git.NativeAbs(t, "other")) + "\nHEAD def\nbranch refs/heads/gg/other\n\n"
 	for name, tc := range map[string]struct {
 		request git.WorktreeRequest
 		want    error
 	}{
-		"path":   {request: git.WorktreeRequest{Path: "/repo", Branch: "gg/new", BaseRef: "main"}, want: git.ErrWorktreePathInUse},
-		"branch": {request: git.WorktreeRequest{Path: "/new", Branch: "gg/other", BaseRef: "main"}, want: git.ErrWorktreeBranchInUse},
+		"path":   {request: git.WorktreeRequest{Path: root, Branch: "gg/new", BaseRef: "main"}, want: git.ErrWorktreePathInUse},
+		"branch": {request: git.WorktreeRequest{Path: git.NativeAbs(t, "new"), Branch: "gg/other", BaseRef: "main"}, want: git.ErrWorktreeBranchInUse},
 	} {
 		t.Run(name, func(t *testing.T) {
-			f := &worktreeExecutor{outputs: []string{"/repo\n", listing}}
-			_, _, err := git.NewClient("/repo", f).EnsureWorktree(context.Background(), tc.request)
+			f := &worktreeExecutor{outputs: []string{rootOutput, listing}}
+			_, _, err := git.NewClient(root, f).EnsureWorktree(context.Background(), tc.request)
 			if !errors.Is(err, tc.want) {
 				t.Fatalf("error %v, want %v", err, tc.want)
 			}
@@ -75,25 +84,28 @@ func TestEnsureRejectsPathAndBranchCollisions(t *testing.T) {
 
 func TestEnsurePropagatesWorktreeCreationFailure(t *testing.T) {
 	cause := errors.New("branch creation failed")
-	listing := "worktree /repo\nHEAD abc\nbranch refs/heads/main\n\n"
+	root := git.NativeAbs(t, "repo")
+	path := git.NativeAbs(t, "tmp", "new")
+	listing := "worktree " + filepath.ToSlash(root) + "\nHEAD abc\nbranch refs/heads/main\n\n"
 	f := &worktreeExecutor{
-		outputs: []string{"/repo\n", listing},
+		outputs: []string{filepath.ToSlash(root) + "\n", listing},
 		errs:    []error{nil, nil, cause},
 	}
-	_, _, err := git.NewClient("/repo", f).EnsureWorktree(context.Background(), git.WorktreeRequest{
-		Path: "/tmp/new", Branch: "gg/new", BaseRef: "main",
+	_, _, err := git.NewClient(root, f).EnsureWorktree(context.Background(), git.WorktreeRequest{
+		Path: path, Branch: "gg/new", BaseRef: "main",
 	})
 	if !errors.Is(err, cause) {
 		t.Fatalf("error = %v, want original creation failure", err)
 	}
-	if len(f.commands) != 3 || !reflect.DeepEqual(f.commands[2].Args, []string{"worktree", "add", "-b", "gg/new", "/tmp/new", "main"}) {
+	if len(f.commands) != 3 || !reflect.DeepEqual(f.commands[2].Args, []string{"worktree", "add", "-b", "gg/new", path, "main"}) {
 		t.Fatalf("commands = %#v, want repository lookup, listing, and add", f.commands)
 	}
 }
 
 func TestDryRunConstructsEnsureAndRemoveCommands(t *testing.T) {
-	c := git.NewClient("/repo", &worktreeExecutor{}, git.WithDryRun())
-	path := "/tmp/owned"
+	root := git.NativeAbs(t, "repo")
+	c := git.NewClient(root, &worktreeExecutor{}, git.WithDryRun())
+	path := git.NativeAbs(t, "tmp", "owned")
 	if _, _, err := c.EnsureWorktree(context.Background(), git.WorktreeRequest{Path: path, Branch: "gg/owned", BaseRef: "main"}); err != nil {
 		t.Fatal(err)
 	}
@@ -101,14 +113,14 @@ func TestDryRunConstructsEnsureAndRemoveCommands(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []git.Command{
-		{Dir: "/repo", Name: "git", Args: []string{"rev-parse", "--show-toplevel"}},
-		{Dir: "/repo", Name: "git", Args: []string{"worktree", "list", "--porcelain"}},
-		{Dir: "/repo", Name: "git", Args: []string{"worktree", "add", "-b", "gg/owned", path, "main"}},
-		{Dir: "/repo", Name: "git", Args: []string{"rev-parse", "--show-toplevel"}},
-		{Dir: "/repo", Name: "git", Args: []string{"worktree", "list", "--porcelain"}},
+		{Dir: root, Name: "git", Args: []string{"rev-parse", "--show-toplevel"}},
+		{Dir: root, Name: "git", Args: []string{"worktree", "list", "--porcelain"}},
+		{Dir: root, Name: "git", Args: []string{"worktree", "add", "-b", "gg/owned", path, "main"}},
+		{Dir: root, Name: "git", Args: []string{"rev-parse", "--show-toplevel"}},
+		{Dir: root, Name: "git", Args: []string{"worktree", "list", "--porcelain"}},
 		{Dir: path, Name: "git", Args: []string{"status", "--porcelain", "--untracked-files=all"}},
-		{Dir: "/repo", Name: "git", Args: []string{"worktree", "remove", "--", path}},
-		{Dir: "/repo", Name: "git", Args: []string{"branch", "-D", "--", "gg/owned"}},
+		{Dir: root, Name: "git", Args: []string{"worktree", "remove", "--", path}},
+		{Dir: root, Name: "git", Args: []string{"branch", "-D", "--", "gg/owned"}},
 	}
 	if !reflect.DeepEqual(c.Commands(), want) {
 		t.Fatalf("commands %#v, want %#v", c.Commands(), want)
@@ -117,13 +129,17 @@ func TestDryRunConstructsEnsureAndRemoveCommands(t *testing.T) {
 
 func TestRemoveRefusesPartialFailureAndDirtyOutput(t *testing.T) {
 	cause := errors.New("status unavailable")
-	f := &worktreeExecutor{outputs: []string{"/repo\n", "worktree /tmp/owned\nHEAD abc\nbranch refs/heads/gg/owned\n\n"}, errs: []error{nil, nil, cause}}
-	err := git.NewClient("/repo", f).RemoveWorktree(context.Background(), "/tmp/owned", "gg/owned")
+	root := git.NativeAbs(t, "repo")
+	path := git.NativeAbs(t, "tmp", "owned")
+	rootOutput := filepath.ToSlash(root) + "\n"
+	listing := "worktree " + filepath.ToSlash(path) + "\nHEAD abc\nbranch refs/heads/gg/owned\n\n"
+	f := &worktreeExecutor{outputs: []string{rootOutput, listing}, errs: []error{nil, nil, cause}}
+	err := git.NewClient(root, f).RemoveWorktree(context.Background(), path, "gg/owned")
 	if !errors.Is(err, cause) || len(f.commands) != 3 {
 		t.Fatalf("error %v commands %#v", err, f.commands)
 	}
-	f = &worktreeExecutor{outputs: []string{"/repo\n", "worktree /tmp/owned\nHEAD abc\nbranch refs/heads/gg/owned\n\n", " M file\n"}}
-	err = git.NewClient("/repo", f).RemoveWorktree(context.Background(), "/tmp/owned", "gg/owned")
+	f = &worktreeExecutor{outputs: []string{rootOutput, listing, " M file\n"}}
+	err = git.NewClient(root, f).RemoveWorktree(context.Background(), path, "gg/owned")
 	if !errors.Is(err, git.ErrUnsafeWorktree) || len(f.commands) != 3 {
 		t.Fatalf("dirty error %v commands %#v", err, f.commands)
 	}
@@ -188,11 +204,61 @@ func TestWorktreeIntegrationCreateReuseLookupAndRemove(t *testing.T) {
 	}
 }
 
+func TestPathsEqualResolvesFilesystemAliasesAndMissingChildren(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "target")
+	if err := os.Mkdir(target, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(root, "alias")
+	if err := os.Symlink(target, alias); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	tests := map[string]struct {
+		left, right string
+		want        bool
+	}{
+		"same path":        {target, target, true},
+		"dot segments":     {filepath.Join(root, ".", "target"), target, true},
+		"symlink alias":    {alias, target, true},
+		"missing child":    {filepath.Join(alias, "new-child"), filepath.Join(target, "new-child"), true},
+		"different folder": {filepath.Join(root, "other"), filepath.Join(root, "another"), false},
+	}
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			if got := git.PathsEqual(test.left, test.right); got != test.want {
+				t.Fatalf("PathsEqual(%q, %q) = %v, want %v", test.left, test.right, got, test.want)
+			}
+		})
+	}
+	if runtime.GOOS == "darwin" && !git.PathsEqual("/var", "/private/var") {
+		t.Fatal("PathsEqual(/var, /private/var) = false, want true on macOS")
+	}
+	caseVariant := filepath.Join(root, "TARGET")
+	if _, err := os.Stat(caseVariant); err == nil {
+		if !git.PathsEqual(target, caseVariant) {
+			t.Fatalf("PathsEqual(%q, %q) = false, want true on a case-insensitive volume", target, caseVariant)
+		}
+		if !git.PathsEqual(filepath.Join(target, "new-child"), filepath.Join(caseVariant, "new-child")) {
+			t.Fatalf("PathsEqual missing children under case aliases = false, want true")
+		}
+	} else if runtime.GOOS == "windows" {
+		if git.PathsEqual(target, caseVariant) {
+			t.Fatalf("PathsEqual(%q, %q) = true, want false in a case-sensitive Windows directory", target, caseVariant)
+		}
+		if git.PathsEqual(filepath.Join(target, "new-child"), filepath.Join(caseVariant, "new-child")) {
+			t.Fatalf("PathsEqual missing children under case aliases = true in a case-sensitive Windows directory")
+		}
+	}
+}
+
 func TestListWorktreesAcceptsKnownMetadataVariants(t *testing.T) {
-	listing := "worktree /repo\nHEAD abc\nbranch refs/heads/main\nworktreeConfig\n\n" +
-		"worktree /gone\nHEAD def\nbranch refs/heads/gg/gone\nprunable stale\nlocked\nreason maintenance\n\n"
-	f := &worktreeExecutor{outputs: []string{"/repo\n", listing}}
-	worktrees, err := git.NewClient("/repo", f).ListWorktrees(context.Background())
+	root := git.NativeAbs(t, "repo")
+	listing := "worktree " + filepath.ToSlash(root) + "\nHEAD abc\nbranch refs/heads/main\nworktreeConfig\n\n" +
+		"worktree " + filepath.ToSlash(git.NativeAbs(t, "gone")) + "\nHEAD def\nbranch refs/heads/gg/gone\nprunable stale\nlocked\nreason maintenance\n\n"
+	f := &worktreeExecutor{outputs: []string{filepath.ToSlash(root) + "\n", listing}}
+	worktrees, err := git.NewClient(root, f).ListWorktrees(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -206,8 +272,9 @@ func TestRemoveWorktreeRejectsOccupiedUnregisteredPath(t *testing.T) {
 	if err := os.WriteFile(path, []byte("unrelated"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	f := &worktreeExecutor{outputs: []string{"/repo\n", "worktree /repo\nHEAD abc\nbranch refs/heads/main\n\n"}}
-	err := git.NewClient("/repo", f).RemoveWorktree(context.Background(), path, "gg/occupied")
+	root := git.NativeAbs(t, "repo")
+	f := &worktreeExecutor{outputs: []string{filepath.ToSlash(root) + "\n", "worktree " + filepath.ToSlash(root) + "\nHEAD abc\nbranch refs/heads/main\n\n"}}
+	err := git.NewClient(root, f).RemoveWorktree(context.Background(), path, "gg/occupied")
 	if !errors.Is(err, git.ErrWorktreePathInUse) {
 		t.Fatalf("error = %v, want occupied path error", err)
 	}

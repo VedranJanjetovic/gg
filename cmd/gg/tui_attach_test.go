@@ -210,7 +210,12 @@ func TestNewAppWithIOWiresBareProjectAttachment(t *testing.T) {
 		}
 		phases = append(phases, config.PhaseConfig{Phase: phase, Enabled: true, Required: required, AgentSettings: defaults})
 	}
-	if err := config.NewStore().SaveProject(repo, config.CompleteProjectConfig(config.CompleteSchemaVersion, defaults, phases, config.GitOpsOverride{})); err != nil {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	store := config.NewStore()
+	if err := store.SaveGlobal(config.GlobalConfig{Version: config.CurrentSchemaVersion, Defaults: defaults}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveProject(repo, config.CompleteProjectConfig(config.CompleteSchemaVersion, defaults, phases, config.GitOpsOverride{})); err != nil {
 		t.Fatal(err)
 	}
 	previous, err := os.Getwd()

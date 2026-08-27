@@ -3,7 +3,6 @@ package agent
 import (
 	"context"
 	"errors"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
@@ -11,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/VedranJanjetovic/gg/internal/config"
+	"github.com/VedranJanjetovic/gg/testdata/fakeagent"
 )
 
 func TestProviderBuildsSafeClaudeAndCodexArguments(t *testing.T) {
@@ -61,9 +61,10 @@ func TestProviderBuildsSafeClaudeAndCodexArguments(t *testing.T) {
 
 func TestProviderUsesInheritedEnvironmentWithFakeExecutable(t *testing.T) {
 	dir := t.TempDir()
-	executable := filepath.Join(dir, "fake-agent")
-	script := "#!/bin/sh\nprintf '%s\\n' \"$GG_AGENT_TEST_VALUE\"\nprintf '%s\\n' \"$1\"\nprintf '%s\\n' \"$5\"\n"
-	if err := os.WriteFile(executable, []byte(script), 0o700); err != nil {
+	executable, err := fakeagent.Install(dir, "fake-agent", fakeagent.Spec{
+		Stdout: "${ENV:GG_AGENT_TEST_VALUE}\n${ARG1}\n${ARG5}\n",
+	})
+	if err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("GG_AGENT_TEST_VALUE", "inherited")

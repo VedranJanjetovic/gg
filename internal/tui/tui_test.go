@@ -708,6 +708,26 @@ Progress  ░░░░░░░░░░░░░░░░░░░░░░░�
 	}
 }
 
+func TestWriteStatusRendersVerificationEvidenceAndNextAction(t *testing.T) {
+	snapshot := testSnapshot(t)
+	project := testProject(snapshot, state.StatusFinished, string(pipeline.PhaseTestDocument), "", nil)
+	project.Verification = &state.VerificationState{
+		CurrentResults:      []state.VerificationCommandResult{{CheckName: "tests", Command: "go", Args: []string{"test", "./..."}, LogPath: ".gg/logs/tests.log"}},
+		Warnings:            []state.VerificationFinding{{CheckName: "tests", Identity: "pkg/TestLegacy", Reason: "known failure", Classification: "flaky"}},
+		RemediationAttempts: 2,
+		NextAction:          "continue; flaky warning retained",
+	}
+	var output bytes.Buffer
+	if err := WriteStatus(context.Background(), &output, project, nil, WithColor(false)); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"Verification:", "warning:", "check=tests", "command=go test ./...", "identity=pkg/TestLegacy", "reason=known failure", "classification=flaky", "attempts=2/3", "log=.gg/logs/tests.log", "Next action: continue; flaky warning retained"} {
+		if !strings.Contains(output.String(), want) {
+			t.Fatalf("TUI status missing %q:\n%s", want, output.String())
+		}
+	}
+}
+
 func TestRefreshErrorIsVisibleAndKeepsLastGoodState(t *testing.T) {
 	snapshot := testSnapshot(t)
 	project := testProject(snapshot, state.StatusRunning, string(pipeline.PhaseDevelopment), "testing", nil)

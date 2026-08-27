@@ -10,14 +10,64 @@ import (
 	"github.com/VedranJanjetovic/gg/internal/config"
 )
 
+// repairExistingVerificationFlag opts a run or resume into repairing the
+// parent verification failures that were present before gg started.
+const repairExistingVerificationFlag = "repair-existing-verification"
+
+// isFlagNamed reports whether arg names the given flag in any spelling the flag
+// package accepts: one or two leading dashes, with or without an =value.
+func isFlagNamed(arg, name string) bool {
+	trimmed, ok := strings.CutPrefix(arg, "--")
+	if !ok {
+		if trimmed, ok = strings.CutPrefix(arg, "-"); !ok {
+			return false
+		}
+	}
+	flagName, _, _ := strings.Cut(trimmed, "=")
+	return flagName == name
+}
+
 type runOptions struct {
-	overrides     config.RunOverrides
-	maxIterations int
-	args          []string
+	overrides                  config.RunOverrides
+	maxIterations              int
+	repairExistingVerification bool
+	args                       []string
 	// flagArgs preserves the raw flag arguments (everything before the
 	// positional arguments) so a detached run can be re-spawned as
 	// `gg run <flagArgs...> <slug>` without reconstructing flags.
 	flagArgs []string
+}
+
+type resumeOptions struct {
+	selector                   string
+	repairExistingVerification bool
+}
+
+func parseResumeOptions(args []string) (resumeOptions, error) {
+	options := resumeOptions{}
+	flags := flag.NewFlagSet("gg resume", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	flags.BoolVar(&options.repairExistingVerification, repairExistingVerificationFlag, false, "explicitly repair existing verification failures")
+	ordered := make([]string, 0, len(args))
+	positional := make([]string, 0, len(args))
+	for _, arg := range args {
+		if isFlagNamed(arg, repairExistingVerificationFlag) {
+			ordered = append(ordered, arg)
+			continue
+		}
+		positional = append(positional, arg)
+	}
+	ordered = append(ordered, positional...)
+	if err := flags.Parse(ordered); err != nil {
+		return resumeOptions{}, fmt.Errorf("parse resume arguments: %w", err)
+	}
+	if flags.NArg() > 1 {
+		return resumeOptions{}, errors.New("resume accepts at most one project selector")
+	}
+	if flags.NArg() == 1 {
+		options.selector = flags.Arg(0)
+	}
+	return options, nil
 }
 
 func parseRunOptions(args []string) (runOptions, error) {
@@ -31,6 +81,7 @@ func parseRunOptions(args []string) (runOptions, error) {
 	flags.Var(gitOpsToggleValue{target: &options.overrides.GitOps.EnableCI, value: true}, "enable-ci", "enable the CI phase for this run")
 	flags.Var(gitOpsToggleValue{target: &options.overrides.GitOps.EnableCI, value: false}, "disable-ci", "disable the CI phase for this run")
 	flags.IntVar(&options.maxIterations, "max-iterations", 3, "maximum total QA attempts")
+	flags.BoolVar(&options.repairExistingVerification, "repair-existing-verification", false, "explicitly repair existing parent verification failures")
 
 	orderedArgs, err := orderRunFlags(args)
 	if err != nil {
@@ -56,10 +107,13 @@ func parseRunOptions(args []string) (runOptions, error) {
 
 var runFlags = map[string]struct{}{
 	"--parent-branch": {}, "--base-ref": {}, "--enable-pr": {}, "--disable-pr": {}, "--enable-ci": {}, "--disable-ci": {},
-	"--max-iterations": {},
+	"--max-iterations": {}, "--repair-existing-verification": {},
 }
 
-var removedRunFlags = map[string]struct{}{
+// retiredRunFlags are flags gg no longer accepts. They are still hoisted ahead
+// of the positional arguments so flag.Parse reports the removal instead of
+// silently treating the flag as a project selector.
+var retiredRunFlags = map[string]struct{}{
 	"--agent": {}, "--model": {}, "--effort": {},
 	"--phase-agent": {}, "--phase-model": {}, "--phase-effort": {},
 	"--enable-phase": {}, "--disable-phase": {},
@@ -67,6 +121,7 @@ var removedRunFlags = map[string]struct{}{
 
 var runBoolFlags = map[string]struct{}{
 	"--enable-pr": {}, "--disable-pr": {}, "--enable-ci": {}, "--disable-ci": {},
+	"--repair-existing-verification": {},
 }
 
 // orderRunFlags lets transient flags appear before or after legacy positional
@@ -94,7 +149,7 @@ func orderRunFlags(args []string) ([]string, error) {
 			i++
 			continue
 		}
-		if _, removed := removedRunFlags[strings.SplitN(arg, "=", 2)[0]]; removed {
+		if _, retired := retiredRunFlags[strings.SplitN(arg, "=", 2)[0]]; retired {
 			flagArgs = append(flagArgs, arg)
 			if !strings.Contains(arg, "=") && i+1 < len(args) {
 				flagArgs = append(flagArgs, args[i+1])

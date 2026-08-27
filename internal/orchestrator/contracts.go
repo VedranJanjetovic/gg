@@ -13,6 +13,7 @@ import (
 	"github.com/VedranJanjetovic/gg/internal/pipeline"
 	"github.com/VedranJanjetovic/gg/internal/pr"
 	"github.com/VedranJanjetovic/gg/internal/state"
+	"github.com/VedranJanjetovic/gg/internal/verification"
 )
 
 // Request contains the already-resolved inputs for one project execution.
@@ -28,6 +29,9 @@ type Request struct {
 	GitOps         config.GitOpsConfig
 	ArtifactRoot   string
 	PullRequestURL string
+	// RepairExistingVerification is set only by the explicit CLI option. It
+	// is carried into Planning and resume requests without inspecting prose.
+	RepairExistingVerification bool
 	// AllowDevelopmentSubphaseWithoutCommit is an explicit compatibility escape
 	// hatch for workflows whose contract does not require a development commit.
 	// The default is enforcement when a verifier is configured.
@@ -60,6 +64,13 @@ type PlanPhaseScope struct {
 // PhaseRunner is the existing agent execution contract consumed by a future
 // orchestrator implementation.
 type PhaseRunner = agent.Runner
+
+// VerificationService is the process boundary for the planned verification
+// set. It deliberately returns the report alongside execution errors so a
+// required unavailable check can be persisted before the project pauses.
+type VerificationService interface {
+	Verify(context.Context, string, []verification.Step) (verification.Report, error)
+}
 
 // PhaseOutcome describes one phase or development-subphase execution. Result
 // carries process-owned timing, status, artifacts, and logs from agent.Runner.
@@ -222,6 +233,7 @@ type ConflictStateReader interface {
 // DevelopmentCommitVerifier snapshots and verifies Git progress for each
 // development subphase. Git-specific output parsing remains in the adapter.
 type DevelopmentCommitVerifier interface {
+	InspectDevelopmentWorktree(context.Context, string) ([]git.DevelopmentWorktreeChange, error)
 	HeadCommit(context.Context, string) (string, error)
 	VerifyUnsignedDevelopmentCommits(context.Context, string, string, bool) error
 	// AutoCommitUncommittedChanges preserves work an agent left uncommitted
@@ -238,7 +250,8 @@ type ProjectObserver interface {
 // ResumeAllRequest identifies a restart-safe resume sweep. The sweep is not
 // tied to a TUI attachment and may be retried after a process restart.
 type ResumeAllRequest struct {
-	RunID string
+	RunID                      string
+	RepairExistingVerification bool
 }
 
 // ResumeResult records one project's independent resume outcome. A failed item

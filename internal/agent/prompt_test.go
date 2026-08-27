@@ -248,6 +248,22 @@ func TestBuildPromptUnscopedDevelopmentMandatesPerPhaseTests(t *testing.T) {
 	}
 }
 
+func TestBuildPromptRequiresPlanningVerificationContractAndExplicitRepairMode(t *testing.T) {
+	prompt, err := BuildPrompt(PromptInput{
+		ProjectGoal: "document the workflow", AcceptanceCriteria: []string{"the workflow is documented"},
+		Phase: pipeline.PhasePlanning, PhaseContract: "planning contract", WorkingDirectory: "/tmp/worktree", RunID: "planning-run",
+		RepairExistingVerification: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"gg_verification_steps", "direct executable", "gg_repair_mode", "set `gg_repair_mode: true`"} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("planning prompt does not contain %q:\n%s", want, prompt)
+		}
+	}
+}
+
 func TestBuildPromptReferencesSkillsByNameAndCodingPatternsByPath(t *testing.T) {
 	base := PromptInput{
 		Project:       state.ProjectState{OriginalGoal: "ship it", AcceptanceCriteria: []string{"tests pass"}},

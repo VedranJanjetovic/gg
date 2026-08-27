@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/VedranJanjetovic/gg/internal/robustio"
 	"gopkg.in/yaml.v3"
 )
 
@@ -557,7 +558,7 @@ func writeYAMLAtomic(path string, value any) (retErr error) {
 	if err := f.Close(); err != nil {
 		return fmt.Errorf("close configuration: %w", err)
 	}
-	if err := os.Rename(tmp, path); err != nil {
+	if err := robustio.Rename(tmp, path); err != nil {
 		return fmt.Errorf("replace configuration: %w", err)
 	}
 	return nil
@@ -592,7 +593,7 @@ func writeBytesAtomic(path string, data []byte) (retErr error) {
 	if err := f.Close(); err != nil {
 		return fmt.Errorf("close configuration: %w", err)
 	}
-	if err := os.Rename(tmp, path); err != nil {
+	if err := robustio.Rename(tmp, path); err != nil {
 		return fmt.Errorf("replace configuration: %w", err)
 	}
 	return nil

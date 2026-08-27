@@ -199,6 +199,8 @@ go build -ldflags "-X github.com/VedranJanjetovic/gg/internal/version.Version=v1
 
 The attached project view renders the persisted configured phases and Development subphases; the Development row is annotated with plan progress — `Development (phase 2/4 — Gameplay)` names the plan phase currently being worked. Development runs a **per-plan-phase loop**: every pending plan phase gets its own fresh Implementation → Testing → Review agent sequence (each subphase a new agent with a clean context, scoped to that one plan phase), and the phase is marked complete only after its review passes — so tests exist and pass for phase N before phase N+1 starts, and a resumed run continues at the first unfinished plan phase. Projects without a plan, and QA-feedback fix passes, run a single worktree-wide Implementation → Testing → Review pass. Completed phases have green checks, the active phase has a loader, and failed or stopped phases retain their status; a failed phase also shows the persisted failure reason (for example the agent's own error message) directly under its row. Press `s` to stop a running pipeline, `r` to continue a stopped pipeline, and `q` to detach at any time. When GitOps is not explicitly configured, the parent branch is detected from the repository (local `origin/HEAD`, then the remote's advertised HEAD, then the checked-out branch) instead of assuming `main`. Pipelines execute in a **detached background gg process** (its output is appended to `.gg/projects/<slug>/logs/daemon.log`), so runs survive detaching, quitting gg, and closing the terminal — start as many projects as you like and let them run in parallel. `gg stop` reaches a background run through the durable stop request in project state, and `r`/`gg resume` starts a fresh background process from the persisted snapshot. If a background process dies (crash, `kill -9`, reboot), the next gg command that sees the project detects the dead owner and repairs the state to a resumable `stopped`. Below the progress bar the view shows the total agent-reported token usage and, when reported, the USD cost (`Tokens: 1,234,567  ·  $12.34`); press `d` to toggle a per-phase breakdown with both. Counts and costs come from the agents themselves (codex's `tokens used` output; claude's JSON result usage and `total_cost_usd`) and are persisted per phase execution in project state — gg never estimates: agents that report no cost (codex) contribute tokens only. When stdin or stdout is not a terminal, `gg` runs the requested startup synchronously and prints one deterministic status snapshot instead of initializing the interactive UI.
 
+Verification policy is explicit and durable. Planning must persist the ordered executable `gg_verification_steps` set and `gg_repair_mode`; gg runs that set at the parent preflight, every plan-phase boundary, and the final gate. A green result proceeds, unchanged individually identifiable baseline failures remain visible as warnings, and repaired failures become required-green. Unavailable checks and failures without stable identities pause the project with a concrete next action; these strict fallbacks never become warnings. A one-time confirmation retry may retain a flaky warning, while a regression receives at most three persisted remediation attempts; `gg resume` grants three fresh attempts without discarding the original baseline. Development subphases create only change-bearing commits, while clean subphases do not create empty checkpoints. The Go 1.22 standard gates use external linking on macOS, including nested E2E builds. `gg status`, `gg list`, the attached TUI, and successful run/resume output show each finding's check, command, stable identity, normalized reason, classification, remediation attempts, bounded log reference, and next action. A project with only unchanged baseline or confirmed flaky warnings still finishes successfully with those warnings retained in durable state.
+
 The explicit `gg run`, `gg resume`, and `gg stop` commands remain available for scripting and direct lifecycle control.
 
 While a pipeline is running, `s` stops it. When a project is failed on a genuinely completed eligible execution, `s` instead opens a confirmation naming that exact execution; after confirmation gg records it as skipped and immediately starts the next unit. Skip is available only for Development Testing and the post-Development Rebase, QA, Test/Document, Build checker, PR, and CI units. It is TUI-only: there is no `gg skip` command. Stopped or interrupted work remains resumable with `r`, and ineligible failures cannot be skipped. Skipped failures retain their original evidence and a sticky count even if a later occurrence passes; the final project status remains the ordinary finished status.
@@ -355,21 +357,19 @@ go build -o /tmp/gg ./cmd/gg
 ```
 
 The repository's real-CLI end-to-end (E2E) suite builds and invokes the real
-executable with deterministic fake Claude/Codex binaries; it does not contact
-an AI provider. The suite is currently supported on **Linux and macOS
-(Darwin) only**. Its fixtures intentionally depend on POSIX shell commands,
-process groups, and Linux-only network-denial support. Windows has no native
-real-CLI fixtures yet: the shell/POSIX E2E files are excluded at build time,
-and the Windows package test reports that limitation as a skip. This keeps
-`go test ./...` honest on Windows without claiming unsupported E2E coverage.
+executable with deterministic Go-built fake Claude/Codex binaries; it does not
+contact an AI provider. The suite runs natively on **Linux, macOS (Darwin),
+and Windows**. Process cleanup uses the host platform's process-tree support,
+and the Linux-only network-denial test remains an additional Linux check while
+the same configured, network-free CLI scenarios run on every platform.
 
-On Linux or macOS, run the focused real-CLI suite with:
+Run the focused real-CLI suite with:
 
 ```bash
 go test ./internal/e2e -run 'TestRealCLI'
 ```
 
-Run the full supported-platform checks from the repository root with:
+Run the full platform checks from the repository root with:
 
 ```bash
 gofmt -l .
@@ -387,15 +387,10 @@ go vet ./...
 go build ./...
 ```
 
-The Windows `go test ./...` result includes the explicit unsupported-suite
-skip above; it is not a native run of the Linux/macOS real-CLI E2Es. To check
-Windows compilation from another host without running a Windows test binary,
-use `go test -c` for the E2E package (and remove the external output after the
-check):
-
-```bash
-GOOS=windows GOARCH=amd64 go test -c -o /tmp/gg-e2e-windows.test ./internal/e2e
-rm /tmp/gg-e2e-windows.test
-```
+The Windows job runs the same real-CLI E2E scenarios natively. The Linux-only
+network-denial helper is the only platform-specific addition; it does not
+replace or skip the portable Windows suite. Cross-compilation with `go test
+-c` can check compilation from another host, but it is not evidence of native
+Windows execution.
 
 For a release build, supply version metadata with linker flags as shown above, package the platform assets with the repository release build workflow, and verify archive names/root entries against the installer contract. Before committing documentation or code, run `git diff --check`, inspect `git status --short`, and scan changed text for conflict markers. CI should run the full test, race, vet, format, and build gates; release checks additionally verify reproducible metadata and installer/archive compatibility.

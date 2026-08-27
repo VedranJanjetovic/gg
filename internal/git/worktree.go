@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 )
 
@@ -230,14 +231,145 @@ func cleanWorktreePath(path string) string {
 	return filepath.Clean(absolute)
 }
 
+// PathsEqual reports whether two paths identify the same filesystem location.
+// It resolves symlinks for existing paths and resolves the deepest existing
+// parent for paths that have not been created yet. A resolution error fails
+// closed, which keeps ownership checks from accepting an uncertain match.
+func PathsEqual(left, right string) bool {
+	return worktreePathsEqual(left, right)
+}
+
 func worktreePathsEqual(left, right string) bool {
-	left, right = filepath.Clean(left), filepath.Clean(right)
-	if left == right {
+	leftIdentity, err := filesystemPathIdentity(left)
+	if err != nil {
+		return false
+	}
+	rightIdentity, err := filesystemPathIdentity(right)
+	if err != nil {
+		return false
+	}
+	if filepath.IsAbs(leftIdentity) != filepath.IsAbs(rightIdentity) {
+		return false
+	}
+	if leftIdentity == rightIdentity {
 		return true
 	}
-	resolvedLeft, leftErr := filepath.EvalSymlinks(left)
-	resolvedRight, rightErr := filepath.EvalSymlinks(right)
-	return leftErr == nil && rightErr == nil && filepath.Clean(resolvedLeft) == filepath.Clean(resolvedRight)
+
+	leftParent, leftMissing, err := existingPathParts(left)
+	if err != nil {
+		return false
+	}
+	rightParent, rightMissing, err := existingPathParts(right)
+	if err != nil {
+		return false
+	}
+	leftInfo, err := os.Stat(leftParent)
+	if err != nil {
+		return false
+	}
+	rightInfo, err := os.Stat(rightParent)
+	if err != nil || !os.SameFile(leftInfo, rightInfo) || len(leftMissing) != len(rightMissing) {
+		return false
+	}
+	if len(leftMissing) == 0 {
+		return true
+	}
+	if !caseInsensitiveVolume(leftParent) {
+		return false
+	}
+	for i := range leftMissing {
+		if !strings.EqualFold(leftMissing[i], rightMissing[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+func filesystemPathIdentity(path string) (string, error) {
+	parent, missing, err := existingPathParts(path)
+	if err != nil {
+		return "", err
+	}
+	resolved, err := filepath.EvalSymlinks(parent)
+	if err != nil {
+		return "", err
+	}
+	resolved = filepath.Clean(resolved)
+	for _, part := range missing {
+		resolved = filepath.Join(resolved, part)
+	}
+	return filepath.Clean(resolved), nil
+}
+
+func existingPathParts(path string) (string, []string, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return "", nil, errors.New("path is empty")
+	}
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return "", nil, err
+	}
+	current := filepath.Clean(absolute)
+	var missing []string
+	for {
+		if _, err := os.Stat(current); err == nil {
+			for i, j := 0, len(missing)-1; i < j; i, j = i+1, j-1 {
+				missing[i], missing[j] = missing[j], missing[i]
+			}
+			return current, missing, nil
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return "", nil, err
+		}
+
+		parent := filepath.Dir(current)
+		if parent == current {
+			return "", nil, fmt.Errorf("no existing parent for path %q", path)
+		}
+		missing = append(missing, filepath.Base(current))
+		current = parent
+	}
+}
+
+func caseInsensitiveVolume(path string) bool {
+	if runtime.GOOS != "windows" && runtime.GOOS != "darwin" {
+		return false
+	}
+	current := filepath.Clean(path)
+	for {
+		info, err := os.Stat(current)
+		if err == nil {
+			name := filepath.Base(current)
+			alternate := swapCase(name)
+			if alternate != name {
+				alternateInfo, alternateErr := os.Stat(filepath.Join(filepath.Dir(current), alternate))
+				if alternateErr == nil && os.SameFile(info, alternateInfo) {
+					return true
+				}
+			}
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return false
+		}
+		current = parent
+	}
+}
+
+func swapCase(value string) string {
+	var result strings.Builder
+	result.Grow(len(value))
+	for _, r := range value {
+		switch {
+		case r >= 'a' && r <= 'z':
+			result.WriteRune(r - ('a' - 'A'))
+		case r >= 'A' && r <= 'Z':
+			result.WriteRune(r + ('a' - 'A'))
+		default:
+			result.WriteRune(r)
+		}
+	}
+	return result.String()
 }
 
 func parseWorktreePorcelain(output string) ([]Worktree, error) {

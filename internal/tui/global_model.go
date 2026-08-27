@@ -210,7 +210,7 @@ func (m GlobalModel) View() string {
 		}
 		for _, observation := range folder.Projects {
 			index := m.snapshot.projectIndex(observation.Project.Slug)
-			label := fmt.Sprintf("%d) %s  %s", index, statusMarker(observation.Project.Status), observation.Project.Name)
+			label := fmt.Sprintf("%d) %s%s  %s", index, statusMarker(observation.Project.Status), verificationMarker(observation.Project), observation.Project.Name)
 			if phase := strings.TrimSpace(observation.Project.CurrentPhase); phase != "" && phase != "pipeline" {
 				label += "  ·  " + phase
 			}
@@ -248,4 +248,14 @@ func statusMarker(status state.LifecycleStatus) string {
 	default:
 		return "empty"
 	}
+}
+
+func verificationMarker(project state.ProjectState) string {
+	if state.VerificationIsPaused(project) {
+		return " [paused]"
+	}
+	if state.VerificationHasWarnings(project) {
+		return " [warning]"
+	}
+	return ""
 }

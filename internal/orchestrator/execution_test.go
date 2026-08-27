@@ -14,10 +14,12 @@ import (
 	"github.com/VedranJanjetovic/gg/internal/agent"
 	"github.com/VedranJanjetovic/gg/internal/ci"
 	"github.com/VedranJanjetovic/gg/internal/config"
+	"github.com/VedranJanjetovic/gg/internal/git"
 	"github.com/VedranJanjetovic/gg/internal/orchestrator"
 	"github.com/VedranJanjetovic/gg/internal/pipeline"
 	"github.com/VedranJanjetovic/gg/internal/pr"
 	"github.com/VedranJanjetovic/gg/internal/state"
+	"github.com/VedranJanjetovic/gg/testdata/fakeagent"
 )
 
 type fakeSeqRunner struct {
@@ -42,18 +44,149 @@ func (r *fakeSeqRunner) Run(ctx context.Context, req agent.RunRequest) (agent.Ru
 	return agent.RunResult{Phase: req.Phase, Status: state.StatusFinished}, nil
 }
 
+type planningArtifactRunner struct {
+	valid  bool
+	phases []pipeline.PhaseID
+}
+
+func (r *planningArtifactRunner) Run(_ context.Context, req agent.RunRequest) (agent.RunResult, error) {
+	r.phases = append(r.phases, req.Phase)
+	if req.Phase == pipeline.PhasePlanning {
+		if err := os.MkdirAll(filepath.Join(req.WorkingDirectory, ".gg"), 0o755); err != nil {
+			return agent.RunResult{Phase: req.Phase, Status: state.StatusFailed}, err
+		}
+		verification := ""
+		if r.valid {
+			verification = `gg_verification_steps: [{"name":"tests","command":"go","args":["test","./..."],"adapter":"go-test"}]` + "\n" +
+				"gg_repair_mode: true\n"
+		}
+		artifact := fmt.Sprintf("---\ngg_run_id: %q\ngg_disposition: passed\ngg_plan_phases: [\"Phase 2\"]\n%s---\n# Plan\n", req.RunID, verification)
+		if err := os.WriteFile(filepath.Join(req.WorkingDirectory, ".gg", "plan.md"), []byte(artifact), 0o644); err != nil {
+			return agent.RunResult{Phase: req.Phase, Status: state.StatusFailed}, err
+		}
+	}
+	return agent.RunResult{Phase: req.Phase, Status: state.StatusFinished}, nil
+}
+
+func planningPersistenceRequest(t *testing.T) (orchestrator.Request, *state.LifecycleService) {
+	t.Helper()
+	root := t.TempDir()
+	store, err := state.NewFileStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lifecycle := state.NewLifecycleService(store, nil, store.Locker())
+	project := state.ProjectState{
+		Name: "Planning persistence", Slug: "planning-persistence", OriginalGoal: "persist the contract",
+		AcceptanceCriteria: []string{"Planning persists verification"},
+		PipelineConfig:     state.PipelineConfigSnapshot{SchemaVersion: 1, Data: json.RawMessage(`{}`)},
+		CurrentPhase:       "pipeline", Status: state.StatusRunning, WorktreePath: root, BranchName: "planning-persistence",
+	}
+	if err := lifecycle.Create(context.Background(), project); err != nil {
+		t.Fatal(err)
+	}
+	resolved := config.ResolvedConfig{
+		Defaults: config.AgentSettings{Agent: config.AgentClaude, Model: "planning-test", Effort: config.EffortLow},
+		Phases:   make(map[config.Phase]config.ResolvedPhase),
+	}
+	for _, phase := range config.RemovablePhases() {
+		resolved.Phases[phase] = config.ResolvedPhase{AgentSettings: resolved.Defaults}
+	}
+	resolved.Phases[config.PhasePlanning] = config.ResolvedPhase{Enabled: true, AgentSettings: resolved.Defaults}
+	plan, err := pipeline.Resolve(pipeline.DefaultPipeline(), resolved)
+	if err != nil {
+		t.Fatal(err)
+	}
+	project, err = lifecycle.Load(context.Background(), project.Slug)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return orchestrator.Request{
+		Project: project, Pipeline: plan, PhaseContracts: plan.PhaseContracts(),
+		RunID: "planning-persistence-run", ArtifactRoot: root, GitOps: config.DefaultGitOpsConfig(),
+	}, lifecycle
+}
+
+func TestPlanningPersistsVerificationContractBeforeDevelopment(t *testing.T) {
+	runner := &planningArtifactRunner{valid: true}
+	req, lifecycle := planningPersistenceRequest(t)
+	if _, err := orchestrator.NewController(
+		orchestrator.WithRunner(runner),
+		orchestrator.WithPhaseState(lifecycle),
+		orchestrator.WithPromptBuilder(fakePrompt{}),
+		orchestrator.WithVerificationService(&boundaryVerification{}),
+	).Execute(context.Background(), req); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	project, err := lifecycle.Load(context.Background(), req.Project.Slug)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if project.Verification == nil {
+		t.Fatal("Planning did not persist a verification contract")
+	}
+	if !project.Verification.RepairMode {
+		t.Fatalf("verification policy = %#v", project.Verification)
+	}
+	if len(project.Verification.PlannedSteps) != 1 || project.Verification.PlannedSteps[0].Name != "tests" {
+		t.Fatalf("planned verification steps = %#v", project.Verification.PlannedSteps)
+	}
+	if project.PipelineConfig.SchemaVersion != 1 || len(project.PipelineConfig.Data) == 0 {
+		t.Fatalf("pipeline snapshot was not persisted: %#v", project.PipelineConfig)
+	}
+	for _, phase := range runner.phases {
+		if phase == pipeline.PhaseDevelopment {
+			return
+		}
+	}
+	t.Fatalf("Development was not reached after valid Planning: phases = %v", runner.phases)
+}
+
+func TestPlanningRejectsMissingVerificationContractBeforeDevelopment(t *testing.T) {
+	runner := &planningArtifactRunner{}
+	req, lifecycle := planningPersistenceRequest(t)
+	if _, err := orchestrator.NewController(
+		orchestrator.WithRunner(runner),
+		orchestrator.WithPhaseState(lifecycle),
+		orchestrator.WithPromptBuilder(fakePrompt{}),
+	).Execute(context.Background(), req); err == nil || !strings.Contains(err.Error(), "valid executable verification contract") {
+		t.Fatalf("Execute() error = %v, want actionable verification-contract failure", err)
+	}
+	for _, phase := range runner.phases {
+		if phase == pipeline.PhaseDevelopment {
+			t.Fatalf("Development ran after invalid Planning: phases = %v", runner.phases)
+		}
+	}
+	project, err := lifecycle.Load(context.Background(), req.Project.Slug)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if project.Verification != nil {
+		t.Fatalf("invalid Planning unexpectedly persisted verification state: %#v", project.Verification)
+	}
+	if project.CurrentPhase != string(pipeline.PhasePlanning) {
+		t.Fatalf("failure cursor = %q, want Planning", project.CurrentPhase)
+	}
+}
+
 type phaseCall struct {
 	phase    string
 	subphase string
 	status   state.LifecycleStatus
+	outcome  *state.ExecutionOutcome
 }
 type fakeState struct {
 	calls []phaseCall
 	err   error
 }
 
-func (s *fakeState) RecordPhase(_ context.Context, _ string, phase, subphase string, status state.LifecycleStatus, _ *state.ExecutionOutcome, _ []string) (state.ProjectState, error) {
-	s.calls = append(s.calls, phaseCall{phase: phase, subphase: subphase, status: status})
+func (s *fakeState) RecordPhase(_ context.Context, _ string, phase, subphase string, status state.LifecycleStatus, outcome *state.ExecutionOutcome, _ []string) (state.ProjectState, error) {
+	var copied *state.ExecutionOutcome
+	if outcome != nil {
+		value := *outcome
+		copied = &value
+	}
+	s.calls = append(s.calls, phaseCall{phase: phase, subphase: subphase, status: status, outcome: copied})
 	return state.ProjectState{}, s.err
 }
 
@@ -199,20 +332,13 @@ func TestExecuteBuildsValidAgentRequestsForMandatoryPhasesAndPreservesOverrides(
 func TestProductionAgentRunnerDiscoversAndPropagatesCanonicalArtifacts(t *testing.T) {
 	stateRoot := t.TempDir()
 	worktree := t.TempDir()
-	script := filepath.Join(t.TempDir(), "fake-agent")
-	body := `#!/bin/sh
-printf '%s\n' "$*"
-artifact=
-case "$*" in
-  *test_document*) artifact=test-document.md ;;
-  *rebase*) artifact=rebase-report.md ;;
-  *development*) artifact=development.md ;;
-  *acceptance_criteria*) artifact=acceptance-criteria.md ;;
-esac
-run_id=$(printf '%s\n' "$*" | sed -n 's/^gg_run_id: "\(.*\)"$/\1/p' | head -n 1)
-printf '%s\n' '---' "gg_run_id: \"$run_id\"" 'gg_disposition: passed' '---' 'phase evidence' > ".gg/$artifact"
-`
-	if err := os.WriteFile(script, []byte(body), 0o700); err != nil {
+	script, err := fakeagent.Install(t.TempDir(), "fake-agent", fakeagent.Spec{
+		Stdout: "${PROMPT}\n",
+		Files: map[string]string{
+			"${PHASE_ARTIFACT}": "---\ngg_run_id: \"${RUN_ID}\"\ngg_disposition: passed\n---\nphase evidence\n",
+		},
+	})
+	if err != nil {
 		t.Fatal(err)
 	}
 	store, err := state.NewFileStore(stateRoot)
@@ -1197,14 +1323,23 @@ func TestExecuteRejectsConcurrentSameProjectRun(t *testing.T) {
 }
 
 type fakeDevelopmentCommits struct {
-	head           string
-	headErr        error
-	verifyErr      error
-	autoCommitErr  error
-	headCalls      int
-	verifyBase     []string
-	required       []bool
-	autoCommitMsgs []string
+	head                  string
+	headErr               error
+	inspectChanges        []git.DevelopmentWorktreeChange
+	inspectErr            error
+	inspectCalls          int
+	verifyErr             error
+	verifyErrWhenRequired error
+	autoCommitErr         error
+	headCalls             int
+	verifyBase            []string
+	required              []bool
+	autoCommitMsgs        []string
+}
+
+func (f *fakeDevelopmentCommits) InspectDevelopmentWorktree(_ context.Context, _ string) ([]git.DevelopmentWorktreeChange, error) {
+	f.inspectCalls++
+	return append([]git.DevelopmentWorktreeChange(nil), f.inspectChanges...), f.inspectErr
 }
 
 func (f *fakeDevelopmentCommits) AutoCommitUncommittedChanges(_ context.Context, _ string, message string) error {
@@ -1223,6 +1358,9 @@ func (f *fakeDevelopmentCommits) HeadCommit(_ context.Context, _ string) (string
 func (f *fakeDevelopmentCommits) VerifyUnsignedDevelopmentCommits(_ context.Context, _ string, previous string, requireCommit bool) error {
 	f.verifyBase = append(f.verifyBase, previous)
 	f.required = append(f.required, requireCommit)
+	if requireCommit {
+		return f.verifyErrWhenRequired
+	}
 	return f.verifyErr
 }
 
@@ -1240,7 +1378,7 @@ func TestExecuteEnforcesUnsignedCommitProgressForEveryDevelopmentSubphase(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	if commits.headCalls != 3 || len(commits.verifyBase) != 3 {
+	if commits.inspectCalls != 3 || commits.headCalls != 3 || len(commits.verifyBase) != 3 {
 		t.Fatalf("commit checks = head %d verify %d, want three each", commits.headCalls, len(commits.verifyBase))
 	}
 	// Every successful subphase first preserves any work the agent left
@@ -1248,8 +1386,81 @@ func TestExecuteEnforcesUnsignedCommitProgressForEveryDevelopmentSubphase(t *tes
 	if len(commits.autoCommitMsgs) != 3 {
 		t.Fatalf("auto-commit calls = %v, want one per development subphase", commits.autoCommitMsgs)
 	}
+	if !reflect.DeepEqual(commits.autoCommitMsgs, []string{
+		"gg: development/implementation",
+		"gg: development/testing",
+		"gg: development/review",
+	}) {
+		t.Fatalf("auto-commit ownership messages = %v, want implementation/testing/review", commits.autoCommitMsgs)
+	}
+	if !reflect.DeepEqual(commits.required, []bool{false, false, false}) {
+		t.Fatalf("commit requirement = %v, want no empty-commit requirement", commits.required)
+	}
 	if len(runner.phases) != 7 {
 		t.Fatalf("dispatches = %d, want all phases", len(runner.phases))
+	}
+}
+
+func TestExecutePersistsDevelopmentOwnershipBeforeDispatch(t *testing.T) {
+	commits := &fakeDevelopmentCommits{head: "base"}
+	store := &fakeState{}
+	if _, err := orchestrator.NewController(
+		orchestrator.WithRunner(&fakeSeqRunner{}),
+		orchestrator.WithPhaseState(store),
+		orchestrator.WithPromptBuilder(fakePrompt{}),
+		orchestrator.WithDevelopmentCommitVerifier(commits),
+	).Execute(context.Background(), request(t, resolvedPipeline(t, config.PhaseQA))); err != nil {
+		t.Fatal(err)
+	}
+	checkpoints := 0
+	for _, call := range store.calls {
+		if call.phase != string(pipeline.PhaseDevelopment) || call.status != state.StatusRunning {
+			continue
+		}
+		if call.outcome == nil {
+			continue
+		}
+		if call.outcome.DevelopmentBaseCommit != "base" {
+			t.Fatalf("Development running checkpoint = %#v, want base commit", call.outcome)
+		}
+		checkpoints++
+	}
+	if checkpoints != 3 {
+		t.Fatalf("Development ownership checkpoints = %d, want implementation/testing/review", checkpoints)
+	}
+}
+
+func TestExecutePausesBeforeDevelopmentWhenWorktreeHasPreExistingChanges(t *testing.T) {
+	commits := &fakeDevelopmentCommits{
+		head: "base",
+		inspectChanges: []git.DevelopmentWorktreeChange{
+			{Status: " M", Path: "tracked.go"},
+			{Status: "??", Path: "new.go"},
+			{Status: " D", Path: "deleted.go"},
+			{Status: "R ", Path: "renamed.go", OriginalPath: "old.go"},
+		},
+	}
+	runner := &fakeSeqRunner{}
+	store := &fakeState{}
+	_, err := orchestrator.NewController(
+		orchestrator.WithRunner(runner),
+		orchestrator.WithPhaseState(store),
+		orchestrator.WithPromptBuilder(fakePrompt{}),
+		orchestrator.WithDevelopmentCommitVerifier(commits),
+	).Execute(context.Background(), request(t, resolvedPipeline(t, config.PhaseQA)))
+	if err == nil || !strings.Contains(err.Error(), "tracked.go") || !strings.Contains(err.Error(), "new.go") ||
+		!strings.Contains(err.Error(), "deleted.go") || !strings.Contains(err.Error(), "old.go -> renamed.go") {
+		t.Fatalf("error = %v, want actionable pre-existing path list", err)
+	}
+	if len(runner.phases) != 1 || runner.phases[0] != pipeline.PhaseAcceptanceCriteria {
+		t.Fatalf("dispatches = %v, want acceptance only", runner.phases)
+	}
+	if commits.inspectCalls != 1 || commits.headCalls != 0 || len(commits.autoCommitMsgs) != 0 {
+		t.Fatalf("ownership checks = inspect %d head %d auto-commit %v, want inspect only", commits.inspectCalls, commits.headCalls, commits.autoCommitMsgs)
+	}
+	last := store.calls[len(store.calls)-1]
+	if last.phase != string(pipeline.PhaseDevelopment) || last.status != state.StatusStopped {
+		t.Fatalf("last persisted call = %#v, want stopped Development ownership pause", last)
 	}
 }
 
@@ -1302,22 +1513,21 @@ func TestExecuteRejectsSignedDevelopmentCommitAndPersistsFailedSubphase(t *testi
 	}
 }
 
-func TestExecuteRejectsMissingDevelopmentCommit(t *testing.T) {
+func TestExecuteAllowsCleanDevelopmentSubphase(t *testing.T) {
 	noCommitErr := errors.New("development subphase did not create a commit")
-	commits := &fakeDevelopmentCommits{head: "base", verifyErr: noCommitErr}
+	commits := &fakeDevelopmentCommits{head: "base", verifyErrWhenRequired: noCommitErr}
 	runner := &fakeSeqRunner{}
 	store := &fakeState{}
-	_, err := orchestrator.NewController(
+	if _, err := orchestrator.NewController(
 		orchestrator.WithRunner(runner),
 		orchestrator.WithPhaseState(store),
 		orchestrator.WithPromptBuilder(fakePrompt{}),
 		orchestrator.WithDevelopmentCommitVerifier(commits),
-	).Execute(context.Background(), request(t, resolvedPipeline(t, config.PhaseQA)))
-	if !errors.Is(err, noCommitErr) {
-		t.Fatalf("error = %v, want no-commit rejection", err)
+	).Execute(context.Background(), request(t, resolvedPipeline(t, config.PhaseQA))); err != nil {
+		t.Fatalf("error = %v, want clean subphase accepted", err)
 	}
-	if len(runner.phases) != 2 {
-		t.Fatalf("dispatches = %v, want no later subphases", runner.phases)
+	if !reflect.DeepEqual(commits.required, []bool{false, false, false}) {
+		t.Fatalf("commit requirement = %v, want no empty-commit requirement", commits.required)
 	}
 }
 

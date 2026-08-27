@@ -11,11 +11,14 @@ import (
 	"github.com/VedranJanjetovic/gg/internal/pipeline"
 	"github.com/VedranJanjetovic/gg/internal/proof"
 	"github.com/VedranJanjetovic/gg/internal/state"
+	"github.com/VedranJanjetovic/gg/testdata/fakeagent"
 )
 
 func TestAgentRunnerRejectsExitZeroWithoutCanonicalPhaseArtifact(t *testing.T) {
 	worktree := t.TempDir()
-	script := fakeRunner(t, `printf '%s\n' '{"schemaVersion":1,"disposition":"passed"}' > phase-result.json`)
+	script := fakeRunner(t, fakeagent.Spec{
+		Files: map[string]string{"phase-result.json": "{\"schemaVersion\":1,\"disposition\":\"passed\"}\n"},
+	})
 	project := runnerProject(worktree)
 	req := runnerRequest(project, worktree, "planning prompt")
 	req.Phase = pipeline.PhasePlanning
@@ -41,8 +44,9 @@ func TestAgentRunnerRejectsExitZeroQANonPassingDisposition(t *testing.T) {
 	for _, disposition := range []string{"failed", "blocked"} {
 		t.Run(disposition, func(t *testing.T) {
 			worktree := t.TempDir()
-			body := `printf '%s\n' '---' 'gg_run_id: "runner-test"' 'gg_disposition: ` + disposition + `' '---' 'QA evidence' > .gg/qa-report.md`
-			script := fakeRunner(t, body)
+			script := fakeRunner(t, fakeagent.Spec{
+				Files: map[string]string{".gg/qa-report.md": runnerCanonical("runner-test", disposition, "QA evidence")},
+			})
 			project := runnerProject(worktree)
 			req := runnerRequest(project, worktree, "qa prompt")
 			req.Phase = pipeline.PhaseQA
@@ -82,7 +86,9 @@ func (s failingResultStore) Save(context.Context, RunResult) error {
 
 func TestAgentRunnerSemanticFailureJoinedWithPersistenceFailureIsOperational(t *testing.T) {
 	worktree := t.TempDir()
-	script := fakeRunner(t, `printf '%s\n' '---' 'gg_run_id: "runner-test"' 'gg_disposition: failed' '---' 'QA evidence' > .gg/qa-report.md`)
+	script := fakeRunner(t, fakeagent.Spec{
+		Files: map[string]string{".gg/qa-report.md": runnerCanonical("runner-test", "failed", "QA evidence")},
+	})
 	project := runnerProject(worktree)
 	req := runnerRequest(project, worktree, "qa prompt")
 	req.Phase = pipeline.PhaseQA
@@ -108,13 +114,13 @@ func TestAgentRunnerSemanticFailureJoinedWithPersistenceFailureIsOperational(t *
 
 func TestAgentRunnerRejectsMalformedOrStaleCanonicalFrontmatter(t *testing.T) {
 	tests := map[string]string{
-		"malformed": `printf '%s\n' '---' 'gg_run_id "runner-test"' 'gg_disposition: passed' '---' > .gg/qa-report.md`,
-		"stale":     `printf '%s\n' '---' 'gg_run_id: "older-run"' 'gg_disposition: passed' '---' > .gg/qa-report.md`,
+		"malformed": "---\ngg_run_id \"runner-test\"\ngg_disposition: passed\n---\n",
+		"stale":     runnerCanonical("older-run", "passed", ""),
 	}
-	for name, body := range tests {
+	for name, report := range tests {
 		t.Run(name, func(t *testing.T) {
 			worktree := t.TempDir()
-			script := fakeRunner(t, body)
+			script := fakeRunner(t, fakeagent.Spec{Files: map[string]string{".gg/qa-report.md": report}})
 			project := runnerProject(worktree)
 			req := runnerRequest(project, worktree, "qa prompt")
 			req.Phase = pipeline.PhaseQA
@@ -140,16 +146,17 @@ func (runnerProofChecker) IsUncommittedNewFile(context.Context, string, string) 
 }
 
 func TestAgentRunnerMapsMissingOrMalformedProofToTerminalFailure(t *testing.T) {
-	tests := map[string]string{
-		"missing":   "",
-		"malformed": `printf '%s\n' '## Validation: incomplete' '- Status: pass' > .gg/PROOF.md`,
+	tests := map[string]fakeagent.Spec{
+		"missing":   {},
+		"malformed": {Files: map[string]string{".gg/PROOF.md": "## Validation: incomplete\n- Status: pass\n"}},
 	}
-	for name, body := range tests {
+	for name, spec := range tests {
 		t.Run(name, func(t *testing.T) {
 			worktree := t.TempDir()
+			script := fakeRunner(t, spec)
 			runner := NewAgentRunner(AgentRunnerOptions{
 				Factory: NewExecProcessFactory(nil, nil),
-				Lookup:  func(string) (string, error) { return fakeRunner(t, body), nil },
+				Lookup:  func(string) (string, error) { return script, nil },
 				LogRoot: t.TempDir(),
 				Proof:   proofServiceForRunnerTest(t),
 			})
@@ -175,8 +182,7 @@ func TestAgentRunnerMapsMissingOrMalformedProofToTerminalFailure(t *testing.T) {
 
 func TestAgentRunnerRetainsFeedbackForValidSemanticQAProof(t *testing.T) {
 	worktree := t.TempDir()
-	script := fakeRunner(t, `cat > .gg/PROOF.md <<'EOF'
----
+	script := fakeRunner(t, fakeagent.Spec{Files: map[string]string{".gg/PROOF.md": `---
 gg_run_id: "runner-test"
 ---
 
@@ -193,7 +199,7 @@ gg_run_id: "runner-test"
 
 ## Feedback
 The semantic QA result needs one more browser-flow assertion.
-EOF`)
+`}})
 	runner := NewAgentRunner(AgentRunnerOptions{
 		Factory: NewExecProcessFactory(nil, nil),
 		Lookup:  func(string) (string, error) { return script, nil },
@@ -217,8 +223,7 @@ EOF`)
 
 func TestAgentRunnerAcceptsDeferredQAProofAndExposesNormalizedChecks(t *testing.T) {
 	worktree := t.TempDir()
-	script := fakeRunner(t, `cat > .gg/PROOF.md <<'EOF'
----
+	script := fakeRunner(t, fakeagent.Spec{Files: map[string]string{".gg/PROOF.md": `---
 gg_run_id: "runner-test"
 ---
 
@@ -233,7 +238,7 @@ gg_run_id: "runner-test"
 - Remote-only reason: the test requires AWS credentials and the deployed API endpoint
 - Repository evidence: internal/aws/handler_test.go configures AWS_ENDPOINT and documents the required credentials
 - Manual run instructions: run the test in CI with the AWS secrets.
-EOF`)
+`}})
 	runner := NewAgentRunner(AgentRunnerOptions{
 		Factory: NewExecProcessFactory(nil, nil), Lookup: func(string) (string, error) { return script, nil },
 		LogRoot: t.TempDir(), Proof: proofServiceForRunnerTest(t),
@@ -274,8 +279,7 @@ gg_run_id: "runner-test"
 - Manual run instructions: run the test in CI with the AWS secrets.
 `
 			proofText = strings.Replace(proofText, "- Repository evidence: internal/aws/handler_test.go configures AWS_ENDPOINT", test.field, 1)
-			script := fakeRunner(t, `cat > .gg/PROOF.md <<'EOF'
-`+proofText+`EOF`)
+			script := fakeRunner(t, fakeagent.Spec{Files: map[string]string{".gg/PROOF.md": proofText}})
 			runner := NewAgentRunner(AgentRunnerOptions{
 				Factory: NewExecProcessFactory(nil, nil), Lookup: func(string) (string, error) { return script, nil },
 				LogRoot: t.TempDir(), Proof: proofServiceForRunnerTest(t),

@@ -1,8 +1,7 @@
-//go:build linux || darwin
-
 package e2e
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -65,7 +64,7 @@ func TestRealCLIConfigureCreatesProjectAndDisposableWorktree(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	project, err := store.Load(t.Context(), "release-dashboard")
+	project, err := store.Load(context.Background(), "release-dashboard")
 	if err != nil {
 		t.Fatalf("load persisted project state: %v", err)
 	}
@@ -76,7 +75,7 @@ func TestRealCLIConfigureCreatesProjectAndDisposableWorktree(t *testing.T) {
 	if project.Name != "release_dashboard" || project.OriginalGoal != "Build a release dashboard.\nPersist the project state." {
 		t.Fatalf("project identity = %#v", project)
 	}
-	if project.WorktreePath != naming.WorktreePath || project.BranchName != naming.BranchName {
+	if !git.PathsEqual(project.WorktreePath, naming.WorktreePath) || project.BranchName != naming.BranchName {
 		t.Fatalf("project worktree metadata = path %q branch %q, want %q %q", project.WorktreePath, project.BranchName, naming.WorktreePath, naming.BranchName)
 	}
 	if _, err := os.Stat(project.WorktreePath); err != nil {

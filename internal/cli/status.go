@@ -124,6 +124,33 @@ func writeProjectDetail(output io.Writer, project state.ProjectState) error {
 			return err
 		}
 	}
+	if err := writeVerificationSummary(output, project, "Verification"); err != nil {
+		return err
+	}
+	return nil
+}
+
+func writeVerificationSummary(output io.Writer, project state.ProjectState, heading string) error {
+	findings := state.VerificationDisplay(project)
+	if len(findings) == 0 && (project.Verification == nil || strings.TrimSpace(project.Verification.NextAction) == "") {
+		return nil
+	}
+	if _, err := fmt.Fprintf(output, "\n%s:\n", heading); err != nil {
+		return err
+	}
+	for _, finding := range findings {
+		label := "Finding"
+		if finding.Warning {
+			label = "Warning"
+		}
+		if _, err := fmt.Fprintf(output, "  %s:\n    Check: %s\n    Command: %s\n    Identity: %s\n    Reason: %s\n    Classification: %s\n    Attempts: %d/%d\n    Log: %s\n", label, displayValue(finding.CheckName), displayValue(finding.Command), displayValue(finding.Identity), displayValue(finding.Reason), displayValue(finding.Classification), finding.Attempts, finding.MaxAttempts, displayValue(finding.LogPath)); err != nil {
+			return err
+		}
+	}
+	if project.Verification != nil && strings.TrimSpace(project.Verification.NextAction) != "" {
+		_, err := fmt.Fprintf(output, "  Next action: %s\n", project.Verification.NextAction)
+		return err
+	}
 	return nil
 }
 
@@ -140,6 +167,18 @@ func skippedFailureSummary(record state.PhaseRecord) string {
 		return "-"
 	}
 	return strings.TrimSpace(record.Outcome.Error)
+
+}
+
+func verificationStatusSuffix(project state.ProjectState) string {
+	switch {
+	case state.VerificationIsPaused(project):
+		return " [paused]"
+	case state.VerificationHasWarnings(project):
+		return " [warning]"
+	default:
+		return ""
+	}
 }
 
 func writeProjectStatusTable(output io.Writer, projects []state.ProjectState) error {
@@ -148,7 +187,7 @@ func writeProjectStatusTable(output io.Writer, projects []state.ProjectState) er
 		return err
 	}
 	for _, project := range projects {
-		if _, err := fmt.Fprintf(writer, "%s\t%s\t%s\t%s\t%s\t%s\n", project.Name, project.Status, displayValue(project.CurrentPhase), displayValue(project.BranchName), displayValue(project.WorktreePath), formatUpdated(project.UpdatedAt)); err != nil {
+		if _, err := fmt.Fprintf(writer, "%s\t%s%s\t%s\t%s\t%s\t%s\n", project.Name, project.Status, verificationStatusSuffix(project), displayValue(project.CurrentPhase), displayValue(project.BranchName), displayValue(project.WorktreePath), formatUpdated(project.UpdatedAt)); err != nil {
 			return err
 		}
 	}
