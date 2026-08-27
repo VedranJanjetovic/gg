@@ -10,6 +10,11 @@ archive, verify its expected single executable entry, and replace `gg`
 atomically through a temporary file. Re-running an installer is safe for a
 normal destination; symlink/reparse-point destination components are refused.
 
+Each installer also leaves a copy of itself at `~/.gg/install.sh` (or
+`~/.gg/install.ps1` on Windows). That copy is what `gg update` runs later, so
+updating needs no extra setup and never pipes freshly downloaded shell text into
+an interpreter.
+
 ### Linux and macOS
 
 Copy/paste this command to install the latest release. It downloads the
@@ -36,6 +41,9 @@ less "$tmp"
 bash "$tmp" --version 1.2.3
 rm -f -- "$tmp"
 ```
+
+Removing the download is safe: the installer already persisted the inspected
+script at `~/.gg/install.sh` for later updates.
 
 The default destination is `$XDG_BIN_HOME` when set, otherwise
 `$HOME/.local/bin`. Override it with `--prefix /absolute/path` or
@@ -185,11 +193,15 @@ installer and prints `gg stop-all` as the next action. Project-state read errors
 are fatal rather than being treated as an empty store. Development builds (for
 example `dev`) and malformed release tags are never silently treated as versions.
 When a newer release is clear, the production binary invokes the trusted
-binary-only installer exactly once with explicit version arguments. Set
-`GG_INSTALLER_PATH` to an absolute path to the inspected `install.sh`
-(or `install.ps1` on Windows); the runner never discovers or executes a script
-from the current directory and never uses shell interpolation. For deterministic
-release testing, `GG_RELEASE_SOURCE` may point at a trusted HTTP release fixture.
+binary-only installer exactly once with explicit version arguments. That
+installer is the copy the previous install persisted at `~/.gg/install.sh` (or
+`~/.gg/install.ps1` on Windows), so no configuration is required. Set
+`GG_INSTALLER_PATH` to an absolute path to override it — useful from a source
+checkout. The runner never discovers or executes a script from the current
+directory and never uses shell interpolation. If the persisted copy is missing
+and no override is set, `gg update` names the expected path and refuses to
+continue. For deterministic release testing, `GG_RELEASE_SOURCE` may point at a
+trusted HTTP release fixture.
 
 Version output is deterministic and includes the release version, commit, and UTC build date. Local builds use `dev`, `unknown`, and `unknown` fallbacks. Release builds can override them with linker flags:
 
@@ -340,7 +352,7 @@ After the project is created, gg runs a **grooming interview** before the pipeli
 
 ### Release and update behavior
 
-`gg update` queries the configured latest-release JSON endpoint, accepts canonical semantic tags such as `gg-v1.2.3`, and compares them with the binary's embedded version. Development metadata (`dev`) and malformed tags do not silently count as versions. A newer release is installed only after the durable project store confirms that no project is exactly running. Set `GG_INSTALLER_PATH` to an absolute, inspected copy of `install.sh` or `install.ps1`; the production runner invokes that binary-only installer once with explicit version arguments and does not execute shell command strings. `GG_RELEASE_SOURCE` may point to a trusted HTTP fixture for deterministic testing.
+`gg update` queries the configured latest-release JSON endpoint, accepts canonical semantic tags such as `gg-v1.2.3`, and compares them with the binary's embedded version. Development metadata (`dev`) and malformed tags do not silently count as versions. A newer release is installed only after the durable project store confirms that no project is exactly running. The production runner invokes the binary-only installer that the previous install persisted at `~/.gg/install.sh` (or `~/.gg/install.ps1`) once with explicit version arguments and does not execute shell command strings; `GG_INSTALLER_PATH` overrides that path with an absolute, inspected copy. `GG_RELEASE_SOURCE` may point to a trusted HTTP fixture for deterministic testing.
 
 The non-Homebrew release contract is GitHub Releases under `VedranJanjetovic/gg`, with `gg-vX.Y.Z` tags and the archive names documented in [Platforms and release contract](#platforms-and-release-contract). No Homebrew formula, tap, or package-manager installation is required or implied.
 
