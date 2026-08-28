@@ -3,43 +3,37 @@ package pipeline
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
-func TestGeneratedQAContractMatchesCanonicalSource(t *testing.T) {
-	source, err := os.ReadFile(filepath.Join("..", "..", "skills", "canonical", "qa", "qa.md"))
-	if err != nil {
-		t.Fatal(err)
+func TestGeneratedContractsMatchEveryDefaultPipelineSource(t *testing.T) {
+	phases := DefaultPipeline().Phases()
+	if len(canonicalPhaseContracts) != len(phases) {
+		t.Fatalf("generated contract count = %d, want %d", len(canonicalPhaseContracts), len(phases))
 	}
-	generated, ok := PhaseContract(PhaseQA)
-	if !ok {
-		t.Fatal("QA contract missing")
-	}
-	if generated != string(source) {
-		t.Fatal("generated QA contract is out of sync with skills/qa/qa.md")
-	}
-}
 
-func TestGeneratedPrePRContractsMatchCanonicalSources(t *testing.T) {
-	tests := []struct {
-		phase, directory, file string
-	}{
-		{string(PhaseDevelopment), "development", "development.md"},
-		{string(PhaseQA), "qa", "qa.md"},
-		{string(PhaseTestDocument), "test-document", "test-document.md"},
-		{string(PhaseBuildChecker), "build-checker", "build-checker.md"},
+	expected := make(map[PhaseID]struct{}, len(phases))
+	for _, phase := range phases {
+		id := phase.ID()
+		expected[id] = struct{}{}
+		name := strings.ReplaceAll(string(id), "_", "-")
+		source, err := os.ReadFile(filepath.Join("..", "..", "skills", "canonical", "gg-"+name, "gg-"+name+".md"))
+		if err != nil {
+			t.Fatalf("read source for %s: %v", id, err)
+		}
+		generated, ok := PhaseContract(id)
+		if !ok {
+			t.Fatalf("generated contract missing for %s", id)
+		}
+		if generated != string(source) {
+			t.Fatalf("generated %s contract is out of sync", id)
+		}
 	}
-	for _, test := range tests {
-		t.Run(test.directory, func(t *testing.T) {
-			source, err := os.ReadFile(filepath.Join("..", "..", "skills", "canonical", test.directory, test.file))
-			if err != nil {
-				t.Fatal(err)
-			}
-			generated, ok := PhaseContract(PhaseID(test.phase))
-			if !ok || generated != string(source) {
-				t.Fatalf("generated %s contract is out of sync", test.phase)
-			}
-		})
+	for id := range canonicalPhaseContracts {
+		if _, ok := expected[id]; !ok {
+			t.Fatalf("generated contract has unexpected phase %s", id)
+		}
 	}
 }
 

@@ -7,25 +7,30 @@ be imported by any of them.
 Adding, renaming, or reordering a phase is a repo-wide lockstep change. Start
 from the root [`AGENTS.md`](../../AGENTS.md), not here.
 
-## `contract_text.go` — generated, but there is no generator
+## `contract_text.go` — generated
 
-The header says `Code generated ... DO NOT EDIT`. There are **zero
-`go:generate` directives in the repository**, no script, no Makefile target.
-It is hand-maintained.
+The header says `Code generated ... DO NOT EDIT` and means it. The generator is
+`./generate`, wired by the repository's one `go:generate` directive
+(`contract_text.go:3`):
 
-Each entry must be byte-identical to `skills/canonical/<name>/<name>.md`,
-frontmatter included. Drift tests cover only 4 of 10 phases
-(`contract_text_test.go:23` — development, qa, test-document, build-checker).
-`acceptance_criteria`, `grooming`, `planning`, `rebase`, `pr`, and `ci` will
-drift with CI green.
+```bash
+go generate ./internal/pipeline
+```
+
+It reads every `skills/canonical/gg-<name>/gg-<name>.md` whose frontmatter
+carries a `phase_id`, and emits one byte-exact Go string literal per phase.
+Editing this file by hand is pointless — the next regeneration overwrites it.
+
+Each entry is byte-identical to its source, frontmatter included, and
+`contract_text_test.go:10` drift-tests **all ten** phases against
+`DefaultPipeline()`: it also fails on a count mismatch or an unexpected phase,
+so adding a phase without its skill file, or a skill file without its phase,
+is caught.
 
 Editing QA text also risks six hardcoded substring assertions at
-`contract_text_test.go:46`. A weaker structural guard covers all ten:
+`contract_text_test.go:40`. A weaker structural guard covers all ten:
 `resolve_test.go:295` requires every enabled phase's contract to be non-empty
 and to contain `Stable phase ID:` and `Success Criteria`.
-
-Rebase is a known exception: `PhaseContract` appends text at runtime
-(`contract_text.go:19-27`), so it can never byte-match its source.
 
 ## Snapshot schema versions
 

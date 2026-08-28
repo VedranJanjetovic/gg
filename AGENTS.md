@@ -48,11 +48,11 @@ meaningful.
 
 ## Non-negotiable invariants
 
-**1. `internal/pipeline/contract_text.go` says "Code generated … DO NOT EDIT" but
-no generator exists.** Zero `go:generate` directives in the repo. It embeds each
-phase skill as a byte-exact Go string, so changing phase prompt text means
-editing `skills/canonical/<name>/<name>.md` **and** the Go literal by hand. Only
-4 of 10 phases are drift-tested; the rest diverge with CI green. Details in the
+**1. `internal/pipeline/contract_text.go` is generated — never hand-edit it.**
+It embeds each phase skill as a byte-exact Go string, so changing phase prompt
+text means editing `skills/canonical/gg-<name>/gg-<name>.md` and then running
+`go generate ./internal/pipeline` (the repo's only `go:generate` directive). All
+10 phases are drift-tested, so a missed regeneration fails CI. Details in the
 [`skills/`](skills/AGENTS.md) and [`internal/pipeline/`](internal/pipeline/AGENTS.md)
 files.
 
@@ -96,9 +96,10 @@ Rebase/QA swap is what produced schema v1 vs v2, the `legacyOrder` flag, and
 - **`internal/config`** — `Phase` const, `removablePhases`/`fixedPhases`,
   `RequiredPhases()`/`OptionalPhases()`, `CompletePhaseOrder()`,
   `isSupportedPhase`.
-- **`skills/canonical/<name>/<name>.md`** — file named after its directory,
-  hyphenated (`test_document` → `test-document`). Missing skill files degrade a
-  run **silently**.
+- **`skills/canonical/gg-<name>/gg-<name>.md`** — file named after its directory,
+  prefixed and hyphenated (`test_document` → `gg-test-document`), with a matching
+  frontmatter `name:`. Missing skill files degrade a run **silently**; run
+  `go generate ./internal/pipeline` after adding one.
 - **Elsewhere** — `internal/cli/configure.go` (wizard descriptions),
   `internal/agent/prompt.go` (phase sets, per-phase text),
   `internal/state/skip.go` + `internal/orchestrator/skip.go`,

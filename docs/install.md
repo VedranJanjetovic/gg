@@ -125,9 +125,9 @@ snapshot — the `gg-vX.Y.Z` tag for an explicit `--version`, or `main` for
 `latest`, so a `latest` installation pairs a released binary with skills from
 `main`. See [`development.md`](development.md) for those destinations and rules.
 
-A successful installation also copies the installer to `~/.gg/install.sh` or
-`~/.gg/install.ps1`, which is what `gg update` runs later. Failing to write
-that copy does not fail the installation.
+`gg update` does not reuse a local copy of this script. It fetches the installer
+for the release it is installing, pinned to that release's tag, so installer and
+binary always match. See [`pipeline.md`](pipeline.md) for that flow.
 
 ## Troubleshooting
 

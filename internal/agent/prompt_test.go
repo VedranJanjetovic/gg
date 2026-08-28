@@ -271,14 +271,24 @@ func TestBuildPromptReferencesSkillsByNameAndCodingPatternsByPath(t *testing.T) 
 		CodingPatternsPath: "/home/user/.gg/gg-coding-patterns.md",
 	}
 
-	// Underscored phase IDs map to hyphenated skill names.
+	// Both ordinary and underscored phase IDs use complete gg-prefixed names.
 	input := base
-	input.Phase = pipeline.PhaseTestDocument
+	input.Phase = pipeline.PhaseQA
 	got, err := BuildPrompt(input)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(got, `Load and follow the agent skill named "gg-test-document"`) {
+	if !strings.Contains(got, `Load and follow the agent skill named "gg-qa"`) || strings.Contains(got, `"gg-gg-qa"`) {
+		t.Fatalf("qa prompt has incorrect skill identity:\n%s", got)
+	}
+
+	input = base
+	input.Phase = pipeline.PhaseTestDocument
+	got, err = BuildPrompt(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, `Load and follow the agent skill named "gg-test-document"`) || strings.Contains(got, `"gg-gg-test-document"`) {
 		t.Fatalf("test_document prompt missing hyphenated skill reference:\n%s", got)
 	}
 	if !strings.Contains(got, `"/home/user/.gg/gg-coding-patterns.md"`) {

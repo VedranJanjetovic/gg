@@ -13,9 +13,15 @@ This is the public contract shared by `install.sh`,
   `https://github.com/VedranJanjetovic/gg/releases/download/gg-vX.Y.Z/ASSET`
 - Latest-release API URL:
   `https://api.github.com/repos/VedranJanjetovic/gg/releases/latest`
-- Installer source URLs use the `main` branch:
+- Installer source URLs for a **fresh install** use the `main` branch:
   `https://raw.githubusercontent.com/VedranJanjetovic/gg/main/install.sh`
   and `install.ps1`.
+- Installer source URLs for **`gg update`** are pinned to the release tag being
+  installed:
+  `https://raw.githubusercontent.com/VedranJanjetovic/gg/gg-vX.Y.Z/install.sh`
+  and `install.ps1`. Every tagged release must therefore keep `install.sh` and
+  `install.ps1` at the repository root, and each tag's installer must be able to
+  install that tag's assets.
 
 Installers accept `latest` or a semantic version without the `gg-v` tag
 prefix. Release packaging and upload must use the `--artifacts` mode of

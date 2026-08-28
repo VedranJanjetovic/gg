@@ -143,7 +143,7 @@ func BuildPrompt(input PromptInput) (string, error) {
 	b.WriteString("\n\n## Phase contract\n")
 	// The contract is installed as an agent skill, not pasted here: the
 	// agent loads it by name from its user-level skills directory.
-	fmt.Fprintf(&b, "Load and follow the agent skill named %q — it is the binding contract for this phase. It is installed in your user-level skills directory (Claude Code: ~/.claude/skills, Codex: ~/.codex/skills).\n", "gg-"+phaseSkillName(input.Phase))
+	fmt.Fprintf(&b, "Load and follow the agent skill named %q — it is the binding contract for this phase. It is installed in your user-level skills directory (Claude Code: ~/.claude/skills, Codex: ~/.codex/skills).\n", phaseSkillName(input.Phase))
 	if input.CodingPatternsPath != "" && codeTouchingPhase(input.Phase) {
 		b.WriteString("\n## Coding patterns\n")
 		b.WriteString("All code you write, test, or review must follow the coding patterns reference at ")
@@ -317,11 +317,11 @@ func writeQuotedValue(b *strings.Builder, value string) {
 	b.WriteString(strconv.Quote(strings.TrimSpace(value)))
 }
 
-// phaseSkillName maps a phase ID to its installed skill name segment
+// phaseSkillName maps a phase ID to its complete installed skill name
 // (underscored IDs use hyphenated skill names, e.g. test_document →
-// test-document).
+// gg-test-document).
 func phaseSkillName(phase pipeline.PhaseID) string {
-	return strings.ReplaceAll(string(phase), "_", "-")
+	return "gg-" + strings.ReplaceAll(string(phase), "_", "-")
 }
 
 // codeTouchingPhase reports whether the phase writes, tests, or reviews code
