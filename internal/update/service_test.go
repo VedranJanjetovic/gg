@@ -5,7 +5,6 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
-	"reflect"
 	"strings"
 	"testing"
 )
@@ -181,15 +180,13 @@ func (f *fakeProjectStatuses) List(context.Context) ([]ProjectStatus, error) {
 
 type fakeInstaller struct {
 	version string
-	args    []string
 	err     error
 	calls   int
 }
 
-func (f *fakeInstaller) Install(_ context.Context, version string, args []string) error {
+func (f *fakeInstaller) Install(_ context.Context, version string) error {
 	f.calls++
 	f.version = version
-	f.args = append([]string(nil), args...)
 	return f.err
 }
 
@@ -209,8 +206,8 @@ func TestUpdateGatesNewReleaseAndInvokesInstallerOnceWhenNoProjectIsRunning(t *t
 	if got.Action != "installed" || projects.calls != 1 || installer.calls != 1 {
 		t.Fatalf("result=%#v projectCalls=%d installerCalls=%d", got, projects.calls, installer.calls)
 	}
-	if installer.version != "1.3.0" || !reflect.DeepEqual(installer.args, []string{"--version", "1.3.0"}) {
-		t.Fatalf("installer version=%q args=%v", installer.version, installer.args)
+	if installer.version != "1.3.0" {
+		t.Fatalf("installer version=%q", installer.version)
 	}
 }
 

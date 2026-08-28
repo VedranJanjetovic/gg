@@ -19,6 +19,10 @@ const (
 	// non-empty tag_name using the canonical gg-vX.Y.Z convention.
 	DefaultReleaseSource = "https://api.github.com/repos/VedranJanjetovic/gg/releases/latest"
 	DefaultReleasePage   = "https://github.com/VedranJanjetovic/gg/releases"
+	// installerSourceBase is the raw content host the platform installer is
+	// fetched from. The release tag is appended, so an update always runs the
+	// installer from the same commit as the binary it installs.
+	installerSourceBase = "https://raw.githubusercontent.com/VedranJanjetovic/gg"
 )
 
 type ReleaseLookup interface {
@@ -39,11 +43,11 @@ type ProjectStatusLister interface {
 	List(context.Context) ([]ProjectStatus, error)
 }
 
-// Installer invokes the platform installer with an explicit normalized version
-// and its argument vector. The service deliberately does not compose the
-// platform-specific command or shell invocation.
+// Installer installs an explicit normalized version. The service deliberately
+// does not compose the platform-specific command, its argument vector, or the
+// destination: only the installer knows where the running binary lives.
 type Installer interface {
-	Install(context.Context, string, []string) error
+	Install(context.Context, string) error
 }
 
 type Result struct {
@@ -141,8 +145,7 @@ func (s *Service) Update(ctx context.Context) (Result, error) {
 		return Result{}, err
 	}
 	normalizedVersion := formatVersion(latestVersion)
-	args := []string{"--version", normalizedVersion}
-	if err := s.installer.Install(ctx, normalizedVersion, args); err != nil {
+	if err := s.installer.Install(ctx, normalizedVersion); err != nil {
 		return result, fmt.Errorf("install release %s: %w", normalizedVersion, err)
 	}
 	result.Action = "installed"

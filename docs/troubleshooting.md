@@ -48,6 +48,34 @@ Update is blocked while any project's status is exactly `running`. Run
 `gg stop-all`, wait for the durable states to change, then retry. A failure to
 read project state is fatal and is never treated as an empty project list.
 
+## `gg update` cannot write to the directory holding gg
+
+Update installs into the directory the running `gg` lives in, and refuses before
+downloading anything if it cannot write there. This is the expected outcome for a
+`gg` installed into a root-owned location such as `/usr/local/bin`. Re-run the
+installer yourself with the privileges that directory requires, or install into a
+writable directory:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/VedranJanjetovic/gg/main/install.sh \
+  | GG_INSTALL_PREFIX="$HOME/.local/bin" bash
+```
+
+Update also refuses when it cannot locate or resolve the running executable — for
+example when the binary has been moved or deleted while running. Reinstall with
+the installer rather than working around it; a guessed destination would leave the
+`gg` on `PATH` stale.
+
+## `gg update` cannot fetch the installer
+
+Update fetches `install.sh` (or `install.ps1`) pinned to the release tag it is
+installing, and refuses to run a body that is empty or that looks like an HTML
+page rather than a script. Check network access and TLS interception first. If the
+fetch returns HTTP 404, the release tag exists but its installer does not — report
+it, and install that release manually in the meantime. `GG_INSTALLER_SOURCE` can
+point at a trusted alternate base URL; the `/gg-vX.Y.Z/<script>` path is always
+appended.
+
 ## The pipeline waits on a grooming interview
 
 The project view reports that it is waiting for answers and does not advance

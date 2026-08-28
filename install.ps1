@@ -7,10 +7,6 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $repository = if ($env:GG_INSTALL_REPOSITORY) { $env:GG_INSTALL_REPOSITORY } else { 'VedranJanjetovic/gg' }
-# Root of the repository tree this run installs from (a source checkout or the
-# fetched snapshot); Persist-Installer takes its trusted copy from here when the
-# script itself is not a file on disk, as with an IEX-piped install.
-$script:SourceRoot = $null
 
 function Fail([string]$Message) { throw "gg installer: $Message" }
 function Assert-NoReparsePoint([string]$Path) {
@@ -35,20 +31,22 @@ function Get-ArchiveUrl([string]$Asset) {
 
 # --- Agent skills ------------------------------------------------------------
 # Install gg's agent skills into the user-level Claude Code and Codex
-# configuration under a collision-free gg- prefix, plus the raw
-# coding-patterns reference at ~/.gg/gg-coding-patterns.md that gg's prompts
-# point code-touching phases at. Directories are created even when the agent
-# CLIs are not installed yet. Shared files (CLAUDE.md, AGENTS.md,
-# instructions.md) are never touched.
-function Install-SkillFile([string]$Source, [string]$Target, [string]$Name) {
-    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $Target) | Out-Null
-    $content = Get-Content -Raw -LiteralPath $Source
-    # Rewrite the first frontmatter name field to the gg- identity.
-    if ($content.StartsWith("---")) {
-        $content = [Text.RegularExpressions.Regex]::Replace(
-            $content, '(?m)^name:[ \t]*\S.*$', "name: gg-$Name", 1)
+# configuration using the complete gg-* identities already present in the
+# sources, plus the raw coding-patterns reference at
+# ~/.gg/gg-coding-patterns.md that gg's prompts point code-touching phases at.
+# Directories are created even when the agent CLIs are not installed yet.
+# Shared files (CLAUDE.md, AGENTS.md, instructions.md) are never touched.
+function Install-SkillFile([string]$Source, [string]$Target) {
+    $parent = Split-Path -Parent $Target
+    Assert-NoReparsePoint $parent
+    if (Test-Path -LiteralPath $parent -PathType Leaf) { Fail 'skill destination parent is not a directory' }
+    New-Item -ItemType Directory -Force -Path $parent | Out-Null
+    Assert-NoReparsePoint $parent
+    Assert-NoReparsePoint $Target
+    if ((Test-Path -LiteralPath $Target -PathType Any) -and -not (Test-Path -LiteralPath $Target -PathType Leaf)) {
+        Fail 'skill destination is not a regular file'
     }
-    Set-Content -LiteralPath $Target -Value $content -NoNewline
+    Copy-Item -LiteralPath $Source -Destination $Target -Force
 }
 
 function Install-SkillsFrom([string]$Dir) {
@@ -62,22 +60,17 @@ function Install-SkillsFrom([string]$Dir) {
         if (-not (Test-Path -LiteralPath $claudeSource)) { $claudeSource = $canonical }
         $codexSource = Join-Path $Dir "codex\skills\$name\SKILL.md"
         if (-not (Test-Path -LiteralPath $codexSource)) { $codexSource = $canonical }
-        Install-SkillFile $claudeSource (Join-Path $HOME ".claude\commands\gg-$name.md") $name
-        Install-SkillFile $claudeSource (Join-Path $HOME ".claude\skills\gg-$name\SKILL.md") $name
-        Install-SkillFile $codexSource (Join-Path $HOME ".codex\skills\gg-$name\SKILL.md") $name
+        Install-SkillFile $claudeSource (Join-Path $HOME ".claude\commands\$name.md")
+        Install-SkillFile $claudeSource (Join-Path $HOME ".claude\skills\$name\SKILL.md")
+        Install-SkillFile $codexSource (Join-Path $HOME ".codex\skills\$name\SKILL.md")
         $count++
     }
-    $patterns = Join-Path $Dir 'core\coding-patterns.md'
+    $patterns = Join-Path $Dir 'core\gg-coding-patterns.md'
     if (Test-Path -LiteralPath $patterns) {
-        $wrapped = Join-Path ([IO.Path]::GetTempPath()) ('gg-coding-patterns-' + [Guid]::NewGuid() + '.md')
-        $header = "---`nname: gg-coding-patterns`ndescription: Coding patterns — SOLID, encapsulation, dependency injection, design patterns, bounded concurrency, testability`n---`n`n"
-        Set-Content -LiteralPath $wrapped -Value ($header + (Get-Content -Raw -LiteralPath $patterns)) -NoNewline
-        Install-SkillFile $wrapped (Join-Path $HOME ".claude\commands\gg-coding-patterns.md") 'coding-patterns'
-        Install-SkillFile $wrapped (Join-Path $HOME ".claude\skills\gg-coding-patterns\SKILL.md") 'coding-patterns'
-        Install-SkillFile $wrapped (Join-Path $HOME ".codex\skills\gg-coding-patterns\SKILL.md") 'coding-patterns'
-        Remove-Item -Force -LiteralPath $wrapped -ErrorAction SilentlyContinue
-        New-Item -ItemType Directory -Force -Path (Join-Path $HOME '.gg') | Out-Null
-        Copy-Item -LiteralPath $patterns -Destination (Join-Path $HOME '.gg\gg-coding-patterns.md') -Force
+        Install-SkillFile $patterns (Join-Path $HOME ".claude\commands\gg-coding-patterns.md")
+        Install-SkillFile $patterns (Join-Path $HOME ".claude\skills\gg-coding-patterns\SKILL.md")
+        Install-SkillFile $patterns (Join-Path $HOME ".codex\skills\gg-coding-patterns\SKILL.md")
+        Install-SkillFile $patterns (Join-Path $HOME '.gg\gg-coding-patterns.md')
         $count++
     }
     Write-Output "gg installer: installed $count agent skills (~/.claude/{commands,skills}/gg-*, ~/.codex/skills/gg-*, ~/.gg/gg-coding-patterns.md)"
@@ -86,7 +79,6 @@ function Install-SkillsFrom([string]$Dir) {
 function Install-Skills([string]$TempDir) {
     $local = if ($PSScriptRoot) { Join-Path $PSScriptRoot 'skills' } else { $null }
     if ($local -and (Test-Path -LiteralPath (Join-Path $local 'canonical'))) {
-        $script:SourceRoot = $PSScriptRoot
         Install-SkillsFrom $local
         return
     }
@@ -100,35 +92,7 @@ function Install-Skills([string]$TempDir) {
         Where-Object { Test-Path -LiteralPath $_ } |
         Select-Object -First 1
     if (-not $assets) { Fail 'skill assets not found in repository snapshot' }
-    $script:SourceRoot = Split-Path -Parent $assets
     Install-SkillsFrom $assets
-}
-
-# Persist-Installer: keep a trusted copy of this installer at ~/.gg/install.ps1
-# so `gg update` runs a script the user already executed deliberately instead of
-# requiring GG_INSTALLER_PATH or downloading shell text at update time. An
-# IEX-piped run has no script file on disk, so the copy comes from the
-# repository tree this run installed from.
-function Persist-Installer {
-    $source = $null
-    $self = if ($PSCommandPath) { $PSCommandPath } else { $null }
-    if ($self -and (Test-Path -LiteralPath $self -PathType Leaf)) {
-        $source = $self
-    } elseif ($script:SourceRoot) {
-        $candidate = Join-Path $script:SourceRoot 'install.ps1'
-        if (Test-Path -LiteralPath $candidate -PathType Leaf) { $source = $candidate }
-    }
-    if (-not $source) { Fail 'no installer source to persist; gg update will need GG_INSTALLER_PATH' }
-    $dir = Join-Path $HOME '.gg'
-    New-Item -ItemType Directory -Force -Path $dir | Out-Null
-    Assert-NoReparsePoint $dir
-    $dest = Join-Path $dir 'install.ps1'
-    Assert-NoReparsePoint $dest
-    if ((Test-Path -LiteralPath $dest) -and (Get-Item -Force -LiteralPath $dest).PSIsContainer) {
-        Fail 'installer destination is not a regular file'
-    }
-    Copy-Item -LiteralPath $source -Destination $dest -Force
-    Write-Output "gg installer: trusted installer copy at $dest (used by gg update)"
 }
 
 if ($Version -notmatch '^(latest|[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?)$') { Fail "invalid version: $Version" }
@@ -187,9 +151,6 @@ try {
     $stage = $null
     Write-Output "gg installer: installed $destination"
     try { Install-Skills $temp } catch { Write-Warning "agent skill installation failed: $_" }
-    # A failure here leaves the binary installed; gg update then falls back to
-    # GG_INSTALLER_PATH.
-    try { Persist-Installer } catch { Write-Warning "$_" }
     if (-not (($env:Path -split ';') -contains $Prefix)) { Write-Warning "add $Prefix to PATH" }
 } finally {
     if ($stage -and (Test-Path -LiteralPath $stage)) { Remove-Item -Force -LiteralPath $stage -ErrorAction SilentlyContinue }

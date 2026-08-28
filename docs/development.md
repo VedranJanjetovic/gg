@@ -43,16 +43,18 @@ these boundaries.
 ## Agent-skill installation
 
 The repository's `skills/` tree contains canonical phase contracts, methodology
-skills, tool-adapted Claude/Codex variants, and `core/coding-patterns.md`.
+skills, tool-adapted Claude/Codex variants, and `core/gg-coding-patterns.md`.
 `install.sh` and `install.ps1` select an adapted source when one exists and
 otherwise use the canonical file.
 
-Each installed skill is rewritten to the collision-free `gg-<name>` namespace:
+Sources are already named for the collision-free `gg-*` namespace — both the
+directory or file name and the frontmatter `name:` — so the installers copy
+each selected file byte-for-byte to its destination:
 
 - Claude command files: `~/.claude/commands/gg-<name>.md`;
 - Claude model-invoked skills: `~/.claude/skills/gg-<name>/SKILL.md`;
 - Codex skills: `~/.codex/skills/gg-<name>/SKILL.md`; and
-- the raw coding-patterns reference: `~/.gg/gg-coding-patterns.md`.
+- the coding-patterns reference: `~/.gg/gg-coding-patterns.md`.
 
 When an installer runs from a checkout, it reads that checkout's `skills/`
 tree. A remote or pipe-based run downloads the repository snapshot matching
@@ -61,10 +63,11 @@ snapshot. The installers create the destination directories even when the
 agent CLIs are not installed.
 
 Re-running an installer overwrites only the `gg-*` namespace and the gg-owned
-coding-patterns reference. It does not modify shared user files such as
-`CLAUDE.md`, `AGENTS.md`, or `instructions.md`. Skill frontmatter names are
-rewritten on every installation, making the operation deterministic and
-idempotent.
+coding-patterns reference. It does not create, modify, or remove shared user
+files such as `CLAUDE.md`, `AGENTS.md`, or `instructions.md`, nor any legacy
+unprefixed skill left over from an earlier installation. Because installation
+transforms nothing, an installed file always matches its source exactly, which
+is what makes the operation deterministic and idempotent.
 
 ## Local checks
 

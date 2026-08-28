@@ -130,10 +130,25 @@ versions. If a newer release exists, update checks project state before
 installing: any project whose status is exactly `running` blocks the update and
 the command recommends `gg stop-all`.
 
-When installation is allowed, gg invokes the platform installer once with an
-explicit version. A successful installation leaves a copy of the installer at
-`~/.gg/install.sh` or `~/.gg/install.ps1` for this purpose. Set
-`GG_INSTALLER_PATH` to an absolute path to a trusted, inspected `install.sh` or
-`install.ps1` to use a different one; gg does not discover an installer from
-the current folder or build a shell command string. For deterministic testing,
-`GG_RELEASE_SOURCE` may point to a trusted HTTP release fixture.
+When installation is allowed, gg fetches `install.sh` (or `install.ps1` on
+Windows) over HTTPS **pinned to the release tag being installed** —
+`.../gg-vX.Y.Z/install.sh` — writes it to a temporary file, and runs it once with
+an explicit `--version` and an explicit `--prefix`. The prefix is the directory
+holding the running `gg`, resolved through symlinks, so an update lands where gg
+is actually installed rather than in the installer's default prefix. Every step
+that cannot be resolved is reported: an unlocatable or non-regular executable and
+an unwritable destination directory each fail before anything is downloaded.
+
+The installer is fetched rather than read from a persisted copy so that the
+installer and the binary it installs always come from the same commit. Pinning to
+the tag is what makes fetching acceptable: the URL is an immutable, reviewable
+artifact in the same repository already trusted for the binary, not a moving
+branch tip. The fetched script is passed to the interpreter as an argv element —
+gg never pipes it to the interpreter's stdin and never builds a shell command
+string. A body that is empty, or that begins with `<` (a 404 HTML page), is
+refused rather than executed.
+
+For deterministic testing, `GG_RELEASE_SOURCE` may point to a trusted HTTP
+release fixture and `GG_INSTALLER_SOURCE` to a trusted HTTP base URL for the
+installer. The `/gg-vX.Y.Z/<script>` path is always appended, so an override
+cannot downgrade the fetch to an unpinned script.

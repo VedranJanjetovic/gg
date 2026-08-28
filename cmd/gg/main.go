@@ -66,7 +66,7 @@ func newUpdateApp(ctx context.Context) (*cli.App, error) {
 		func() string { return version.Current().Version },
 		update.NewHTTPReleaseLookup(nil, os.Getenv("GG_RELEASE_SOURCE")),
 		update.WithProjectStatusLister(productionProjectStatusLister{projects: projects}),
-		update.WithInstaller(update.NewPlatformInstaller()),
+		update.WithInstaller(update.NewScriptInstaller()),
 	)
 	return cli.New(cli.WithVersion(version.Current()), cli.WithRootResolver(rootResolver), cli.WithLifecycleService(projects), cli.WithUpdateService(service)), nil
 }
