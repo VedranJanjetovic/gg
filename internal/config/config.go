@@ -210,12 +210,13 @@ var (
 // RequiredPhases returns the phases that must be present and enabled in a
 // newly saved complete configuration.
 func RequiredPhases() []Phase {
-	return []Phase{PhaseAcceptanceCriteria, PhaseGrooming, PhasePlanning, PhaseDevelopment, PhaseRebase, PhaseTestDocument}
+	return []Phase{PhaseAcceptanceCriteria, PhaseGrooming, PhaseDevelopment, PhaseRebase, PhaseTestDocument}
 }
 
-// OptionalPhases returns the phases whose enabled state may be changed.
+// OptionalPhases returns the phases whose enabled state may be changed, in
+// canonical pipeline order.
 func OptionalPhases() []Phase {
-	return []Phase{PhaseQA, PhaseBuildChecker, PhasePR, PhaseCI}
+	return []Phase{PhasePlanning, PhaseQA, PhaseBuildChecker, PhasePR, PhaseCI}
 }
 
 // CompletePhaseOrder returns the current folder-schema order. It is kept in

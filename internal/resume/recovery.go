@@ -119,7 +119,7 @@ func migrateLegacyVerification(ctx context.Context, project state.ProjectState, 
 	if !setterOK && !migratorOK {
 		return state.ProjectState{}, errors.New("legacy resume requires a lifecycle service that can persist verification migration")
 	}
-	contract, err = agent.ReadVerificationContract(project.WorktreePath)
+	contract, err = agent.ReadVerificationContract(project.WorktreePath, pipeline.PhasePlanning)
 	if err != nil {
 		// The artifact cannot supply the contract — it predates the declaration
 		// or the agent wrote it wrong. Only Planning can produce it, so rewind

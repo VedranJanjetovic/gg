@@ -71,10 +71,11 @@ Do not treat these as synonyms:
 |---|---|---|
 | `pipeline` `Optional: true` | grooming, planning, qa, build_checker, pr, ci | has an `Enabled` flag |
 | `RemovablePhases()` (`config.go:82`) | grooming, planning, qa, build_checker, pr, ci | schema permits absence |
-| `OptionalPhases()` (`config.go:217`) | qa, build_checker, pr, ci | **actually user-disableable** |
+| `OptionalPhases()` (`config.go:218`) | planning, qa, build_checker, pr, ci | **actually user-disableable** |
 
-`RequiredPhases()` (`config.go:213`) requires grooming and planning enabled even
-though both appear in `RemovablePhases()`.
+`RequiredPhases()` (`config.go:212`) requires grooming enabled even though it
+appears in `RemovablePhases()`. Planning is genuinely user-disableable; when it
+is off, Acceptance criteria declares the executable verification contract.
 
 ## Sentinel errors
 

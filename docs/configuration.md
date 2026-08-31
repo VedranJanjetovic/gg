@@ -58,8 +58,11 @@ unknown keys are rejected rather than ignored, so the example is illustrative
 rather than loadable. `gg configure` writes the file itself; the block style it
 emits and the flow style shown here are both accepted on read. The required
 phases are
-`acceptance_criteria`, `grooming`, `planning`, `development`, `rebase`, and
-`test_document`; only `qa`, `build_checker`, `pr`, and `ci` can be toggled.
+`acceptance_criteria`, `grooming`, `development`, `rebase`, and
+`test_document`; `planning`, `qa`, `build_checker`, `pr`, and `ci` can be
+toggled. With `planning` disabled there is no plan artifact, so Development
+implements the whole accepted scope in a single pass and Acceptance criteria
+declares the executable verification contract instead.
 `linting` is still accepted as an alias for `build_checker` in legacy files.
 
 Sparse legacy configuration is never silently rewritten: `gg run` opens

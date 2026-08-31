@@ -51,6 +51,11 @@ type PromptInput struct {
 	// gg-coding-patterns reference; code-touching phases are told to follow
 	// it. Empty omits the instruction.
 	CodingPatternsPath string
+	// PlanningDisabled reports that Planning is not part of this run's
+	// executable pipeline. Acceptance criteria then declares the executable
+	// verification contract, and Development implements the whole accepted
+	// scope in one pass instead of iterating plan phases.
+	PlanningDisabled bool
 }
 
 // PromptBuilder constructs a standalone prompt without consulting chat state.
@@ -237,14 +242,14 @@ func BuildPrompt(input PromptInput) (string, error) {
 	writeQuotedValue(&b, workingDirectory)
 	b.WriteString(". Do not read from, write to, execute changes from, or create artifacts in another worktree or the main repository.\n")
 
+	// With Planning disabled the contract has no later owner, so Acceptance
+	// criteria declares it instead; the wording is otherwise identical.
+	if input.Phase == pipeline.PhaseAcceptanceCriteria && input.PlanningDisabled {
+		writeVerificationContractInstruction(&b, "Acceptance criteria", "acceptance criteria", input.RepairExistingVerification)
+	}
+
 	if input.Phase == pipeline.PhasePlanning {
-		b.WriteString("\n## Verification contract instruction\n")
-		b.WriteString("Planning MUST add a non-empty single-line JSON `gg_verification_steps` array to the plan frontmatter. Each entry must contain a unique non-empty `name`, direct executable `command`, an `args` JSON array (never a shell command string), and one supported `adapter` (`gofmt-empty`, `go-test`, `go-diagnostic`, or `git-diff-check`); an optional `env` object may contain fixed KEY/value pairs. Planning MUST also add an explicit boolean `gg_repair_mode` field; do not infer repair intent from the project goal.\n")
-		if input.RepairExistingVerification {
-			b.WriteString("The caller explicitly selected repair of existing verification failures, so set `gg_repair_mode: true`.\n")
-		} else {
-			b.WriteString("This invocation did not explicitly select repair of existing verification failures, so set `gg_repair_mode: false`.\n")
-		}
+		writeVerificationContractInstruction(&b, "Planning", "plan", input.RepairExistingVerification)
 		b.WriteString("\n## Plan tracking instruction\n")
 		b.WriteString("Classify the complete requested work before choosing phases. Use the highest applicable signal: Trivial is one cohesive localized outcome with no migration, public-contract change, or dependency ordering; Simple is one localized component with routine backward-compatible behavior and tests; Moderate means multiple components, meaningful ordering, new public behavior, or a contained data/config migration; Complex means cross-service work, breaking contracts, substantial migration or rollback concerns, security-critical changes, or several independently deliverable outcomes.\n")
 		b.WriteString("Use advisory phase bands of exactly 1 for Trivial, usually 1–2 for Simple, usually 2–4 for Moderate, and usually 5–10 for Complex. Only Trivial exactly one and the hard maximum of 10 phases are enforced; do not create artificial splits to satisfy an advisory band. Preserve the complete scope.\n")
@@ -305,12 +310,38 @@ func BuildPrompt(input PromptInput) (string, error) {
 			default:
 				b.WriteString("Confine all work to this plan phase's scope; do not start later plan phases.\n")
 			}
+		} else if input.PlanningDisabled {
+			// No plan artifact exists, so this single pass covers the whole
+			// accepted scope. Testing and Review still run as subphases.
+			switch input.Subphase {
+			case string(pipeline.DevelopmentSubphaseImplementation):
+				b.WriteString("Planning is disabled for this run, so there is no plan artifact. Implement the COMPLETE accepted scope from the acceptance criteria above in this single pass, including its unit tests, and make those tests pass.\n")
+			case string(pipeline.DevelopmentSubphaseTesting):
+				b.WriteString("Write and run tests that thoroughly cover the complete implemented scope — edge cases, failure paths, and the integration between the parts you built. The full existing test suite must also pass; fix every regression this work introduced.\n")
+			case string(pipeline.DevelopmentSubphaseReview):
+				b.WriteString("Review every change in this worktree against the acceptance criteria above — correctness, edge cases, and integration — and fix every defect you find.\n")
+			default:
+				b.WriteString("Planning is disabled for this run, so there is no plan artifact. Implement the COMPLETE accepted scope from the acceptance criteria above in this single pass.\n")
+			}
 		} else {
 			b.WriteString("Work through the plan ONE phase at a time: for each plan phase, write its tests and make them pass before starting the next phase, committing after each phase.\n")
 			b.WriteString("In the development artifact's frontmatter add `gg_plan_completed: [\"<phase name>\", ...]` — a single-line JSON array naming every plan phase that is fully implemented in the worktree so far, using the exact names from the plan artifact's `gg_plan_phases`.\n")
 		}
 	}
 	return b.String(), nil
+}
+
+// writeVerificationContractInstruction emits the strict frontmatter contract
+// the declaring phase must satisfy. owner names the phase in prose; artifact
+// names its canonical artifact.
+func writeVerificationContractInstruction(b *strings.Builder, owner, artifact string, repair bool) {
+	b.WriteString("\n## Verification contract instruction\n")
+	fmt.Fprintf(b, "%s MUST add a non-empty single-line JSON `gg_verification_steps` array to the %s frontmatter. Each entry must contain a unique non-empty `name`, direct executable `command`, an `args` JSON array (never a shell command string), and one supported `adapter` (`gofmt-empty`, `go-test`, `go-diagnostic`, or `git-diff-check`); an optional `env` object may contain fixed KEY/value pairs. %s MUST also add an explicit boolean `gg_repair_mode` field; do not infer repair intent from the project goal.\n", owner, artifact, owner)
+	if repair {
+		b.WriteString("The caller explicitly selected repair of existing verification failures, so set `gg_repair_mode: true`.\n")
+	} else {
+		b.WriteString("This invocation did not explicitly select repair of existing verification failures, so set `gg_repair_mode: false`.\n")
+	}
 }
 
 func writeQuotedValue(b *strings.Builder, value string) {

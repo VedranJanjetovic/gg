@@ -23,6 +23,7 @@ Use only the assigned brief, current repository/worktree state, and artifacts ex
 
 - Observable scope, non-goals, behavior, edge cases, and pass/fail acceptance checks.
 - `acceptance-criteria.md`: approved criteria, assumptions, dependencies, and open questions at the orchestrator-assigned path.
+- The executable verification contract in that artifact's frontmatter, but only when the brief explicitly requires it; otherwise Planning declares it.
 
 ## Procedure
 

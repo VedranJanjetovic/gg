@@ -722,6 +722,19 @@ func developmentExecutable(plan pipeline.ExecutablePipeline) (pipeline.Executabl
 	return pipeline.ExecutablePhase{}, false
 }
 
+// verificationContractPhase names the phase that must declare the executable
+// verification contract. Planning owns it whenever it runs; with Planning
+// disabled the declaration moves to Acceptance criteria so no configuration
+// can produce a run whose verification boundaries silently pass.
+func verificationContractPhase(plan pipeline.ExecutablePipeline) pipeline.PhaseID {
+	for _, phase := range plan.Phases() {
+		if phase.Phase().ID() == pipeline.PhasePlanning {
+			return pipeline.PhasePlanning
+		}
+	}
+	return pipeline.PhaseAcceptanceCriteria
+}
+
 func qaExecutable(plan pipeline.ExecutablePipeline) (pipeline.ExecutablePhase, bool) {
 	for _, phase := range plan.Phases() {
 		if phase.Phase().ID() == pipeline.PhaseQA {
@@ -1179,7 +1192,7 @@ func (c *sequentialController) executePhase(ctx context.Context, request Request
 	}
 	artifacts := appendUnique(request.Project.ArtifactPaths, feedback...)
 	invocationID := phaseInvocationID(request.RunID, phase, subphase, iteration)
-	promptInput := agent.PromptInput{Project: request.Project, Phase: phase, Subphase: subphase, PhaseContract: request.PhaseContracts[phase], ArtifactPaths: artifacts, WorkingDirectory: request.Project.WorktreePath, RunID: invocationID, Development: phase == pipeline.PhaseDevelopment, RepairExistingVerification: request.RepairExistingVerification}
+	promptInput := agent.PromptInput{Project: request.Project, Phase: phase, Subphase: subphase, PhaseContract: request.PhaseContracts[phase], ArtifactPaths: artifacts, WorkingDirectory: request.Project.WorktreePath, RunID: invocationID, Development: phase == pipeline.PhaseDevelopment, RepairExistingVerification: request.RepairExistingVerification, PlanningDisabled: verificationContractPhase(request.Pipeline) != pipeline.PhasePlanning}
 	if phase == pipeline.PhaseDevelopment && subphase == string(pipeline.DevelopmentSubphaseReview) {
 		promptInput.SkippedTestingEvidence = skippedTestingEvidence(request.Project)
 	}
@@ -1787,11 +1800,16 @@ type verificationContractRecorder interface {
 // plan phases are done. It is best-effort display data: parsing or
 // persistence problems must never affect the phase outcome.
 func (c *sequentialController) recordPlanProgress(ctx context.Context, request Request, phase pipeline.PhaseID) error {
-	if phase == pipeline.PhasePlanning {
+	declaring := verificationContractPhase(request.Pipeline)
+	if phase == declaring {
 		if recorder, ok := c.state.(verificationContractRecorder); ok {
-			contract, err := agent.ReadVerificationContract(request.Project.WorktreePath)
+			contract, err := agent.ReadVerificationContract(request.Project.WorktreePath, declaring)
 			if err != nil {
-				return fmt.Errorf("Planning must declare a valid executable verification contract; rerun Planning before Development: %w", err)
+				name := "Planning"
+				if declaring == pipeline.PhaseAcceptanceCriteria {
+					name = "Acceptance criteria"
+				}
+				return fmt.Errorf("%s must declare a valid executable verification contract; rerun %s before Development: %w", name, name, err)
 			}
 			snapshot, err := pipeline.SnapshotExecutionWithVerification(request.Pipeline, request.Subphases, request.MaxIterations, contract, request.GitOps)
 			if err != nil {

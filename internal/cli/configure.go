@@ -173,7 +173,6 @@ var phaseDescriptions = map[config.Phase]string{
 var lockedPhaseDescriptions = map[pipeline.PhaseID]string{
 	pipeline.PhaseAcceptanceCriteria: "Capture the goal and acceptance criteria (always runs)",
 	pipeline.PhaseGrooming:           "Requirement grilling (always runs)",
-	pipeline.PhasePlanning:           "Plan implementation phases and deliverables (always runs)",
 	pipeline.PhaseDevelopment:        "Implement each planned phase with subagents (always runs)",
 	pipeline.PhaseRebase:             "Fetch the parent branch and rebase (always runs)",
 	pipeline.PhaseTestDocument:       "Close test coverage gaps and update docs (always runs)",
@@ -203,7 +202,7 @@ func currentPhaseStates(global config.GlobalConfig, project *config.ProjectConfi
 			state.Locked, state.Enabled, state.Description = true, true, lockedPhaseDescriptions[phase.ID()]
 			// Locked phases always run, but grooming and the fixed pipeline
 			// steps still accept per-phase agent/model/effort overrides.
-			if candidate := config.Phase(phase.ID()); candidate == config.PhaseGrooming || candidate == config.PhasePlanning || config.IsFixedPhase(candidate) {
+			if candidate := config.Phase(phase.ID()); candidate == config.PhaseGrooming || config.IsFixedPhase(candidate) {
 				state.Phase = candidate
 			}
 		}

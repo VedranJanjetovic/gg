@@ -16,7 +16,7 @@ Use only the assigned implementation brief, current worktree state, and explicit
 
 ## Inputs
 
-- Approved plan, acceptance criteria, declared repository/worktree scope, constraints, and artifact paths.
+- Acceptance criteria, the approved plan when Planning is enabled, declared repository/worktree scope, constraints, and artifact paths.
 - Only explicitly named upstream artifacts.
 
 ## Outputs and Artifacts
@@ -56,4 +56,4 @@ Development Testing owns focused tests for its current plan phase. Perform ordin
 
 ## Failure / Escalation
 
-Stop on invalid subphase generation, failed required verification, missing plan input, merge conflict, or out-of-scope requirement. Preserve evidence, report the failing command/output and affected artifact, and escalate for a decision; do not skip a failed generated subphase or invent an alternate workflow.
+Stop on invalid subphase generation, failed required verification, merge conflict, or out-of-scope requirement. Preserve evidence, report the failing command/output and affected artifact, and escalate for a decision; do not skip a failed generated subphase or invent an alternate workflow.

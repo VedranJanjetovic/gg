@@ -38,7 +38,9 @@ func phase3Env(env *Environment, bin, log string) []string {
 func phase3Config() config.ProjectConfig {
 	no := false
 	return config.ProjectConfig{Version: config.CurrentSchemaVersion, PhaseOverrides: map[config.Phase]config.PhaseOverride{
-		config.PhaseGrooming: {Enabled: &no}, config.PhasePlanning: {Enabled: &no}, config.PhaseBuildChecker: {Enabled: &no}, config.PhasePR: {Enabled: &no}, config.PhaseCI: {Enabled: &no},
+		// Grooming is required, so its override is inert and it still runs;
+		// these tests assert the full pipeline order including Planning.
+		config.PhaseGrooming: {Enabled: &no}, config.PhaseBuildChecker: {Enabled: &no}, config.PhasePR: {Enabled: &no}, config.PhaseCI: {Enabled: &no},
 	}}
 }
 

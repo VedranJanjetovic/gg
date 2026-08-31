@@ -93,10 +93,11 @@ func validMigrationPhases(phases []PhaseConfig) bool {
 		if index >= len(order) || entry.Phase != order[index] || !isSupportedPhase(entry.Phase) {
 			return false
 		}
-		if entry.Required != isRequiredPhase(entry.Phase) {
-			return false
-		}
-		if entry.Required && !entry.Enabled {
+		// A phase gg once treated as required but now offers as toggleable
+		// carries a stale required flag on disk. Overstating the requirement
+		// is understandable older data, so it migrates and the wizard rewrites
+		// the flag on save; understating it stays malformed.
+		if isRequiredPhase(entry.Phase) && (!entry.Required || !entry.Enabled) {
 			return false
 		}
 		if completeAgentSettingsShape(entry.AgentSettings) {

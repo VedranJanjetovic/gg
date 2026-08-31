@@ -62,8 +62,8 @@ in both directions.** `internal/config/store.go:513` (`KnownFields(true)`) and
 stay readable because `gg resume` restores in-flight runs.
 
 **3. `PhaseMetadata.Optional` does not mean user-disableable.** It means "carries
-an enabled flag." Grooming and Planning are `Optional: true` yet required. The
-set users can actually turn off is `config.OptionalPhases()` — qa, build_checker,
+an enabled flag." Grooming is `Optional: true` yet required. The set users can
+actually turn off is `config.OptionalPhases()` — planning, qa, build_checker,
 pr, ci. Three overlapping sets exist; see the `internal/config` file.
 
 **4. Persistence on failure and cleanup paths needs `context.WithoutCancel(ctx)`.**

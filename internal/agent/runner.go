@@ -464,18 +464,19 @@ func ReadPlanFrontmatter(root string, phase pipeline.PhaseID) (phases, completed
 	return phases, completed
 }
 
-// ReadVerificationContract reads the Planning artifact's executable
-// verification declaration. Unlike the display-only plan progress parser
-// above, this parser is strict because its result controls whether
-// Development may start.
-func ReadVerificationContract(root string) (state.VerificationContract, error) {
-	name, ok := pipeline.CanonicalArtifactName(pipeline.PhasePlanning)
+// ReadVerificationContract reads the declaring phase's executable
+// verification declaration. Planning owns it whenever it runs; Acceptance
+// criteria owns it when Planning is disabled. Unlike the display-only plan
+// progress parser above, this parser is strict because its result controls
+// whether Development may start.
+func ReadVerificationContract(root string, phase pipeline.PhaseID) (state.VerificationContract, error) {
+	name, ok := pipeline.CanonicalArtifactName(phase)
 	if !ok {
-		return state.VerificationContract{}, errors.New("planning phase has no canonical artifact")
+		return state.VerificationContract{}, fmt.Errorf("phase %q has no canonical artifact", phase)
 	}
 	data, err := os.ReadFile(filepath.Join(filepath.Clean(root), name))
 	if err != nil {
-		return state.VerificationContract{}, fmt.Errorf("read planning artifact: %w", err)
+		return state.VerificationContract{}, fmt.Errorf("read verification artifact: %w", err)
 	}
 	return ParseVerificationContract(data)
 }
@@ -485,7 +486,7 @@ func ReadVerificationContract(root string) (state.VerificationContract, error) {
 func ParseVerificationContract(data []byte) (state.VerificationContract, error) {
 	lines := strings.Split(strings.ReplaceAll(string(data), "\r\n", "\n"), "\n")
 	if len(lines) < 2 || lines[0] != "---" {
-		return state.VerificationContract{}, errors.New("planning artifact must begin with frontmatter")
+		return state.VerificationContract{}, errors.New("verification artifact must begin with frontmatter")
 	}
 	var stepsValue, repairValue string
 	foundSteps, foundRepair := false, false
@@ -502,24 +503,24 @@ func ParseVerificationContract(data []byte) (state.VerificationContract, error) 
 		switch strings.TrimSpace(key) {
 		case "gg_verification_steps":
 			if foundSteps {
-				return state.VerificationContract{}, errors.New("planning artifact repeats gg_verification_steps")
+				return state.VerificationContract{}, errors.New("verification artifact repeats gg_verification_steps")
 			}
 			foundSteps, stepsValue = true, strings.TrimSpace(value)
 		case "gg_repair_mode":
 			if foundRepair {
-				return state.VerificationContract{}, errors.New("planning artifact repeats gg_repair_mode")
+				return state.VerificationContract{}, errors.New("verification artifact repeats gg_repair_mode")
 			}
 			foundRepair, repairValue = true, strings.TrimSpace(value)
 		}
 	}
 	if !closed {
-		return state.VerificationContract{}, errors.New("planning artifact has unterminated frontmatter")
+		return state.VerificationContract{}, errors.New("verification artifact has unterminated frontmatter")
 	}
 	if !foundSteps || stepsValue == "" {
-		return state.VerificationContract{}, errors.New("planning artifact requires non-empty gg_verification_steps")
+		return state.VerificationContract{}, errors.New("verification artifact requires non-empty gg_verification_steps")
 	}
 	if !foundRepair || repairValue == "" {
-		return state.VerificationContract{}, errors.New("planning artifact requires explicit gg_repair_mode")
+		return state.VerificationContract{}, errors.New("verification artifact requires explicit gg_repair_mode")
 	}
 	var rawSteps []json.RawMessage
 	decoder := json.NewDecoder(strings.NewReader(stepsValue))

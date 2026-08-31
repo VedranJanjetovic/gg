@@ -264,6 +264,60 @@ func TestBuildPromptRequiresPlanningVerificationContractAndExplicitRepairMode(t 
 	}
 }
 
+func TestBuildPromptMovesVerificationContractToAcceptanceCriteriaWhenPlanningIsDisabled(t *testing.T) {
+	base := PromptInput{
+		ProjectGoal: "document the workflow", AcceptanceCriteria: []string{"the workflow is documented"},
+		Phase: pipeline.PhaseAcceptanceCriteria, PhaseContract: "acceptance contract",
+		WorkingDirectory: "/tmp/worktree", RunID: "acceptance-run",
+	}
+	enabled, err := BuildPrompt(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(enabled, "gg_verification_steps") {
+		t.Fatalf("acceptance criteria claims the contract while Planning is enabled:\n%s", enabled)
+	}
+	disabled := base
+	disabled.PlanningDisabled = true
+	prompt, err := BuildPrompt(disabled)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"Acceptance criteria MUST add", "gg_verification_steps", "acceptance criteria frontmatter", "set `gg_repair_mode: false`"} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("acceptance criteria prompt does not contain %q:\n%s", want, prompt)
+		}
+	}
+}
+
+func TestBuildPromptScopesDevelopmentToWholeGoalWhenPlanningIsDisabled(t *testing.T) {
+	for _, tc := range []struct{ subphase, want string }{
+		{"implementation", "Implement the COMPLETE accepted scope"},
+		{"testing", "tests that thoroughly cover the complete implemented scope"},
+		{"review", "Review every change in this worktree against the acceptance criteria"},
+	} {
+		t.Run(tc.subphase, func(t *testing.T) {
+			got, err := BuildPrompt(PromptInput{
+				Project: state.ProjectState{OriginalGoal: "ship it", AcceptanceCriteria: []string{"tests pass"}},
+				Phase:   pipeline.PhaseDevelopment, Subphase: tc.subphase, PhaseContract: "contract",
+				WorkingDirectory: "/tmp/worktree", RunID: "run/development/" + tc.subphase + "/iteration-0",
+				PlanningDisabled: true,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(got, tc.want) {
+				t.Fatalf("no-plan development prompt does not contain %q:\n%s", tc.want, got)
+			}
+			for _, unwanted := range []string{"gg_plan_completed", "gg_plan_phases", "ONE phase at a time"} {
+				if strings.Contains(got, unwanted) {
+					t.Fatalf("no-plan development prompt still references %q:\n%s", unwanted, got)
+				}
+			}
+		})
+	}
+}
+
 func TestBuildPromptReferencesSkillsByNameAndCodingPatternsByPath(t *testing.T) {
 	base := PromptInput{
 		Project:       state.ProjectState{OriginalGoal: "ship it", AcceptanceCriteria: []string{"tests pass"}},
