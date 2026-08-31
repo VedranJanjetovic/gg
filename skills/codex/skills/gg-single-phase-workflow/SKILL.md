@@ -89,7 +89,7 @@ Before editing code, create a compact implementation brief in the main thread. T
 - planned implementation steps
 - expected generated artifacts, mocks, Swagger/docs updates, and verification commands
 
-Then ALWAYS spawn exactly one implementation subagent. Use the project's language-specific implementation skill if one exists (e.g., `$gg-go-developer`, `$ts-developer`), otherwise use a general-purpose subagent.
+Then ALWAYS spawn exactly one implementation subagent using `$gg-developer`, which detects the project's language and toolchain from the repository itself.
 
 The implementation subagent prompt must include the implementation brief. The subagent should:
 - edit the current working branch/worktree as needed

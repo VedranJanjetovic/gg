@@ -20,7 +20,7 @@ func TestBuildPromptContainsRequiredStandaloneSections(t *testing.T) {
 	}
 	for _, want := range []string{
 		"## Project goal", "ship it", "## Phase", `"development" / "implementation"`,
-		"## Phase contract", `Load and follow the agent skill named "gg-development"`,
+		"## Phase contract", `Before any other action, invoke the skill "gg-development"`,
 		"## Acceptance criteria", `- "tests pass"`,
 		"## Relevant artifact paths", `- "IMPLEMENTATION.md"`, "## Worktree-only instruction",
 		"/tmp/worktree", "## Development instructions", "Do not create signed commits", `git -c commit.gpgsign=false commit -m "<message>"`,
@@ -332,7 +332,7 @@ func TestBuildPromptReferencesSkillsByNameAndCodingPatternsByPath(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(got, `Load and follow the agent skill named "gg-qa"`) || strings.Contains(got, `"gg-gg-qa"`) {
+	if !strings.Contains(got, `Before any other action, invoke the skill "gg-qa"`) || strings.Contains(got, `"gg-gg-qa"`) {
 		t.Fatalf("qa prompt has incorrect skill identity:\n%s", got)
 	}
 
@@ -342,7 +342,7 @@ func TestBuildPromptReferencesSkillsByNameAndCodingPatternsByPath(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(got, `Load and follow the agent skill named "gg-test-document"`) || strings.Contains(got, `"gg-gg-test-document"`) {
+	if !strings.Contains(got, `Before any other action, invoke the skill "gg-test-document"`) || strings.Contains(got, `"gg-gg-test-document"`) {
 		t.Fatalf("test_document prompt missing hyphenated skill reference:\n%s", got)
 	}
 	if !strings.Contains(got, `"/home/user/.gg/gg-coding-patterns.md"`) {

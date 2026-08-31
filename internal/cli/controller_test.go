@@ -232,7 +232,7 @@ func (c *promptBoundaryController) Execute(_ context.Context, request orchestrat
 				return nil, err
 			}
 			skillName := strings.ReplaceAll(string(input.Phase), "_", "-")
-			if !strings.Contains(prompt, `Load and follow the agent skill named "gg-`+skillName+`"`) {
+			if !strings.Contains(prompt, `Before any other action, invoke the skill "gg-`+skillName+`"`) {
 				return nil, errors.New("canonical phase contract skill reference did not reach prompt")
 			}
 			c.prompts = append(c.prompts, input)

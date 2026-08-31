@@ -20,20 +20,36 @@ const CurrentSchemaVersion = 1
 const MaxVerificationRemediationAttempts = 3
 
 // VerificationAdapter identifies the parser used to turn a command result
-// into stable verification findings. The adapters are deliberately a small
-// closed set until a later phase adds execution and comparison behavior.
+// into stable verification findings. The adapters name output *shapes*, not
+// toolchains, so any language's checks can declare one; the Go-named values are
+// retained aliases so snapshots written before the set was generalized stay
+// readable by `gg resume`. This mirrors internal/verification.Adapter, which
+// state must not import.
 type VerificationAdapter string
 
 const (
-	VerificationAdapterGofmtEmpty   VerificationAdapter = "gofmt-empty"
+	// VerificationAdapterFileList reads a plain list of offending file paths
+	// (gofmt -l, prettier --list-different, ruff format --check).
+	VerificationAdapterFileList VerificationAdapter = "file-list"
+	// VerificationAdapterDiagnostic reads file:line[:col]: message, the shape
+	// emitted by go vet, tsc, eslint, clippy, mypy, javac, and gcc.
+	VerificationAdapterDiagnostic VerificationAdapter = "diagnostic"
+	// VerificationAdapterCommandExit is the toolchain-agnostic fallback for a
+	// command whose only stable signal is its exit status.
+	VerificationAdapterCommandExit  VerificationAdapter = "command-exit"
 	VerificationAdapterGoTest       VerificationAdapter = "go-test"
-	VerificationAdapterGoDiagnostic VerificationAdapter = "go-diagnostic"
 	VerificationAdapterGitDiffCheck VerificationAdapter = "git-diff-check"
+
+	// Legacy Go-named aliases. Accepted on read, never newly emitted.
+	VerificationAdapterGofmtEmpty   VerificationAdapter = "gofmt-empty"
+	VerificationAdapterGoDiagnostic VerificationAdapter = "go-diagnostic"
 )
 
 func (adapter VerificationAdapter) IsValid() bool {
 	switch adapter {
-	case VerificationAdapterGofmtEmpty, VerificationAdapterGoTest, VerificationAdapterGoDiagnostic, VerificationAdapterGitDiffCheck:
+	case VerificationAdapterFileList, VerificationAdapterDiagnostic, VerificationAdapterCommandExit,
+		VerificationAdapterGoTest, VerificationAdapterGitDiffCheck,
+		VerificationAdapterGofmtEmpty, VerificationAdapterGoDiagnostic:
 		return true
 	default:
 		return false

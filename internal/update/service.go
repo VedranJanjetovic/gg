@@ -97,30 +97,49 @@ func NewServiceWithDependencies(current func() string, lookup ReleaseLookup, opt
 	return service
 }
 
-func (s *Service) Update(ctx context.Context) (Result, error) {
+// Available reports whether a released version newer than the running binary
+// exists. It never installs anything, so read-only callers (the TUI footer)
+// can advertise `gg update` without changing the binary under the user.
+func (s *Service) Available(ctx context.Context) (bool, error) {
+	_, _, newer, err := s.compare(ctx)
+	return newer, err
+}
+
+// compare resolves the running version against the latest release. An
+// unrecognized current version is not an error: it reports "no newer release"
+// so callers never act on a version they cannot order.
+func (s *Service) compare(ctx context.Context) (Result, semanticVersion, bool, error) {
 	if err := ctx.Err(); err != nil {
-		return Result{}, err
+		return Result{}, semanticVersion{}, false, err
 	}
 	if s == nil || s.lookup == nil || s.current == nil {
-		return Result{}, errors.New("update service is not configured")
+		return Result{}, semanticVersion{}, false, errors.New("update service is not configured")
 	}
 	current := strings.TrimSpace(s.current())
 	currentVersion, ok := parseVersion(current)
 	if !ok {
-		return Result{Current: current, Action: "unrecognized"}, nil
+		return Result{Current: current, Action: "unrecognized"}, semanticVersion{}, false, nil
 	}
 	latestText, err := s.lookup.LatestRelease(ctx)
 	if err != nil {
-		return Result{Current: current}, fmt.Errorf("check latest release: %w", err)
+		return Result{Current: current}, semanticVersion{}, false, fmt.Errorf("check latest release: %w", err)
 	}
 	latestVersion, ok := parseVersion(latestText)
 	if !ok {
-		return Result{Current: current, Latest: latestText}, fmt.Errorf("latest release %q is not a semantic version", latestText)
+		return Result{Current: current, Latest: latestText}, semanticVersion{}, false, fmt.Errorf("latest release %q is not a semantic version", latestText)
 	}
 	result := Result{Current: current, Latest: latestText}
 	if compareVersion(latestVersion, currentVersion) <= 0 {
 		result.Action = "current"
-		return result, nil
+		return result, latestVersion, false, nil
+	}
+	return result, latestVersion, true, nil
+}
+
+func (s *Service) Update(ctx context.Context) (Result, error) {
+	result, latestVersion, newer, err := s.compare(ctx)
+	if err != nil || !newer {
+		return result, err
 	}
 	if err := ctx.Err(); err != nil {
 		return Result{}, err

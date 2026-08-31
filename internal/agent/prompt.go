@@ -147,13 +147,25 @@ func BuildPrompt(input PromptInput) (string, error) {
 	}
 	b.WriteString("\n\n## Phase contract\n")
 	// The contract is installed as an agent skill, not pasted here: the
-	// agent loads it by name from its user-level skills directory.
-	fmt.Fprintf(&b, "Load and follow the agent skill named %q — it is the binding contract for this phase. It is installed in your user-level skills directory (Claude Code: ~/.claude/skills, Codex: ~/.codex/skills).\n", phaseSkillName(input.Phase))
+	// agent loads it by name from its user-level skills directory. The
+	// directive is an ordered first action because a skill body is loaded
+	// lazily — naming it passively leaves the phase free to run uninformed.
+	phaseSkill := phaseSkillName(input.Phase)
+	fmt.Fprintf(&b, "Before any other action, invoke the skill %q. It is the binding contract for this phase: do not read files, plan, or write anything until you have loaded it and read it in full.\n", phaseSkill)
+	fmt.Fprintf(&b, "It is installed in your user-level skills directory (Claude Code: ~/.claude/skills/%s, Codex: ~/.codex/skills/%s). If it cannot be loaded, stop immediately and report `gg_disposition: blocked` naming the missing skill; never improvise the contract from this prompt alone.\n", phaseSkill, phaseSkill)
+	if skills := phaseMethodologySkills(input.Phase, input.Subphase); len(skills) > 0 {
+		b.WriteString("\n## Required methodology skills\n")
+		fmt.Fprintf(&b, "This phase must also be carried out using the installed skills %s. Invoke each one and follow its method for the work it governs; they are mandatory, not suggestions.\n", quotedList(skills))
+	}
 	if input.CodingPatternsPath != "" && codeTouchingPhase(input.Phase) {
 		b.WriteString("\n## Coding patterns\n")
-		b.WriteString("All code you write, test, or review must follow the coding patterns reference at ")
+		b.WriteString("All code you write, test, or review must follow the coding patterns reference. Invoke the skill \"gg-coding-patterns\" and read it before working; the same text is installed at ")
 		writeQuotedValue(&b, input.CodingPatternsPath)
-		b.WriteString(" (gg-coding-patterns). Read it before working.\n")
+		b.WriteString(" if the skill is unavailable.\n")
+	}
+	if codeTouchingPhase(input.Phase) {
+		b.WriteString("\n## Project toolchain\n")
+		b.WriteString("This project may be written in any language. Before building, testing, formatting, or linting, determine the project's actual toolchain from the repository itself — its build manifest, CI workflow, Makefile or task scripts, and existing source conventions — and use the commands it already defines. Never assume a language or a default command set, and follow the conventions the surrounding code already uses.\n")
 	}
 	b.WriteString("\n## Required result protocol\n")
 	b.WriteString("Write the canonical Markdown artifact ")
@@ -336,7 +348,14 @@ func BuildPrompt(input PromptInput) (string, error) {
 // names its canonical artifact.
 func writeVerificationContractInstruction(b *strings.Builder, owner, artifact string, repair bool) {
 	b.WriteString("\n## Verification contract instruction\n")
-	fmt.Fprintf(b, "%s MUST add a non-empty single-line JSON `gg_verification_steps` array to the %s frontmatter. Each entry must contain a unique non-empty `name`, direct executable `command`, an `args` JSON array (never a shell command string), and one supported `adapter` (`gofmt-empty`, `go-test`, `go-diagnostic`, or `git-diff-check`); an optional `env` object may contain fixed KEY/value pairs. %s MUST also add an explicit boolean `gg_repair_mode` field; do not infer repair intent from the project goal.\n", owner, artifact, owner)
+	fmt.Fprintf(b, "%s MUST add a non-empty single-line JSON `gg_verification_steps` array to the %s frontmatter. Each entry must contain a unique non-empty `name`, direct executable `command`, an `args` JSON array (never a shell command string), and one supported `adapter`; an optional `env` object may contain fixed KEY/value pairs. %s MUST also add an explicit boolean `gg_repair_mode` field; do not infer repair intent from the project goal.\n", owner, artifact, owner)
+	b.WriteString("Choose the commands from THIS repository's own toolchain — read its build manifest, CI workflow, Makefile or task scripts and reuse the checks it already defines. Do not assume any language.\n")
+	b.WriteString("An `adapter` names the shape of a command's output, not a language. Pick the one that matches:\n")
+	b.WriteString("- `file-list`: output is a plain list of offending file paths, one per line (`gofmt -l`, `prettier --list-different`, `ruff format --check`).\n")
+	b.WriteString("- `diagnostic`: output is `file:line[:col]: message` (`go vet`, `tsc`, `eslint`, `clippy`, `mypy`, `javac`, `gcc`, `shellcheck`).\n")
+	b.WriteString("- `go-test`: output is `go test` output, which exposes one identity per test.\n")
+	b.WriteString("- `git-diff-check`: the command is `git diff --check`.\n")
+	b.WriteString("- `command-exit`: the command reports only through its exit status. Use this for any check whose output does not match a shape above (`mvn test`, `npm test`, `cargo test`, `pytest`, `gradle build`). It cannot distinguish individual failures within a check, so prefer a parseable adapter whenever one fits.\n")
 	if repair {
 		b.WriteString("The caller explicitly selected repair of existing verification failures, so set `gg_repair_mode: true`.\n")
 	} else {
@@ -353,6 +372,55 @@ func writeQuotedValue(b *strings.Builder, value string) {
 // gg-test-document).
 func phaseSkillName(phase pipeline.PhaseID) string {
 	return "gg-" + strings.ReplaceAll(string(phase), "_", "-")
+}
+
+// phaseMethodologySkills maps a phase, and for Development its subphase, to the
+// installed gg-* methodology skills whose method that phase must apply. These
+// are distinct from the phase contract skill, which is always mandated: the
+// contract states what the phase must produce, these state how to do the work.
+// Phases with no matching methodology (grooming's interview, rebase's mechanical
+// replay) return nil rather than a loose approximation.
+func phaseMethodologySkills(phase pipeline.PhaseID, subphase string) []string {
+	if phase == pipeline.PhaseDevelopment {
+		switch subphase {
+		case string(pipeline.DevelopmentSubphaseTesting):
+			return []string{"gg-test"}
+		case string(pipeline.DevelopmentSubphaseReview):
+			return []string{"gg-review"}
+		default:
+			return []string{"gg-developer"}
+		}
+	}
+	switch phase {
+	case pipeline.PhaseAcceptanceCriteria:
+		return []string{"gg-plan"}
+	case pipeline.PhasePlanning:
+		return []string{"gg-plan", "gg-architect"}
+	case pipeline.PhaseQA:
+		return []string{"gg-review", "gg-test"}
+	case pipeline.PhaseTestDocument:
+		return []string{"gg-test"}
+	case pipeline.PhaseBuildChecker:
+		return []string{"gg-debug"}
+	case pipeline.PhasePR:
+		return []string{"gg-review"}
+	case pipeline.PhaseCI:
+		return []string{"gg-debug"}
+	default:
+		return nil
+	}
+}
+
+// quotedList renders skill names as a readable quoted enumeration.
+func quotedList(values []string) string {
+	quoted := make([]string, len(values))
+	for i, value := range values {
+		quoted[i] = strconv.Quote(value)
+	}
+	if len(quoted) < 2 {
+		return strings.Join(quoted, "")
+	}
+	return strings.Join(quoted[:len(quoted)-1], ", ") + " and " + quoted[len(quoted)-1]
 }
 
 // codeTouchingPhase reports whether the phase writes, tests, or reviews code

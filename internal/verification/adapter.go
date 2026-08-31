@@ -24,15 +24,17 @@ func ParseOutput(adapter Adapter, stdout, stderr string, exitCode int) ([]Indivi
 		failures []IndividualFailure
 		err      error
 	)
-	switch adapter {
-	case AdapterGofmtEmpty:
-		failures = parseGofmt(combined)
+	switch adapter.Canonical() {
+	case AdapterFileList:
+		failures = parseFileList(combined, fileListReason(adapter))
 	case AdapterGoTest:
 		failures = parseGoTest(combined)
-	case AdapterGoDiagnostic:
+	case AdapterDiagnostic:
 		failures = parseDiagnostic(combined)
 	case AdapterGitDiffCheck:
 		failures = parseGitDiff(combined)
+	case AdapterCommandExit:
+		failures = parseCommandExit(combined, exitCode)
 	default:
 		err = fmt.Errorf("unsupported verification adapter %q", adapter)
 	}
@@ -45,16 +47,42 @@ func ParseOutput(adapter Adapter, stdout, stderr string, exitCode int) ([]Indivi
 	return failures, exitCode == 0 || len(failures) > 0, nil
 }
 
-func parseGofmt(output string) []IndividualFailure {
+// fileListReason keeps the legacy gofmt-empty wording so a baseline captured
+// before the adapter was generalized still compares equal on resume; a reason
+// change would otherwise reclassify every unchanged file as changed_reason.
+func fileListReason(adapter Adapter) string {
+	if adapter == AdapterGofmtEmpty {
+		return "file requires gofmt"
+	}
+	return "file requires formatting"
+}
+
+// parseFileList treats each printed path as one failing file. reason is supplied
+// by the caller rather than fixed here so the legacy alias keeps its wording.
+func parseFileList(output, reason string) []IndividualFailure {
 	var failures []IndividualFailure
 	for _, line := range strings.Split(output, "\n") {
 		identity := strings.TrimSpace(line)
 		if identity == "" {
 			continue
 		}
-		failures = append(failures, IndividualFailure{Identity: "format:" + identity, Reason: "file requires gofmt", Evidence: identity})
+		failures = append(failures, IndividualFailure{Identity: "format:" + identity, Reason: reason, Evidence: identity})
 	}
 	return failures
+}
+
+// parseCommandExit is the toolchain-agnostic fallback. The command exposes no
+// per-failure identity, so the whole check collapses to one failure; FailureKey
+// pairs the fixed identity with the step name, keeping it unique per check.
+// Reason is deliberately constant: folding the command's volatile output into it
+// would make every run differ from its baseline and block the boundary forever.
+// The cost is real and intended — this adapter cannot distinguish one failure
+// from another within a check, so declare a parseable adapter where one fits.
+func parseCommandExit(output string, exitCode int) []IndividualFailure {
+	if exitCode == 0 {
+		return nil
+	}
+	return []IndividualFailure{{Identity: "command", Reason: "command reported failure", Evidence: output}}
 }
 
 func parseGoTest(output string) []IndividualFailure {

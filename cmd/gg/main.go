@@ -162,15 +162,16 @@ func newAppWithIO(ctx context.Context, input io.Reader, output io.Writer, runTUI
 		terminalExecutable, terminalArgs = "open", []string{"-a", "Terminal", cli.WorktreePlaceholder}
 	}
 	launchActions := cli.NewLaunchActions(cli.ExecCommandLauncher{}, "code", terminalExecutable, terminalArgs)
+	updateCheck := newCachedUpdateChecker().Available
 	var app *cli.App
 	options := []cli.Option{
 		cli.WithInput(input), cli.WithConfigStore(configStore), cli.WithRootResolver(rootResolver),
 		cli.WithAgentCatalogSource(rootResolver), cli.WithConfigurePicker(tui.RunConfigureWizard),
 		cli.WithConfiguredFolderGate(), cli.WithLifecycleService(projects), cli.WithOrchestratorController(controller), cli.WithResumeCoordinator(resumeCoordinator),
 		cli.WithProjectEventSink(events.OrchestratorSink()), cli.WithLaunchActions(launchActions),
-		cli.WithProjectAttacher(projectTUIAttacher{input: input, output: output, run: runTUI}),
+		cli.WithProjectAttacher(projectTUIAttacher{input: input, output: output, run: runTUI, updateCheck: updateCheck}),
 		cli.WithQuestionAsker(tui.RunQuestionPrompt), cli.WithBusyRunner(tui.RunBusy),
-		cli.WithInterviewSession(cli.ExecInterviewSession),
+		cli.WithInterviewSession(cli.ExecInterviewSession), cli.WithProjectNamer(cli.ExecProjectNamer),
 		cli.WithRunSpawner(cli.NewDetachedRunSpawner()),
 	}
 	if enableGlobal {
@@ -230,7 +231,7 @@ func newAppWithIO(ctx context.Context, input io.Reader, output io.Writer, runTUI
 			return nil, controllerErr
 		}
 		options = append(options, cli.WithGlobalRunner(func(globalCtx context.Context, globalInput io.Reader, globalOutput io.Writer) error {
-			return tui.RunGlobal(globalCtx, globalController, globalInput, globalOutput, tui.WithGlobalProjectAttacher(func(attachCtx context.Context, project state.ProjectState) error {
+			return tui.RunGlobal(globalCtx, globalController, globalInput, globalOutput, tui.WithGlobalUpdateChecker(updateCheck), tui.WithGlobalProjectAttacher(func(attachCtx context.Context, project state.ProjectState) error {
 				return app.AttachProject(attachCtx, project.Slug)
 			}))
 		}))

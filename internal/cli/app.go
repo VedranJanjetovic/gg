@@ -168,6 +168,7 @@ type App struct {
 	launchActions        *LaunchActions
 	questionAsker        QuestionAsker
 	questionGenerator    QuestionGenerator
+	projectNamer         ProjectNamer
 	busyRunner           BusyRunner
 	interviewSession     InterviewSession
 	runSpawner           RunSpawner
@@ -993,7 +994,7 @@ func (a *App) createProject(ctx context.Context, stdout io.Writer, maxQAAttempts
 	if err := orchestrator.ValidateProjectInput(input); err != nil {
 		return "", err
 	}
-	name, err := orchestrator.InferProjectName(input)
+	name, err := a.resolveProjectName(ctx, input)
 	if err != nil {
 		return "", err
 	}

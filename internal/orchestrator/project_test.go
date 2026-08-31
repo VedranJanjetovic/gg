@@ -55,3 +55,32 @@ func TestValidateProjectInput(t *testing.T) {
 		})
 	}
 }
+
+// An agent-proposed name obeys the same shape rules as a generated one, but
+// keeps its stopwords: the agent already compressed the description
+// deliberately, so dropping words would corrupt the meaning it chose.
+func TestNormalizeProjectName(t *testing.T) {
+	tests := []struct {
+		name, proposed, want string
+	}{
+		{name: "already canonical", proposed: "payments_api_rate_limiting", want: "payments_api_rate_limiting"},
+		{name: "uppercase and spaces", proposed: "Payments API Rate Limiting", want: "payments_api_rate_limiting"},
+		{name: "hyphens and punctuation", proposed: "browser-mario: keyboard controls!", want: "browser_mario_keyboard_controls"},
+		{name: "caps at five words", proposed: "one two three four five six seven", want: "one_two_three_four_five"},
+		{name: "keeps stopwords the heuristic would drop", proposed: "sign_in_with_the_sso", want: "sign_in_with_the_sso"},
+		{name: "surrounding quotes and fences", proposed: "`\"checkout_flow\"`", want: "checkout_flow"},
+		{name: "digits survive", proposed: "oauth2_token_refresh", want: "oauth2_token_refresh"},
+		// Non-ASCII survives here exactly as it does in the heuristic;
+		// git.ProjectSlug is what folds it away when deriving the slug.
+		{name: "non-ascii reaches the slug layer intact", proposed: "café_menu", want: "café_menu"},
+		{name: "nothing usable", proposed: "  ---  ", want: ""},
+		{name: "empty", proposed: "", want: ""},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := NormalizeProjectName(test.proposed); got != test.want {
+				t.Fatalf("NormalizeProjectName(%q) = %q, want %q", test.proposed, got, test.want)
+			}
+		})
+	}
+}

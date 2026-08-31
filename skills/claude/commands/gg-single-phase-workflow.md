@@ -97,7 +97,7 @@ Before editing code, create a compact implementation brief in the main thread. T
 - planned implementation steps
 - expected generated artifacts, mocks, Swagger/docs updates, and verification commands
 
-Then ALWAYS spawn exactly one implementation subagent using: /gg-go-developer
+Then ALWAYS spawn exactly one implementation subagent using: /gg-developer
 
 The implementation subagent prompt must include the implementation brief and tell the subagent to apply the Go implementation workflow. The subagent should:
 - edit the current working branch/worktree as needed
@@ -186,7 +186,7 @@ After each reviewer subagent returns, reconcile its findings in the main thread:
 
 If the reconciled review contains confirmed fixable issues, missing tests, skipped verification that should be run, generated-artifact gaps, compatibility concerns, or operational/observability gaps, do not ask for commit acceptance yet. Instead:
 1. Create a compact remediation brief with the original framed problem, current diff status, confirmed reviewer findings, intended fixes, constraints, and verification/artifact expectations.
-2. Spawn exactly one implementation subagent using /gg-go-developer and pass the remediation brief.
+2. Spawn exactly one implementation subagent using /gg-developer and pass the remediation brief.
 3. Allow the implementation subagent to edit files and run verification, but not create branches, commit, push, open PRs, or ask for user acceptance.
 4. After it returns, inspect `git status` and the diff in the main thread.
 5. Re-run the affected artifact synchronization checks from Step 5.

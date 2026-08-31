@@ -13,7 +13,17 @@ func (m Model) View() string { return m.render(true) }
 
 func (m Model) statusView() string { return m.render(false) }
 
+// render appends the update footer to the screen body, so the notice survives
+// the body's early returns while an action is pending.
 func (m Model) render(interactive bool) string {
+	body := m.renderBody(interactive)
+	if !m.updateAvailable {
+		return body
+	}
+	return body + "\n" + m.styles.update.Render(updateNotice) + "\n"
+}
+
+func (m Model) renderBody(interactive bool) string {
 	width := m.width
 	if width <= 0 {
 		width = 80

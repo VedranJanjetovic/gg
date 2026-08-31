@@ -55,13 +55,32 @@ var projectNameStopwords = map[string]bool{
 	"write": true, "add": true, "develop": true, "new": true,
 }
 
+// maxProjectNameWords bounds every project name, however it was produced.
+const maxProjectNameWords = 5
+
+// NormalizeProjectName coerces an externally proposed name (for example one an
+// agent generated) into the canonical form: at most five lowercase alphanumeric
+// words joined by underscores. Unlike the heuristic fallback it keeps stopwords,
+// because a proposed name has already been compressed deliberately and dropping
+// its words would corrupt the meaning. It returns "" when nothing usable
+// remains, which callers treat as a signal to fall back.
+func NormalizeProjectName(proposed string) string {
+	fields := strings.FieldsFunc(strings.ToLower(proposed), func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
+	})
+	if len(fields) > maxProjectNameWords {
+		fields = fields[:maxProjectNameWords]
+	}
+	return strings.Join(fields, "_")
+}
+
 // shortProjectName compresses a sentence into the canonical generated
 // project name: at most five lowercase words joined by underscores.
 func shortProjectName(sentence string) string {
 	fields := strings.FieldsFunc(strings.ToLower(sentence), func(r rune) bool {
 		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
 	})
-	const maxWords = 5
+	const maxWords = maxProjectNameWords
 	words := make([]string, 0, maxWords)
 	for _, word := range fields {
 		if projectNameStopwords[word] {

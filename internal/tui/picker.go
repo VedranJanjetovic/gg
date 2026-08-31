@@ -350,7 +350,7 @@ func (m ConfigureWizard) selectedDisplayName() string {
 }
 
 type pickerStylesSet struct {
-	title, subtitle, context, selected, selectedDesc, row, rowDesc, footer, empty, error lipgloss.Style
+	title, subtitle, context, selected, selectedDesc, row, rowDesc, footer, empty, error, update lipgloss.Style
 }
 
 func pickerStyles() pickerStylesSet {
@@ -365,6 +365,7 @@ func pickerStyles() pickerStylesSet {
 		footer:       lipgloss.NewStyle().Foreground(lipgloss.Color("8")),
 		empty:        lipgloss.NewStyle().Foreground(lipgloss.Color("3")),
 		error:        lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("1")),
+		update:       lipgloss.NewStyle().Foreground(lipgloss.Color("3")),
 	}
 }
 

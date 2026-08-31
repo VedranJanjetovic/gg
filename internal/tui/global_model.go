@@ -28,6 +28,8 @@ type GlobalModel struct {
 	cursor          int
 	width           int
 	attach          func(context.Context, state.ProjectState) error
+	updateCheck     UpdateChecker
+	updateAvailable bool
 	// selected is the project chosen for attachment. Selecting quits the
 	// global program so the project session owns the terminal exclusively;
 	// RunGlobal re-enters the global view when the session ends.
@@ -47,6 +49,12 @@ func WithGlobalProjectAttacher(attacher func(context.Context, state.ProjectState
 	return func(m *GlobalModel) { m.attach = attacher }
 }
 
+// WithGlobalUpdateChecker advertises a newer gg release in the footer once the
+// check completes. Omit it to keep the view offline.
+func WithGlobalUpdateChecker(check UpdateChecker) GlobalOption {
+	return func(m *GlobalModel) { m.updateCheck = check }
+}
+
 func NewGlobalModel(ctx context.Context, controller *GlobalController, options ...GlobalOption) (GlobalModel, error) {
 	if controller == nil {
 		return GlobalModel{}, errors.New("global model requires controller")
@@ -64,7 +72,12 @@ func NewGlobalModel(ctx context.Context, controller *GlobalController, options .
 	return m, nil
 }
 func (m GlobalModel) Snapshot() GlobalSnapshot { return m.snapshot }
-func (m GlobalModel) Init() tea.Cmd            { return refreshGlobalCmd(m.ctx, m.controller) }
+func (m GlobalModel) Init() tea.Cmd {
+	if m.updateCheck == nil || m.updateAvailable {
+		return refreshGlobalCmd(m.ctx, m.controller)
+	}
+	return tea.Batch(refreshGlobalCmd(m.ctx, m.controller), checkUpdateCmd(m.ctx, m.updateCheck))
+}
 func (m GlobalModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	switch message := message.(type) {
 	case tea.WindowSizeMsg:
@@ -102,6 +115,13 @@ func (m GlobalModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Tick(m.refreshInterval, func(time.Time) tea.Msg { return globalTickMsg{} })
 	case globalTickMsg:
 		return m, refreshGlobalCmd(m.ctx, m.controller)
+	case updateAvailableMsg:
+		// A failed check leaves the footer off: whether a newer release exists
+		// is advisory, and it must never become the error the user sees.
+		if message.err == nil {
+			m.updateAvailable = message.available
+		}
+		return m, nil
 	}
 	return m, nil
 }
@@ -225,6 +245,10 @@ func (m GlobalModel) View() string {
 	b.WriteString("\n")
 	b.WriteString(styles.footer.Render("↑/↓ or j/k move  Enter attach  [number] attach  q quit"))
 	b.WriteString("\n")
+	if m.updateAvailable {
+		b.WriteString(styles.update.Render(updateNotice))
+		b.WriteString("\n")
+	}
 	return b.String()
 }
 

@@ -89,6 +89,13 @@ type modelOptions struct {
 	progressWidth   int
 	initialNotice   string
 	groomingPending bool
+	updateCheck     UpdateChecker
+}
+
+// WithUpdateChecker advertises a newer gg release in the footer once the check
+// completes. Omit it to keep the session offline.
+func WithUpdateChecker(check UpdateChecker) Option {
+	return func(options *modelOptions) { options.updateCheck = check }
 }
 
 // WithInitialNotice shows a one-off message below the progress view when the
@@ -184,6 +191,8 @@ type Model struct {
 	// re-enter the interview (the session quits and the caller re-runs it).
 	groomingPending      bool
 	groomingRequested    bool
+	updateCheck          UpdateChecker
+	updateAvailable      bool
 	interactiveRequested bool
 	configureRequested   bool
 	showTokenDetail      bool
@@ -244,6 +253,7 @@ func NewModel(ctx context.Context, project state.ProjectState, loader Loader, ac
 	model.startPending = project.Status == state.StatusPending && actions.Start != nil
 	model.notice = settings.initialNotice
 	model.groomingPending = settings.groomingPending
+	model.updateCheck = settings.updateCheck
 	return model, nil
 }
 

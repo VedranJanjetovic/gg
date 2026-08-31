@@ -11,6 +11,7 @@ type styles struct {
 	stopped   lipgloss.Style
 	key       lipgloss.Style
 	errorText lipgloss.Style
+	update    lipgloss.Style
 }
 
 func newStyles(color bool) styles {
@@ -26,5 +27,6 @@ func newStyles(color bool) styles {
 		stopped:   lipgloss.NewStyle().Foreground(lipgloss.Color("3")),
 		key:       lipgloss.NewStyle().Foreground(lipgloss.Color("6")),
 		errorText: lipgloss.NewStyle().Foreground(lipgloss.Color("1")),
+		update:    lipgloss.NewStyle().Foreground(lipgloss.Color("3")),
 	}
 }

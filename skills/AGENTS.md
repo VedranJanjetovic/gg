@@ -74,7 +74,7 @@ phase_display_name: "QA"
 `internal/agent/prompt.go:323`).
 
 **10 methodology skills** — the ones with Claude/Codex variants (gg-architect,
-gg-debug, gg-go-developer, gg-multi-phase-workflow, gg-plan, gg-refactor,
+gg-debug, gg-developer, gg-multi-phase-workflow, gg-plan, gg-refactor,
 gg-review, gg-security, gg-single-phase-workflow, gg-test). Every canonical
 form carries frontmatter; `internal/skills/identity_test.go` requires it, so
 a new skill without a `name:` fails rather than installing under a wrong name.

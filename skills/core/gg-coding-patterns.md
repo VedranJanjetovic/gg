@@ -41,8 +41,8 @@ current requirements. Delete code paths nothing calls.
   guarantees. If an implementation must "not support" part of the contract, the
   interface is wrong.
 - **I — Interface Segregation**: many small interfaces beat one fat one. Consumers
-  declare the narrowest interface they need (in Go: define interfaces at the point
-  of use, e.g. `io.Reader`, not a 20-method service interface).
+  declare the narrowest interface they need, defined at the point of use (a
+  one-method port such as Go's `io.Reader`), not a 20-method service interface.
 - **D — Dependency Inversion**: high-level policy depends on abstractions, not on
   concrete low-level detail. The database, HTTP client, and clock are injected
   behind interfaces owned by the consumer.
@@ -101,8 +101,9 @@ Dependencies are explicit, visible, and provided from the outside.
 ## 4. Design Patterns
 
 Patterns are vocabulary, not targets. Reach for one when the problem shape matches;
-never introduce one "for structure". In Go, most patterns collapse into a small
-interface plus a function.
+never introduce one "for structure". Wherever the language has first-class
+functions, most patterns collapse into a small interface plus a function — use
+the lighter form unless the heavier one buys something concrete.
 
 ### Creational
 
@@ -112,9 +113,9 @@ interface plus a function.
 - **Abstract Factory**: a factory that produces a *family* of related objects that
   must be consistent with each other (e.g. one `Driver` yielding matching `Conn`,
   `Tx`, `Stmt`). Rare — only when families genuinely vary together.
-- **Builder**: staged construction for objects with many optional parts. In Go,
-  prefer an options struct or functional options (`New(addr, WithTLS(cfg),
-  WithTimeout(5*time.Second))`) over fluent builder chains.
+- **Builder**: staged construction for objects with many optional parts. Prefer
+  an options object, named/default parameters, or functional options (`New(addr,
+  WithTLS(cfg), WithTimeout(5*time.Second))`) over fluent builder chains.
 - **Prototype**: clone a configured instance instead of rebuilding it. Useful for
   templates of expensive-to-construct objects; requires a correct deep copy.
 - **Singleton**: almost always wrong — it's global state with a design-pattern
@@ -153,18 +154,19 @@ interface plus a function.
   or undone (job queues, undo stacks, migration steps).
 - **Chain of Responsibility**: pass a request through handlers until one claims
   it — middleware stacks (`func(next Handler) Handler`).
-- **Template Method**: fixed skeleton with pluggable steps. In Go, prefer passing
-  step functions into one driver function over embedding-based overrides.
+- **Template Method**: fixed skeleton with pluggable steps. Prefer passing step
+  functions into one driver function over inheritance-based overrides.
 - **State**: behavior changes with internal state — model states as types behind
   one interface instead of switch-on-enum spread across methods.
-- **Iterator**: sequential access without exposing the container (Go: channels,
-  callback `func(yield func(T) bool)`, or `iter.Seq`).
+- **Iterator**: sequential access without exposing the container — the
+  language's iterator/generator protocol, a `yield` callback, or a channel.
 - **Mediator**: centralize many-to-many coordination in one place instead of
   letting peers reference each other.
 - **Memento**: capture/restore state snapshots (undo, crash recovery) without
   exposing internals.
 - **Visitor**: many operations over a fixed type family (compilers, linters).
-  Heavy; in Go a type switch is usually clearer until operations multiply.
+  Heavy; a type switch or pattern match is usually clearer until operations
+  multiply.
 
 **Anti-pattern check**: if removing the pattern makes the code shorter and no
 harder to change, remove it.
@@ -185,7 +187,10 @@ concurrent design names its limit.
 - **Thread pools** (Java/C#/Python/C++): fixed-size executor + bounded queue.
   Size from the workload: ~cores for CPU-bound, higher for I/O-bound. A full queue
   must apply backpressure or reject — never grow unbounded.
-- **Go worker pools**: goroutines are cheap but not free — bound them.
+- **Lightweight tasks** (Go goroutines, Java virtual threads, Kotlin coroutines,
+  JS promises, Python tasks): cheap to start is not free to run — bound the
+  fan-out with a semaphore, a limited task group, or N workers draining one
+  queue. One example, in Go:
 
   ```go
   // N workers draining a channel; errgroup propagates the first error
@@ -205,19 +210,24 @@ concurrent design names its limit.
   // produce, close(jobs), then g.Wait()
   ```
 
-  Or `errgroup.SetLimit(n)` / a semaphore channel for fan-out over a slice.
+  The equivalents differ in spelling only: `errgroup.SetLimit(n)`, a bounded
+  `ExecutorService`, `asyncio.Semaphore`, `p-limit`.
 
-### Go rules
+### Rules that hold in every language
 
-- Every goroutine has a known owner and a known exit: who starts it stops it.
-  No fire-and-forget goroutines — they leak.
-- Accept `context.Context` as the first parameter of anything that blocks; honor
-  cancellation and deadlines all the way down.
-- Share memory by communicating: channels for handoff and pipelines, mutexes for
-  simple shared state. Don't mix both around the same data.
-- Close channels from the sender side only. Specify channel direction in
-  signatures (`<-chan`, `chan<-`).
-- The race detector runs in CI (`go test -race`). A data race is a failed build.
+- Every concurrent task has a known owner and a known exit: who starts it stops
+  it, and joins or awaits it. No fire-and-forget work — it leaks.
+- Cancellation and deadlines are part of the signature of anything that blocks,
+  and are honored all the way down (Go `context.Context` first parameter, a
+  `CancellationToken`/`AbortSignal` argument, a structured-concurrency scope).
+- Prefer handing data off over sharing it: queues and channels for pipelines,
+  locks only for simple shared state. Don't mix both around the same data.
+- Make ownership one-directional: a single producer closes or completes the
+  channel/queue, and signatures state direction or immutability where the
+  language allows (Go `<-chan`/`chan<-`, `final`/`readonly`, frozen values).
+- Run whatever race and thread-safety tooling the project has (Go `-race`,
+  TSan, `ThreadSanitizer`-backed suites, lock-order or concurrency linters) in
+  CI. A detected data race is a failed build, not a flake.
 
 ### Async vs sync APIs
 

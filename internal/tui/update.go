@@ -41,6 +41,9 @@ func (m Model) Init() tea.Cmd {
 	if m.startPending {
 		commands = append(commands, actionCmd(m.ctx, actionStart, m.actions.Start))
 	}
+	if m.updateCheck != nil {
+		commands = append(commands, checkUpdateCmd(m.ctx, m.updateCheck))
+	}
 	return tea.Batch(commands...)
 }
 
@@ -180,6 +183,12 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.loader != nil {
 			return m, m.pollCmd()
+		}
+	case updateAvailableMsg:
+		// A failed check leaves the footer off: whether a newer release exists
+		// is advisory, and it must never become the error the user sees.
+		if message.err == nil {
+			m.updateAvailable = message.available
 		}
 	case actionResultMsg:
 		switch message.kind {

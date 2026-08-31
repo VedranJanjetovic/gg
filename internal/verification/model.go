@@ -12,19 +12,49 @@ import (
 	"github.com/VedranJanjetovic/gg/internal/state"
 )
 
-// Adapter identifies the output parser used for a verification step.
+// Adapter identifies the output parser used for a verification step. Adapters
+// name output *shapes* rather than toolchains, so a project in any language can
+// declare a complete verification contract.
 type Adapter string
 
 const (
-	AdapterGofmtEmpty   Adapter = "gofmt-empty"
-	AdapterGoTest       Adapter = "go-test"
-	AdapterGoDiagnostic Adapter = "go-diagnostic"
+	// AdapterFileList reads a plain list of offending file paths, one per
+	// line (gofmt -l, prettier --list-different, ruff format --check).
+	AdapterFileList Adapter = "file-list"
+	// AdapterDiagnostic reads file:line[:col]: message, the shape emitted by
+	// go vet, tsc, eslint, clippy, mypy, javac, gcc, and shellcheck.
+	AdapterDiagnostic Adapter = "diagnostic"
+	// AdapterCommandExit is the fallback for a command whose only stable
+	// signal is its exit status, so every toolchain remains expressible even
+	// when its output has no parseable per-failure identity.
+	AdapterCommandExit Adapter = "command-exit"
+	// AdapterGoTest reads `go test` output, which exposes per-test identities.
+	AdapterGoTest Adapter = "go-test"
+	// AdapterGitDiffCheck reads `git diff --check`.
 	AdapterGitDiffCheck Adapter = "git-diff-check"
+
+	// Legacy Go-named aliases, retained so snapshots written before the set
+	// was generalized stay readable by `gg resume`. They behave exactly like
+	// the canonical adapter they resolve to.
+	AdapterGofmtEmpty   Adapter = "gofmt-empty"
+	AdapterGoDiagnostic Adapter = "go-diagnostic"
 )
 
-func (a Adapter) IsValid() bool {
+// Canonical resolves a legacy Go-named alias to the adapter that implements it.
+func (a Adapter) Canonical() Adapter {
 	switch a {
-	case AdapterGofmtEmpty, AdapterGoTest, AdapterGoDiagnostic, AdapterGitDiffCheck:
+	case AdapterGofmtEmpty:
+		return AdapterFileList
+	case AdapterGoDiagnostic:
+		return AdapterDiagnostic
+	default:
+		return a
+	}
+}
+
+func (a Adapter) IsValid() bool {
+	switch a.Canonical() {
+	case AdapterFileList, AdapterDiagnostic, AdapterCommandExit, AdapterGoTest, AdapterGitDiffCheck:
 		return true
 	default:
 		return false

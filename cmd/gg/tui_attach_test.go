@@ -235,7 +235,8 @@ func TestNewAppWithIOWiresBareProjectAttachment(t *testing.T) {
 		if project.Slug != "attached-project" || project.Status != state.StatusPending {
 			t.Fatalf("attached project = %#v", project)
 		}
-		if actions.Start == nil || actions.OpenCode == nil || actions.OpenTerminal == nil || gotInput != input || gotOutput != tuiOutput || len(options) != 1 {
+		// Pending-pipeline fallback plus the update-availability checker.
+		if actions.Start == nil || actions.OpenCode == nil || actions.OpenTerminal == nil || gotInput != input || gotOutput != tuiOutput || len(options) != 2 {
 			t.Fatal("production attachment mapping is incomplete")
 		}
 		return nil
