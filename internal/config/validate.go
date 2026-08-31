@@ -91,10 +91,15 @@ func validateCompleteProjectConfig(config ProjectConfig) error {
 		}
 		seen[entry.Phase] = struct{}{}
 		required := isRequiredPhase(entry.Phase)
-		if entry.Required != required {
-			return fmt.Errorf("%s.required: must be %t for phase %q", field, required, entry.Phase)
+		// A config written before a phase became user-toggleable carries a
+		// stale required: true. Overstating the requirement keeps the phase
+		// enabled, which is exactly what that file asked for, so it stays
+		// loadable; gg configure rewrites the flag on the next save.
+		// Understating a real requirement remains invalid.
+		if required && !entry.Required {
+			return fmt.Errorf("%s.required: must be true for phase %q", field, entry.Phase)
 		}
-		if required && !entry.Enabled {
+		if entry.Required && !entry.Enabled {
 			return fmt.Errorf("%s.enabled: required phase %q must be enabled", field, entry.Phase)
 		}
 		if err := validateCompleteAgentSettings(entry.AgentSettings, field+".settings"); err != nil {

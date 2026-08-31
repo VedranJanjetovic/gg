@@ -56,7 +56,7 @@ func TestPlanningIsUserDisableableAndSurvivesResolution(t *testing.T) {
 	}
 }
 
-func TestStaleRequiredPlanningFlagMigratesRatherThanFailing(t *testing.T) {
+func TestStaleRequiredPlanningFlagStaysLoadable(t *testing.T) {
 	settings := config.AgentSettings{Agent: config.AgentClaude, Model: "m", Effort: config.EffortHigh, Provenance: config.ModelProvenanceManual}
 	phases := make([]config.PhaseConfig, 0, len(config.CompletePhaseOrder()))
 	for _, phase := range config.CompletePhaseOrder() {
@@ -67,7 +67,13 @@ func TestStaleRequiredPlanningFlagMigratesRatherThanFailing(t *testing.T) {
 	}
 	stale := config.CompleteProjectConfig(config.CompleteSchemaVersion, settings, phases, config.GitOpsOverride{})
 
-	if got := config.ClassifyProjectConfig(stale); got != config.ProjectConfigMigrationRequired {
-		t.Fatalf("classification = %v, want %v", got, config.ProjectConfigMigrationRequired)
+	// The stale flag keeps planning enabled, which is what that file asked
+	// for, so the config loads as-is instead of forcing a migration. Running
+	// gg configure rewrites the flag and exposes the toggle.
+	if got := config.ClassifyProjectConfig(stale); got != config.ProjectConfigComplete {
+		t.Fatalf("classification = %v, want %v", got, config.ProjectConfigComplete)
+	}
+	if err := config.ValidateCompleteProjectConfig(stale); err != nil {
+		t.Fatalf("stale required flag must stay loadable: %v", err)
 	}
 }

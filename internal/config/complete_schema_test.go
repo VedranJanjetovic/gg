@@ -52,7 +52,10 @@ func TestCompleteProjectConfigValidatesRequiredAndOptionalPhases(t *testing.T) {
 		{name: "missing tuple field", edit: func(cfg *config.ProjectConfig) { cfg.Phases[0].AgentSettings.Model = "" }, want: "phases[0].settings.model"},
 		{name: "required disabled", edit: func(cfg *config.ProjectConfig) { cfg.Phases[0].Enabled = false }, want: "required phase"},
 		{name: "required marked optional", edit: func(cfg *config.ProjectConfig) { cfg.Phases[0].Required = false }, want: "phases[0].required"},
-		{name: "optional marked required", edit: func(cfg *config.ProjectConfig) { cfg.Phases[5].Required = true }, want: "phases[5].required"},
+		// An overstated required flag is tolerated on load so configs written
+		// before a phase became toggleable stay readable, but it still binds:
+		// the phase must then be enabled.
+		{name: "optional marked required while disabled", edit: func(cfg *config.ProjectConfig) { cfg.Phases[5].Required = true }, want: "phases[5].enabled"},
 		{name: "phase order", edit: func(cfg *config.ProjectConfig) { cfg.Phases[0], cfg.Phases[1] = cfg.Phases[1], cfg.Phases[0] }, want: "expected ordered phase"},
 	}
 	for _, tt := range tests {
