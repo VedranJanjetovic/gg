@@ -123,6 +123,10 @@ func (m Model) renderBody(interactive bool) string {
 		}
 		if m.skipConfirm {
 			output.WriteString("Confirm skip of " + m.skipLabel + "?  y/Enter confirm  n/Esc cancel\n")
+		} else if m.skipChecksConfirm || m.fixChecksConfirm {
+			// The question itself is in the notice above; the footer must
+			// still tell the user which keys answer it.
+			output.WriteString("y/Enter confirm  n/Esc cancel\n")
 		} else {
 			if m.project.Status == state.StatusStopped {
 				output.WriteString("Type r to continue pipeline\n")

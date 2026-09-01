@@ -98,6 +98,9 @@ func TestSkipAndFixChecksBothConfirmBeforeTheyChangeDurableState(t *testing.T) {
 			if !strings.Contains(confirming.notice, "Confirm") {
 				t.Fatalf("notice = %q, want a confirmation prompt", confirming.notice)
 			}
+			if view := confirming.View(); !strings.Contains(view, "y/Enter confirm  n/Esc cancel") || strings.Contains(view, "f fix checks") {
+				t.Fatalf("confirmation view must show the answer keys instead of the legend:\n%s", view)
+			}
 			cancelled, _ := confirming.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
 			if next := cancelled.(Model); next.skipChecksConfirm || next.fixChecksConfirm || !strings.Contains(next.notice, "cancelled") {
 				t.Fatalf("declining left confirm=%t/%t notice=%q", next.skipChecksConfirm, next.fixChecksConfirm, next.notice)
