@@ -27,13 +27,13 @@ type GlobalModel struct {
 	lastErr         error
 	cursor          int
 	width           int
-	attach          func(context.Context, state.ProjectState) error
+	attach          func(context.Context, ProjectSelection) error
 	updateCheck     UpdateChecker
 	updateAvailable bool
 	// selected is the project chosen for attachment. Selecting quits the
 	// global program so the project session owns the terminal exclusively;
 	// RunGlobal re-enters the global view when the session ends.
-	selected *state.ProjectState
+	selected *ProjectSelection
 }
 
 type GlobalOption func(*GlobalModel)
@@ -45,7 +45,7 @@ func WithGlobalRefreshInterval(interval time.Duration) GlobalOption {
 // WithGlobalProjectAttacher supplies the foreground project session opened by
 // a numeric project selection. Returning from the attacher returns to the
 // same global model and preserves its last good snapshot.
-func WithGlobalProjectAttacher(attacher func(context.Context, state.ProjectState) error) GlobalOption {
+func WithGlobalProjectAttacher(attacher func(context.Context, ProjectSelection) error) GlobalOption {
 	return func(m *GlobalModel) { m.attach = attacher }
 }
 
@@ -130,16 +130,16 @@ func (m GlobalModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 // session must not run nested inside this program: two Bubble Tea programs
 // would compete for the same stdin.
 func (m GlobalModel) attachAt(index int) (tea.Model, tea.Cmd) {
-	project, ok := m.snapshot.ProjectAt(index)
+	selection, ok := m.snapshot.ProjectAt(index)
 	if !ok || m.attach == nil {
 		return m, nil
 	}
-	m.selected = &project
+	m.selected = &selection
 	return m, tea.Quit
 }
 
 // Selected returns the project chosen for attachment, if any.
-func (m GlobalModel) Selected() *state.ProjectState { return m.selected }
+func (m GlobalModel) Selected() *ProjectSelection { return m.selected }
 
 func (m GlobalModel) projectCount() int {
 	count := 0
@@ -220,6 +220,10 @@ func (m GlobalModel) View() string {
 		b.WriteString(styles.empty.Render("No configured folders."))
 		b.WriteString("\n")
 	}
+	// row counts flattened project rows so the displayed number matches the
+	// index ProjectAt resolves. Numbering by slug would collide when two
+	// folders hold the same slug.
+	row := 0
 	for _, folder := range m.snapshot.Folders {
 		b.WriteString(styles.context.Render(folder.Folder))
 		b.WriteString("\n")
@@ -229,12 +233,12 @@ func (m GlobalModel) View() string {
 			continue
 		}
 		for _, observation := range folder.Projects {
-			index := m.snapshot.projectIndex(observation.Project.Slug)
-			label := fmt.Sprintf("%d) %s%s  %s", index, statusMarker(observation.Project.Status), verificationMarker(observation.Project), observation.Project.Name)
+			row++
+			label := fmt.Sprintf("%d) %s%s  %s", row, statusMarker(observation.Project.Status), verificationMarker(observation.Project), observation.Project.Name)
 			if phase := strings.TrimSpace(observation.Project.CurrentPhase); phase != "" && phase != "pipeline" {
 				label += "  ·  " + phase
 			}
-			b.WriteString(renderPickerRow(width, index-1 == m.cursor, label, "", styles))
+			b.WriteString(renderPickerRow(width, row-1 == m.cursor, label, "", styles))
 		}
 	}
 	if m.lastErr != nil {

@@ -109,10 +109,10 @@ func TestGlobalSnapshotSelectionIsOneBasedAndBounded(t *testing.T) {
 		{Folder: "/one", Projects: []state.ProjectObservation{state.Observe(globalProject("first", state.StatusRunning))}},
 		{Folder: "/two", Projects: []state.ProjectObservation{state.Observe(globalProject("second", state.StatusFinished))}},
 	}}
-	if got, ok := snapshot.ProjectAt(0); !ok || got.Slug != "first" {
+	if got, ok := snapshot.ProjectAt(0); !ok || got.Project.Slug != "first" {
 		t.Fatalf("row 1 = %#v, %t", got, ok)
 	}
-	if got, ok := snapshot.ProjectAt(1); !ok || got.Slug != "second" {
+	if got, ok := snapshot.ProjectAt(1); !ok || got.Project.Slug != "second" {
 		t.Fatalf("row 2 = %#v, %t", got, ok)
 	}
 	for _, index := range []int{-1, 2} {
@@ -122,13 +122,34 @@ func TestGlobalSnapshotSelectionIsOneBasedAndBounded(t *testing.T) {
 	}
 }
 
+func TestGlobalSnapshotSelectionCarriesOwningFolder(t *testing.T) {
+	// The same slug in two folders makes the folder the only thing that
+	// identifies a row, so a selection that drops it cannot be attached.
+	snapshot := GlobalSnapshot{Folders: []FolderObservation{
+		{Folder: "/one", Projects: []state.ProjectObservation{state.Observe(globalProject("shared", state.StatusRunning))}},
+		{Folder: "/two", Projects: []state.ProjectObservation{state.Observe(globalProject("shared", state.StatusFinished))}},
+	}}
+	for index, wantFolder := range map[int]string{0: "/one", 1: "/two"} {
+		got, ok := snapshot.ProjectAt(index)
+		if !ok {
+			t.Fatalf("row %d was not selectable", index)
+		}
+		if got.Folder != wantFolder {
+			t.Fatalf("row %d folder = %q, want %q", index, got.Folder, wantFolder)
+		}
+		if got.Project.Slug != "shared" {
+			t.Fatalf("row %d slug = %q, want %q", index, got.Project.Slug, "shared")
+		}
+	}
+}
+
 func TestGlobalModelAttachesSelectedProjectAndPreservesSnapshot(t *testing.T) {
 	controller, err := NewGlobalController(func(context.Context) ([]string, error) { return nil, nil }, func(context.Context, string) ([]state.ProjectState, error) { return nil, nil })
 	if err != nil {
 		t.Fatal(err)
 	}
-	var attached state.ProjectState
-	model, err := NewGlobalModel(context.Background(), controller, WithGlobalProjectAttacher(func(_ context.Context, project state.ProjectState) error { attached = project; return nil }))
+	var attached ProjectSelection
+	model, err := NewGlobalModel(context.Background(), controller, WithGlobalProjectAttacher(func(_ context.Context, selection ProjectSelection) error { attached = selection; return nil }))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -145,12 +166,12 @@ func TestGlobalModelAttachesSelectedProjectAndPreservesSnapshot(t *testing.T) {
 	}
 	got := updated.(GlobalModel)
 	selected := got.Selected()
-	if selected == nil || selected.Slug != "two" || got.Snapshot().ProjectCount() != 2 {
+	if selected == nil || selected.Project.Slug != "two" || selected.Folder != "/root" || got.Snapshot().ProjectCount() != 2 {
 		t.Fatalf("selected=%#v snapshot=%#v", selected, got.Snapshot())
 	}
 	// The attacher runs outside the program (RunGlobal drives it); the model
 	// itself must not invoke it.
-	if attached.Slug != "" {
+	if attached.Project.Slug != "" {
 		t.Fatalf("model invoked attacher directly: %#v", attached)
 	}
 	if _, command := got.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'3'}}); command != nil {

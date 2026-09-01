@@ -119,30 +119,25 @@ func (s GlobalSnapshot) ProjectCount() int {
 	return count
 }
 
+// ProjectSelection is an attachable project row. The owning folder travels
+// with the project because slugs are unique only within a folder: the state
+// store that holds the project lives at Folder, not at the current directory.
+type ProjectSelection struct {
+	Folder  string
+	Project state.ProjectState
+}
+
 // ProjectAt returns the deterministic flattened project row for a zero-based
 // index. Folder and project order are established by Refresh.
-func (s GlobalSnapshot) ProjectAt(index int) (state.ProjectState, bool) {
+func (s GlobalSnapshot) ProjectAt(index int) (ProjectSelection, bool) {
 	if index < 0 {
-		return state.ProjectState{}, false
+		return ProjectSelection{}, false
 	}
 	for _, folder := range s.Folders {
 		if index < len(folder.Projects) {
-			return folder.Projects[index].Project, true
+			return ProjectSelection{Folder: folder.Folder, Project: folder.Projects[index].Project}, true
 		}
 		index -= len(folder.Projects)
 	}
-	return state.ProjectState{}, false
-}
-
-func (s GlobalSnapshot) projectIndex(slug string) int {
-	index := 1
-	for _, folder := range s.Folders {
-		for _, observation := range folder.Projects {
-			if observation.Project.Slug == slug {
-				return index
-			}
-			index++
-		}
-	}
-	return index
+	return ProjectSelection{}, false
 }

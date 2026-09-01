@@ -226,6 +226,9 @@ type CompareOptions struct {
 	RepairMode    bool
 	RepairTargets []FailureKey
 	Promoted      []FailureKey
+	// Quarantined names checks the user excluded from boundary decisions. A
+	// quarantined check never blocks; its results are recorded as warnings.
+	Quarantined []string
 }
 
 func failureMap(results []CommandResult) map[FailureKey]IndividualFailure {
@@ -244,6 +247,16 @@ func keySet(keys []FailureKey) map[FailureKey]bool {
 	set := make(map[FailureKey]bool, len(keys))
 	for _, key := range keys {
 		set[key] = true
+	}
+	return set
+}
+
+func nameSet(names []string) map[string]bool {
+	set := make(map[string]bool, len(names))
+	for _, name := range names {
+		if trimmed := strings.TrimSpace(name); trimmed != "" {
+			set[trimmed] = true
+		}
 	}
 	return set
 }
@@ -274,9 +287,17 @@ func Compare(baseline Baseline, current Report, options CompareOptions) Boundary
 	}
 	promoted := keySet(options.Promoted)
 	targets := keySet(options.RepairTargets)
+	quarantined := nameSet(options.Quarantined)
 	report := BoundaryReport{Passed: true, Warnings: append([]Warning(nil), current.Warnings...)}
 	strictChecks := make(map[string]bool)
 	addBlockedFinding := func(finding Finding) {
+		// A quarantined check carries no boundary authority in either
+		// direction. Its evidence is still recorded, as a warning, so the
+		// exclusion stays visible instead of silently vanishing.
+		if quarantined[finding.Key.CheckName] {
+			report.Warnings = append(report.Warnings, Warning{Key: finding.Key, Reason: finding.Reason, Classification: finding.Classification, LogPath: finding.LogPath})
+			return
+		}
 		if finding.Classification == ClassificationUnavailable || finding.Classification == ClassificationUnclassifiable {
 			strictChecks[finding.Key.CheckName] = true
 		}
@@ -310,6 +331,13 @@ func Compare(baseline Baseline, current Report, options CompareOptions) Boundary
 				continue
 			}
 			key := FailureKey{CheckName: command.StepName, Identity: failure.Identity}
+			// A quarantined check has no trustworthy baseline to compare
+			// against, so its failures are never classified as new — they are
+			// recorded as warnings and contribute no regression signal.
+			if quarantined[command.StepName] {
+				report.Warnings = append(report.Warnings, Warning{Key: key, Reason: failure.Reason, Classification: ClassificationUnclassifiable, LogPath: command.LogPath})
+				continue
+			}
 			if flakyReason, isFlaky := flakyReasons[key]; isFlaky && flakyReason == failure.Reason {
 				report.Findings = append(report.Findings, Finding{Key: key, Reason: failure.Reason, Classification: ClassificationFlaky, LogPath: command.LogPath})
 				continue
@@ -352,6 +380,11 @@ func Compare(baseline Baseline, current Report, options CompareOptions) Boundary
 
 	for key := range base {
 		if status := checkStatus[key.CheckName]; status == CommandUnavailable || status == CommandUnclassifiable || strictChecks[key.CheckName] {
+			continue
+		}
+		// A quarantined check cannot certify a baseline failure as repaired
+		// either; promoting it would let the exclusion block a later boundary.
+		if quarantined[key.CheckName] {
 			continue
 		}
 		if !seenChecks[key.CheckName] {

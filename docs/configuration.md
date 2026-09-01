@@ -109,7 +109,23 @@ gg run dashboard \
 failures that predate the run. These operational flags are the complete run-only
 set, and `--` passes every following token to the pipeline unchanged.
 `gg resume` accepts `--repair-existing-verification` with the same meaning; the
-GitOps and iteration flags apply to `gg run` only.
+GitOps and iteration flags apply to `gg run` only. `gg resume` additionally
+accepts `--skip-checks=<name,name>`, which quarantines the named verification
+checks when the environment cannot make them classifiable. A quarantined check
+still executes, but it can never block a boundary in either direction: its
+results are recorded as warnings and contribute no regression signal. The
+quarantine is persisted with the recorded status, reason, and log path of the
+check, and unknown check names are rejected.
+
+`--fix-checks` is the complement of `--skip-checks`: instead of excluding the
+blocked checks it repairs them. gg records the request, rewinds the resume
+cursor to Planning, and Planning adds exactly one leading phase whose only
+purpose is to make those checks executable. Development runs that phase first
+and only then captures the parent verification baseline, which therefore
+reflects the parent plus the repair phase. If the repair does not make the
+checks classifiable the run parks again with the same two options.
+`--fix-checks` and `--skip-checks` are mutually exclusive, and both require a
+project selector.
 
 Agent, model, effort, and phase-structure selection moved to the attached
 project picker, where `gg run` first offers

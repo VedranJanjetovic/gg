@@ -351,3 +351,53 @@ func TestStepsFromStateCopiesMutableContractData(t *testing.T) {
 		t.Fatalf("conversion aliased input: %#v", original)
 	}
 }
+
+func TestCompareRecordsQuarantinedUnclassifiableCheckAsWarningInsteadOfBlocking(t *testing.T) {
+	base := CaptureBaseline(Report{Results: []CommandResult{{StepName: "affected-unit-tests", Status: CommandPassed}}})
+	current := Report{Results: []CommandResult{{StepName: "affected-unit-tests", Status: CommandUnclassifiable, LogPath: "/logs/unit"}}}
+	got := Compare(base, current, CompareOptions{Quarantined: []string{"affected-unit-tests"}})
+	if got.Blocked || !got.Passed || len(got.Findings) != 0 {
+		t.Fatalf("quarantined unclassifiable check = %#v", got)
+	}
+	if len(got.Warnings) != 1 || got.Warnings[0].Classification != ClassificationUnclassifiable || got.Warnings[0].Key.CheckName != "affected-unit-tests" {
+		t.Fatalf("warnings=%#v, want one unclassifiable warning naming the quarantined check", got.Warnings)
+	}
+}
+
+func TestCompareStillBlocksAnUnclassifiableCheckThatIsNotQuarantined(t *testing.T) {
+	base := CaptureBaseline(Report{Results: []CommandResult{{StepName: "affected-unit-tests", Status: CommandPassed}, {StepName: "affected-race-tests", Status: CommandPassed}}})
+	current := Report{Results: []CommandResult{{StepName: "affected-unit-tests", Status: CommandUnclassifiable}, {StepName: "affected-race-tests", Status: CommandUnclassifiable}}}
+	got := Compare(base, current, CompareOptions{Quarantined: []string{"affected-unit-tests"}})
+	if !got.Blocked || got.Passed {
+		t.Fatalf("non-quarantined unclassifiable check = %#v", got)
+	}
+	if len(got.Findings) != 1 || got.Findings[0].Key.CheckName != "affected-race-tests" {
+		t.Fatalf("findings=%#v, want only the non-quarantined check to block", got.Findings)
+	}
+}
+
+func TestCompareNeverClassifiesQuarantinedCheckFailuresAsNew(t *testing.T) {
+	base := CaptureBaseline(Report{Results: []CommandResult{{StepName: "affected-unit-tests", Status: CommandPassed}}})
+	current := Report{Results: []CommandResult{{StepName: "affected-unit-tests", Status: CommandFailed, Failures: []IndividualFailure{{Identity: "TestNew", Reason: "panic"}}}}}
+	got := Compare(base, current, CompareOptions{Quarantined: []string{"affected-unit-tests"}})
+	if got.Blocked || !got.Passed || len(got.Findings) != 0 {
+		t.Fatalf("quarantined failure = %#v", got)
+	}
+	for _, warning := range got.Warnings {
+		if warning.Classification == ClassificationNew {
+			t.Fatalf("warnings=%#v, want no new classification for a quarantined check", got.Warnings)
+		}
+	}
+	if len(got.Warnings) != 1 || got.Warnings[0].Key.Identity != "TestNew" {
+		t.Fatalf("warnings=%#v, want the quarantined failure recorded once", got.Warnings)
+	}
+}
+
+func TestCompareDoesNotPromoteBaselineFailuresOfAQuarantinedCheck(t *testing.T) {
+	base := CaptureBaseline(Report{Results: []CommandResult{{StepName: "affected-unit-tests", Status: CommandFailed, Failures: []IndividualFailure{{Identity: "TestBroken", Reason: "undefined: customer"}}}}})
+	current := Report{Results: []CommandResult{{StepName: "affected-unit-tests", Status: CommandUnclassifiable}}}
+	got := Compare(base, current, CompareOptions{Quarantined: []string{"affected-unit-tests"}})
+	if got.Blocked || len(got.Promotions) != 0 {
+		t.Fatalf("quarantined check promoted a repair: %#v", got)
+	}
+}

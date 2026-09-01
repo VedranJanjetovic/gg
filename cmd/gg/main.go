@@ -231,8 +231,8 @@ func newAppWithIO(ctx context.Context, input io.Reader, output io.Writer, runTUI
 			return nil, controllerErr
 		}
 		options = append(options, cli.WithGlobalRunner(func(globalCtx context.Context, globalInput io.Reader, globalOutput io.Writer) error {
-			return tui.RunGlobal(globalCtx, globalController, globalInput, globalOutput, tui.WithGlobalUpdateChecker(updateCheck), tui.WithGlobalProjectAttacher(func(attachCtx context.Context, project state.ProjectState) error {
-				return app.AttachProject(attachCtx, project.Slug)
+			return tui.RunGlobal(globalCtx, globalController, globalInput, globalOutput, tui.WithGlobalUpdateChecker(updateCheck), tui.WithGlobalProjectAttacher(func(attachCtx context.Context, selection tui.ProjectSelection) error {
+				return app.AttachProjectIn(attachCtx, selection.Folder, selection.Project.Slug)
 			}))
 		}))
 	}

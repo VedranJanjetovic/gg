@@ -37,8 +37,7 @@ Status: pending
 
 Progress  ░░░░░░░░░░░░░░░░░░░░░░░░░   0%  0/4 · 4 phases remaining
 
-q quit
-Keys: i interactive  c code  t terminal  r resume  q quit
+i interactive  c code  t terminal  r resume  q quit
 `,
 		},
 		{
@@ -61,8 +60,7 @@ Status: running
 
 Progress  ██████░░░░░░░░░░░░░░░░░░░  25%  1/4 · 3 phases remaining
 
-s stop  q quit
-Keys: i interactive  c code  t terminal  r resume  s stop  q quit
+i interactive  c code  t terminal  r resume  s stop  q quit
 `,
 		},
 		{
@@ -81,8 +79,7 @@ Status: succeeded
 
 Progress  █████████████████████████ 100%  4/4 · 0 phases remaining
 
-q quit
-Keys: i interactive  c code  t terminal  r resume  q quit
+i interactive  c code  t terminal  r resume  q quit
 `,
 		},
 		{
@@ -101,8 +98,7 @@ Status: failed
 
 Progress  █████████████░░░░░░░░░░░░  50%  2/4 · 2 phases remaining
 
-r resume  q quit
-Keys: i interactive  c code  t terminal  r resume  q quit
+i interactive  c code  t terminal  r resume  q quit
 `,
 		},
 		{
@@ -126,8 +122,7 @@ Status: stopped
 Progress  ██████░░░░░░░░░░░░░░░░░░░  25%  1/4 · 3 phases remaining
 
 Type r to continue pipeline
-q quit
-Keys: i interactive  c code  t terminal  r resume  q quit
+i interactive  c code  t terminal  r resume  q quit
 `,
 		},
 	}
@@ -146,6 +141,29 @@ Keys: i interactive  c code  t terminal  r resume  q quit
 				t.Errorf("stopped continuation prompt count != 1:\n%s", view)
 			}
 		})
+	}
+}
+
+// The footer used to render a coloured action line above a plain "Keys:" line,
+// so configure and quit appeared twice in two different treatments while the
+// remaining actions read as prose. One legend must list each action once.
+func TestFooterListsEveryAvailableActionExactlyOnceInOneLegend(t *testing.T) {
+	snapshot := testSnapshot(t)
+	project := testProject(snapshot, state.StatusStopped, "pipeline", "", nil)
+	actions := Actions{Configure: func(context.Context) error { return nil }}
+	model, err := NewModel(context.Background(), project, nil, actions, WithColor(false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	view := model.View()
+	legend := "i interactive  c code  t terminal  r resume  e configure  q quit"
+	if !strings.Contains(view, legend) {
+		t.Fatalf("footer missing unified legend %q:\n%s", legend, view)
+	}
+	for _, action := range []string{"interactive", "code", "terminal", "resume", "configure", "quit"} {
+		if count := strings.Count(view, action); count != 1 {
+			t.Fatalf("action %q appears %d times in the footer, want exactly 1:\n%s", action, count, view)
+		}
 	}
 }
 
@@ -936,7 +954,7 @@ func TestInteractiveLegendIsAbsentFromStatusOutput(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	legend := "Keys: i interactive  c code  t terminal  r resume  s stop  q quit"
+	legend := "i interactive  c code  t terminal  r resume  s stop  q quit"
 	if !strings.Contains(model.View(), legend) {
 		t.Fatalf("interactive view missing legend:\n%s", model.View())
 	}

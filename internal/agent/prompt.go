@@ -302,6 +302,7 @@ func BuildPrompt(input PromptInput) (string, error) {
 			b.WriteString("- Modify, add, or remove only pending phases, steering them by the latest acceptance criteria and user feedback.\n")
 			b.WriteString("- New or changed work belongs in new pending phases after the completed ones.\n")
 		}
+		writeVerificationBootstrapInstruction(&b, input.Project)
 	}
 	if input.Development || input.Phase == pipeline.PhaseDevelopment {
 		b.WriteString("\n## Development instructions\n")
@@ -346,6 +347,38 @@ func BuildPrompt(input PromptInput) (string, error) {
 // writeVerificationContractInstruction emits the strict frontmatter contract
 // the declaring phase must satisfy. owner names the phase in prose; artifact
 // names its canonical artifact.
+// writeVerificationBootstrapInstruction tells Planning to prepend one repair
+// phase because the user chose to fix the checks that blocked the parent
+// verification preflight rather than quarantine them. The blocked checks are
+// read from the durable report so the prompt names exactly what parked the run.
+func writeVerificationBootstrapInstruction(b *strings.Builder, project state.ProjectState) {
+	if project.Verification == nil || !project.Verification.BootstrapRequested {
+		return
+	}
+	blocked := state.VerificationBlockingResults(project)
+	if len(blocked) == 0 {
+		return
+	}
+	b.WriteString("\n## Verification bootstrap phase\n")
+	b.WriteString("These verification checks cannot run on the parent branch, so gg cannot capture a verification baseline until they are executable:\n")
+	for _, result := range blocked {
+		b.WriteString("- check ")
+		writeQuotedValue(b, result.CheckName)
+		b.WriteString(" command ")
+		writeQuotedValue(b, strings.TrimSpace(strings.Join(append([]string{result.Command}, result.Args...), " ")))
+		b.WriteString(" status ")
+		writeQuotedValue(b, result.Status)
+		b.WriteString(" reason ")
+		writeQuotedValue(b, result.UnavailableErr)
+		b.WriteString(" log ")
+		writeQuotedValue(b, result.LogPath)
+		b.WriteByte('\n')
+	}
+	b.WriteString("Add EXACTLY ONE new phase and make it the FIRST phase in execution order. Its sole purpose is to make those checks executable in this repository; it must not implement any other requested work.\n")
+	b.WriteString("Keep every existing phase's name, scope, and boundary justification identical, renumbered to follow the new first phase.\n")
+	fmt.Fprintf(b, "The enforced constraints still apply: at most %d phases in total, and a Trivial plan must have exactly 1 phase — so adding this phase to a Trivial plan requires reclassifying the complexity and restating the supporting evidence.\n", MaxPlanningPhases)
+}
+
 func writeVerificationContractInstruction(b *strings.Builder, owner, artifact string, repair bool) {
 	b.WriteString("\n## Verification contract instruction\n")
 	fmt.Fprintf(b, "%s MUST add a non-empty single-line JSON `gg_verification_steps` array to the %s frontmatter. Each entry must contain a unique non-empty `name`, direct executable `command`, an `args` JSON array (never a shell command string), and one supported `adapter`; an optional `env` object may contain fixed KEY/value pairs. %s MUST also add an explicit boolean `gg_repair_mode` field; do not infer repair intent from the project goal.\n", owner, artifact, owner)

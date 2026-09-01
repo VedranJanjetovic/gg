@@ -130,6 +130,16 @@ type VerificationCommandResult struct {
 	UnavailableErr string                `json:"unavailableErr,omitempty"`
 }
 
+// VerificationQuarantine records a check the user explicitly excluded from
+// boundary decisions because it cannot produce a usable signal in this
+// environment. The check still executes; its result can never block.
+type VerificationQuarantine struct {
+	CheckName      string `json:"checkName"`
+	BaselineStatus string `json:"baselineStatus,omitempty"`
+	Reason         string `json:"reason,omitempty"`
+	LogPath        string `json:"logPath,omitempty"`
+}
+
 // VerificationState stores the contract and lifecycle cursor needed by later
 // verification phases. It is optional so schema-1 project state remains valid.
 type VerificationState struct {
@@ -145,6 +155,19 @@ type VerificationState struct {
 	BoundaryCursor         string                      `json:"boundaryCursor,omitempty"`
 	RemediationAttempts    int                         `json:"remediationAttempts,omitempty"`
 	NextAction             string                      `json:"nextAction,omitempty"`
+	QuarantinedChecks      []VerificationQuarantine    `json:"quarantinedChecks,omitempty"`
+	// BootstrapRequested marks that the user asked gg to repair the checks that
+	// blocked the parent preflight, rather than skipping them. Planning re-runs
+	// to prepend a repair phase; the baseline capture is deferred until it
+	// completes.
+	BootstrapRequested bool `json:"bootstrapRequested,omitempty"`
+	// BootstrapPhase names the plan phase that must run before the parent
+	// baseline can be captured. It is the first pending phase of the re-planned
+	// plan.
+	BootstrapPhase string `json:"bootstrapPhase,omitempty"`
+	// BaselineAfterPhase records that the captured baseline reflects the parent
+	// plus this repair phase, not the unmodified parent. Empty for normal runs.
+	BaselineAfterPhase string `json:"baselineAfterPhase,omitempty"`
 }
 
 // LifecycleStatus is the persisted lifecycle state of a project.
@@ -452,6 +475,7 @@ func NewProjectState(input ProjectState) (ProjectState, error) {
 		verification.CurrentFindings = cloneVerificationFindings(input.Verification.CurrentFindings)
 		verification.Warnings = cloneVerificationFindings(input.Verification.Warnings)
 		verification.PromotedRequiredGreen = append([]string(nil), input.Verification.PromotedRequiredGreen...)
+		verification.QuarantinedChecks = cloneVerificationQuarantines(input.Verification.QuarantinedChecks)
 		state.Verification = &verification
 	}
 	if input.PRCIMonitor != nil {
@@ -725,6 +749,10 @@ func cloneVerificationSteps(steps []VerificationStep) []VerificationStep {
 
 func cloneVerificationFindings(findings []VerificationFinding) []VerificationFinding {
 	return append([]VerificationFinding(nil), findings...)
+}
+
+func cloneVerificationQuarantines(quarantines []VerificationQuarantine) []VerificationQuarantine {
+	return append([]VerificationQuarantine(nil), quarantines...)
 }
 
 func cloneVerificationResults(results []VerificationCommandResult) []VerificationCommandResult {

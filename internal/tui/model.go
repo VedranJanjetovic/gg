@@ -37,6 +37,12 @@ type Actions struct {
 	SkipTarget   func(state.ProjectState) (bool, string)
 	OpenCode     func(context.Context) error
 	OpenTerminal func(context.Context) error
+	// SkipChecks quarantines every verification check that parked the run, and
+	// FixChecks asks Planning for one repair phase instead. ChecksPaused gates
+	// both: the session only offers them for a parked verification preflight.
+	SkipChecks   func(context.Context) error
+	FixChecks    func(context.Context) error
+	ChecksPaused bool
 }
 
 // PhaseStatus is the presentation status of a configured phase or subphase.
@@ -206,6 +212,12 @@ type Model struct {
 	skipOccurrenceID     string
 	codePending          bool
 	terminalPending      bool
+	// The two escapes from a parked verification preflight each confirm before
+	// they mutate durable state, exactly like the failed-execution skip.
+	skipChecksConfirm bool
+	skipChecksPending bool
+	fixChecksConfirm  bool
+	fixChecksPending  bool
 }
 
 // NewModel builds a progress model from authoritative persisted state.

@@ -14,6 +14,15 @@ import (
 // parent verification failures that were present before gg started.
 const repairExistingVerificationFlag = "repair-existing-verification"
 
+// skipChecksFlag quarantines named verification checks for a resume: they still
+// execute, but they can never block a boundary in either direction.
+const skipChecksFlag = "skip-checks"
+
+// fixChecksFlag is the complement of skipChecksFlag: instead of excluding the
+// blocked verification checks, Planning re-runs to prepend one repair phase
+// that makes them executable.
+const fixChecksFlag = "fix-checks"
+
 // isFlagNamed reports whether arg names the given flag in any spelling the flag
 // package accepts: one or two leading dashes, with or without an =value.
 func isFlagNamed(arg, name string) bool {
@@ -41,6 +50,12 @@ type runOptions struct {
 type resumeOptions struct {
 	selector                   string
 	repairExistingVerification bool
+	// skipChecks names the verification checks to quarantine before the run
+	// resumes. A quarantined check still executes but can never block.
+	skipChecks []string
+	// fixChecks asks gg to repair the blocked verification checks instead of
+	// quarantining them: Planning re-runs and prepends one repair phase.
+	fixChecks bool
 }
 
 func parseResumeOptions(args []string) (resumeOptions, error) {
@@ -48,11 +63,25 @@ func parseResumeOptions(args []string) (resumeOptions, error) {
 	flags := flag.NewFlagSet("gg resume", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	flags.BoolVar(&options.repairExistingVerification, repairExistingVerificationFlag, false, "explicitly repair existing verification failures")
+	flags.BoolVar(&options.fixChecks, fixChecksFlag, false, "re-run Planning to add one phase that makes the blocked verification checks executable")
+	skipChecks := flags.String(skipChecksFlag, "", "comma-separated verification checks to exclude from boundary decisions")
 	ordered := make([]string, 0, len(args))
 	positional := make([]string, 0, len(args))
-	for _, arg := range args {
-		if isFlagNamed(arg, repairExistingVerificationFlag) {
+	for index := 0; index < len(args); index++ {
+		arg := args[index]
+		if isFlagNamed(arg, repairExistingVerificationFlag) || isFlagNamed(arg, fixChecksFlag) {
 			ordered = append(ordered, arg)
+			continue
+		}
+		if isFlagNamed(arg, skipChecksFlag) {
+			ordered = append(ordered, arg)
+			// The separated spelling (`--skip-checks names`) carries its value
+			// in the next argument, which must be hoisted with it so it is not
+			// mistaken for the project selector.
+			if !strings.Contains(arg, "=") && index+1 < len(args) {
+				index++
+				ordered = append(ordered, args[index])
+			}
 			continue
 		}
 		positional = append(positional, arg)
@@ -67,7 +96,26 @@ func parseResumeOptions(args []string) (resumeOptions, error) {
 	if flags.NArg() == 1 {
 		options.selector = flags.Arg(0)
 	}
+	options.skipChecks = splitCheckNames(*skipChecks)
+	if options.fixChecks && len(options.skipChecks) > 0 {
+		return resumeOptions{}, fmt.Errorf("resume --%s and --%s are mutually exclusive: a check is either excluded or repaired", fixChecksFlag, skipChecksFlag)
+	}
 	return options, nil
+}
+
+// splitCheckNames turns the comma-separated flag value into trimmed names,
+// dropping empty entries so a trailing comma is not read as a check.
+func splitCheckNames(value string) []string {
+	names := make([]string, 0)
+	for _, part := range strings.Split(value, ",") {
+		if trimmed := strings.TrimSpace(part); trimmed != "" {
+			names = append(names, trimmed)
+		}
+	}
+	if len(names) == 0 {
+		return nil
+	}
+	return names
 }
 
 func parseRunOptions(args []string) (runOptions, error) {

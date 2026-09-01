@@ -158,6 +158,50 @@ func VerificationHasWarnings(project ProjectState) bool {
 	return project.Verification != nil && len(project.Verification.Warnings) > 0
 }
 
+// VerificationBlockingResults returns the recorded check results whose status
+// could not be classified and that the user has not already quarantined. These
+// are exactly the checks that must be skipped or repaired before the run can
+// continue, so the CLI, the TUI, and the Planning prompt all name the same set.
+func VerificationBlockingResults(project ProjectState) []VerificationCommandResult {
+	if project.Verification == nil {
+		return nil
+	}
+	quarantined := make(map[string]struct{}, len(project.Verification.QuarantinedChecks))
+	for _, quarantine := range project.Verification.QuarantinedChecks {
+		if name := strings.TrimSpace(quarantine.CheckName); name != "" {
+			quarantined[name] = struct{}{}
+		}
+	}
+	blocking := make([]VerificationCommandResult, 0, len(project.Verification.CurrentResults))
+	for _, result := range project.Verification.CurrentResults {
+		if _, excluded := quarantined[strings.TrimSpace(result.CheckName)]; excluded {
+			continue
+		}
+		if result.Status != "unavailable" && result.Status != "unclassifiable" {
+			continue
+		}
+		blocking = append(blocking, result)
+	}
+	if len(blocking) == 0 {
+		return nil
+	}
+	return blocking
+}
+
+// VerificationBlockingCheckNames projects VerificationBlockingResults down to
+// the check names, in durable order.
+func VerificationBlockingCheckNames(project ProjectState) []string {
+	blocking := VerificationBlockingResults(project)
+	names := make([]string, 0, len(blocking))
+	for _, result := range blocking {
+		names = append(names, result.CheckName)
+	}
+	if len(names) == 0 {
+		return nil
+	}
+	return names
+}
+
 // VerificationIsPaused reports whether verification stopped the pipeline
 // because a required result was unavailable or could not be classified.
 func VerificationIsPaused(project ProjectState) bool {

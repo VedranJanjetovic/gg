@@ -19,6 +19,14 @@ type verificationReportState interface {
 	PromoteVerificationIdentity(context.Context, string, string) (state.ProjectState, error)
 }
 
+// verificationBootstrapState is the optional lifecycle extension behind
+// --fix-checks. It stays separate from verificationReportState so controllers
+// built for the ordinary boundary keep working unchanged.
+type verificationBootstrapState interface {
+	RecordVerificationBootstrapPhase(context.Context, string, string) (state.ProjectState, error)
+	CompleteVerificationBootstrap(context.Context, string) (state.ProjectState, error)
+}
+
 // errVerificationServiceMissing fails the boundary closed. Reaching it means
 // the project carries a verification contract but the controller was built
 // without WithVerificationService, so the gate could not run. Skipping it
@@ -78,18 +86,27 @@ func (c *sequentialController) ensureVerificationBaseline(ctx context.Context, r
 	if verificationState.ParentBaselineCaptured {
 		return nil
 	}
+	deferred, deferErr := c.deferBaselineForBootstrap(ctx, request)
+	if deferErr != nil {
+		return deferErr
+	}
+	if deferred {
+		return nil
+	}
+	verificationState = request.Project.Verification
 	steps := verification.StepsFromState(verificationState.PlannedSteps)
+	quarantined := quarantinedSet(*verificationState)
 	report, runErr := c.verification.Verify(ctx, request.Project.WorktreePath, steps)
 	if runErr != nil {
-		if hasUnavailableOrUnclassifiable(report, steps) {
+		if hasUnavailableOrUnclassifiable(report, steps, quarantined) {
 			_, persistErr := persist.RecordVerificationResultReport(ctx, request.Project.Slug, commandResults(report), nil, nil, "parent-preflight", 0, "make every planned verification step executable, then resume")
-			return &verificationPauseError{cause: errors.Join(fmt.Errorf("parent verification preflight cannot complete: %w", runErr), persistErr)}
+			return &verificationPauseError{cause: errors.Join(fmt.Errorf("parent verification preflight cannot complete: %w%s", runErr, skipChecksHint(report, request.Project.Slug, quarantined)), persistErr)}
 		}
 		return runErr
 	}
-	if hasUnavailableOrUnclassifiable(report, steps) {
+	if hasUnavailableOrUnclassifiable(report, steps, quarantined) {
 		_, persistErr := persist.RecordVerificationResultReport(ctx, request.Project.Slug, commandResults(report), nil, nil, "parent-preflight", 0, "make every planned verification step executable, then resume")
-		return &verificationPauseError{cause: errors.Join(fmt.Errorf("parent verification preflight contains an unavailable or unclassifiable check: %s", reportSummary(report)), persistErr)}
+		return &verificationPauseError{cause: errors.Join(preflightBlockedError(report, request.Project.Slug, quarantined), persistErr)}
 	}
 	baseline := verification.CaptureBaseline(report)
 	findings := reportFindings(report, "")
@@ -105,6 +122,67 @@ func (c *sequentialController) ensureVerificationBaseline(ctx context.Context, r
 	updated, err = persist.RecordVerificationResultReport(ctx, request.Project.Slug, commandResults(report), findingsWithClassifications(boundary), warningFindings(boundary), "parent-preflight", 0, nextVerificationAction(boundary))
 	if err != nil {
 		return fmt.Errorf("persist parent verification preflight: %w", err)
+	}
+	request.Project = updated
+	return nil
+}
+
+// deferBaselineForBootstrap reports whether the parent baseline capture must
+// wait for a repair phase. The checks that blocked the preflight cannot run on
+// the unmodified parent, so gg runs the repair phase first and captures the
+// baseline against parent+repair instead. It returns false for every project
+// that did not ask for a repair, leaving the ordinary preflight untouched.
+func (c *sequentialController) deferBaselineForBootstrap(ctx context.Context, request *Request) (bool, error) {
+	verificationState := request.Project.Verification
+	if !verificationState.BootstrapRequested && verificationState.BootstrapPhase == "" {
+		return false, nil
+	}
+	pending, _ := c.pendingPlanPhases(context.WithoutCancel(ctx), request.Project.Slug)
+	if verificationState.BootstrapPhase != "" {
+		// Still pending means the repair has not run yet. A bootstrap phase
+		// that is no longer pending is either complete or no longer planned;
+		// either way the real preflight is what must decide next.
+		for _, name := range pending {
+			if name == verificationState.BootstrapPhase {
+				return true, nil
+			}
+		}
+		return false, nil
+	}
+	if len(pending) == 0 {
+		// Nothing to defer for: Planning produced no pending phase, so the
+		// ordinary preflight must decide whether the run can continue.
+		return false, nil
+	}
+	recorder, ok := c.state.(verificationBootstrapState)
+	if !ok {
+		return false, errors.New("phase state cannot persist verification bootstrap progress")
+	}
+	updated, err := recorder.RecordVerificationBootstrapPhase(context.WithoutCancel(ctx), request.Project.Slug, pending[0])
+	if err != nil {
+		return false, fmt.Errorf("persist verification bootstrap phase %q: %w", pending[0], err)
+	}
+	request.Project = updated
+	return true, nil
+}
+
+// completeVerificationBootstrap closes the repair detour for phase: the phase
+// is marked complete before anything else so a later park cannot re-run it,
+// the deferral flag is cleared, and request.Project is refreshed so the
+// deferred preflight sees the durable truth.
+func (c *sequentialController) completeVerificationBootstrap(ctx context.Context, request *Request, phase string) error {
+	if recorder, ok := c.state.(planStateRecorder); ok {
+		if _, err := recorder.RecordPlan(ctx, request.Project.Slug, nil, []string{phase}); err != nil {
+			return fmt.Errorf("record verification bootstrap phase %q completion: %w", phase, err)
+		}
+	}
+	recorder, ok := c.state.(verificationBootstrapState)
+	if !ok {
+		return errors.New("phase state cannot persist verification bootstrap progress")
+	}
+	updated, err := recorder.CompleteVerificationBootstrap(ctx, request.Project.Slug)
+	if err != nil {
+		return fmt.Errorf("complete verification bootstrap phase %q: %w", phase, err)
 	}
 	request.Project = updated
 	return nil
@@ -133,6 +211,7 @@ func (c *sequentialController) verifyBoundary(ctx context.Context, request *Requ
 		return errors.New("verification boundary requires a captured parent baseline")
 	}
 	steps := verification.StepsFromState(verificationState.PlannedSteps)
+	quarantined := quarantinedSet(*verificationState)
 	report, runErr := c.verification.Verify(ctx, request.Project.WorktreePath, steps)
 	baseline := baselineFromState(*verificationState, steps)
 	boundary := verification.Compare(baseline, report, compareOptions(*verificationState))
@@ -151,10 +230,10 @@ func (c *sequentialController) verifyBoundary(ctx context.Context, request *Requ
 		}
 		request.Project = updated
 	}
-	if runErr != nil && hasUnavailableOrUnclassifiable(report, steps) {
+	if runErr != nil && hasUnavailableOrUnclassifiable(report, steps, quarantined) {
 		return &verificationPauseError{cause: errors.Join(fmt.Errorf("verification boundary %q cannot be classified: %w", cursor, runErr), &verificationBoundaryError{cursor: cursor, report: boundary, current: report})}
 	}
-	if hasUnavailableOrUnclassifiable(report, steps) {
+	if hasUnavailableOrUnclassifiable(report, steps, quarantined) {
 		return &verificationPauseError{cause: errors.Join(fmt.Errorf("verification boundary %q cannot be classified: %s", cursor, reportSummary(report)), &verificationBoundaryError{cursor: cursor, report: boundary, current: report})}
 	}
 	if runErr != nil {
@@ -166,8 +245,56 @@ func (c *sequentialController) verifyBoundary(ctx context.Context, request *Requ
 	return nil
 }
 
+// quarantinedSet indexes the checks the user excluded from boundary decisions.
+func quarantinedSet(verificationState state.VerificationState) map[string]struct{} {
+	set := make(map[string]struct{}, len(verificationState.QuarantinedChecks))
+	for _, quarantine := range verificationState.QuarantinedChecks {
+		if name := strings.TrimSpace(quarantine.CheckName); name != "" {
+			set[name] = struct{}{}
+		}
+	}
+	return set
+}
+
+func quarantinedNames(verificationState state.VerificationState) []string {
+	names := make([]string, 0, len(verificationState.QuarantinedChecks))
+	for _, quarantine := range verificationState.QuarantinedChecks {
+		if name := strings.TrimSpace(quarantine.CheckName); name != "" {
+			names = append(names, name)
+		}
+	}
+	return names
+}
+
+// preflightBlockedError names the checks that actually blocked and spells out
+// the exact command that unblocks the run. Parking without that instruction
+// leaves the user with no recoverable action when the environment cannot make
+// the check classifiable.
+func preflightBlockedError(report verification.Report, slug string, quarantined map[string]struct{}) error {
+	return fmt.Errorf("parent verification preflight contains an unavailable or unclassifiable check: %s%s", reportSummary(report), skipChecksHint(report, slug, quarantined))
+}
+
+// skipChecksHint names only the checks that actually blocked, so the suggested
+// command excludes both the healthy checks and the ones already quarantined.
+// It is empty when no check blocked on its status.
+func skipChecksHint(report verification.Report, slug string, quarantined map[string]struct{}) string {
+	blocking := make([]string, 0, len(report.Results))
+	for _, result := range report.Results {
+		if _, excluded := quarantined[result.StepName]; excluded {
+			continue
+		}
+		if result.Status == verification.CommandUnavailable || result.Status == verification.CommandUnclassifiable {
+			blocking = append(blocking, result.StepName)
+		}
+	}
+	if len(blocking) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("; skip them with: gg resume %s --skip-checks=%s", slug, strings.Join(blocking, ","))
+}
+
 func compareOptions(verificationState state.VerificationState) verification.CompareOptions {
-	options := verification.CompareOptions{RepairMode: verificationState.RepairMode}
+	options := verification.CompareOptions{RepairMode: verificationState.RepairMode, Quarantined: quarantinedNames(verificationState)}
 	baseline := baselineFromState(verificationState, verification.StepsFromState(verificationState.PlannedSteps))
 	for _, result := range baseline.Results {
 		for _, failure := range result.Failures {
@@ -267,7 +394,12 @@ func warningFindings(report verification.BoundaryReport) []state.VerificationFin
 	return warnings
 }
 
-func hasUnavailableOrUnclassifiable(report verification.Report, steps []verification.Step) bool {
+// hasUnavailableOrUnclassifiable reports whether the run cannot be classified.
+// Quarantined checks are exempt from the status classification only: the
+// structural invariants — one result per planned step, no unknown names, no
+// duplicates — still apply to them, because a malformed report is an execution
+// defect rather than a signal the user chose to ignore.
+func hasUnavailableOrUnclassifiable(report verification.Report, steps []verification.Step, quarantined map[string]struct{}) bool {
 	expected := make(map[string]struct{}, len(steps))
 	for _, step := range steps {
 		expected[step.Name] = struct{}{}
@@ -284,6 +416,9 @@ func hasUnavailableOrUnclassifiable(report verification.Report, steps []verifica
 			return true
 		}
 		seen[result.StepName] = struct{}{}
+		if _, excluded := quarantined[result.StepName]; excluded {
+			continue
+		}
 		switch result.Status {
 		case verification.CommandPassed:
 			if len(result.Failures) > 0 {

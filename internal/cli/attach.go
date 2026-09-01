@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 
 	"github.com/VedranJanjetovic/gg/internal/git"
 	"github.com/VedranJanjetovic/gg/internal/orchestrator"
@@ -36,6 +37,14 @@ type ProjectAttachment struct {
 	// GroomingPending marks a project parked on unanswered grooming
 	// questions; frontends offer re-entry (returning tui.ErrGroomingRequested).
 	GroomingPending bool
+	// ChecksPaused marks a project parked because a verification check is
+	// unavailable or unclassifiable. Only then are SkipChecks and FixChecks set.
+	ChecksPaused bool
+	// SkipChecks quarantines every currently blocking check, and FixChecks asks
+	// Planning for one repair phase instead. They are the two escapes from a
+	// parked verification preflight.
+	SkipChecks func(context.Context) error
+	FixChecks  func(context.Context) error
 }
 
 // staleRunRecoverer is the optional capability for converting a running
@@ -52,6 +61,54 @@ type ProjectAttacher interface {
 // AttachProject opens an existing project session for alternate frontends.
 func (a *App) AttachProject(ctx context.Context, selector string) error {
 	return a.attachExisting(ctx, selector)
+}
+
+// AttachProjectIn opens an existing project owned by folder, which need not be
+// the current folder. The global project view lists every configured folder, so
+// the folder that owns a project is what identifies it — slugs are unique only
+// within a folder.
+func (a *App) AttachProjectIn(ctx context.Context, folder, selector string) error {
+	scoped, err := a.forFolder(folder)
+	if err != nil {
+		return err
+	}
+	return scoped.attachExisting(ctx, selector)
+}
+
+// pinnedRoot resolves one fixed folder as the configured root.
+type pinnedRoot string
+
+func (r pinnedRoot) ConfiguredRoot(ctx context.Context) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	return string(r), nil
+}
+
+// forFolder returns a copy of the app whose durable state, detached runs, and
+// configuration lookups resolve against folder instead of the current folder.
+// Every folder-dependent behavior reaches the filesystem through root, cwd, or
+// projects, so pinning those three is what makes a project outside the current
+// folder attachable. The receiver is left untouched: one App attaches to
+// several folders in sequence.
+func (a *App) forFolder(folder string) (*App, error) {
+	absolute, err := filepath.Abs(folder)
+	if err != nil {
+		return nil, fmt.Errorf("resolve project folder %q: %w", folder, err)
+	}
+	store, err := state.NewFileStore(absolute)
+	if err != nil {
+		return nil, fmt.Errorf("open project state store in %q: %w", absolute, err)
+	}
+	scoped := *a
+	scoped.root = pinnedRoot(absolute)
+	scoped.cwd = func() (string, error) { return absolute, nil }
+	scoped.projects = state.NewLifecycleService(store, nil, store.Locker())
+	// An injected git client is pinned to the current folder's repository, so
+	// it would operate on the wrong one. Dropping it makes gitClient build a
+	// client for the pinned root instead.
+	scoped.git = nil
+	return &scoped, nil
 }
 
 func (a *App) createAndAttach(ctx context.Context, stdout io.Writer) error {
@@ -217,6 +274,23 @@ func (a *App) attachProject(ctx context.Context, selector string, start func(con
 			attachment.SkipTarget = skipProjection
 			attachment.Skip = func(skipCtx context.Context) error {
 				return a.skipFailedExecution(skipCtx, selector, skipper)
+			}
+		}
+		if state.VerificationIsPaused(project) {
+			attachment.ChecksPaused = true
+			attachment.SkipChecks = func(skipCtx context.Context) error {
+				current, loadErr := service.Load(skipCtx, selector)
+				if loadErr != nil {
+					return fmt.Errorf("load project %q: %w", selector, loadErr)
+				}
+				names := state.VerificationBlockingCheckNames(current)
+				if len(names) == 0 {
+					return fmt.Errorf("skip verification checks for %q: no check is unavailable or unclassifiable", selector)
+				}
+				return a.quarantineVerificationChecks(skipCtx, io.Discard, selector, names)
+			}
+			attachment.FixChecks = func(fixCtx context.Context) error {
+				return a.requestVerificationBootstrap(fixCtx, io.Discard, selector)
 			}
 		}
 		if project.Status == state.StatusFailed || project.Status == state.StatusStopped {

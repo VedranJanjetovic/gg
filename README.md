@@ -71,7 +71,7 @@ recovery details.
 | `gg status [project]` | Show one project's detail, or a status table for every project. |
 | `gg usage` | Show token and USD usage per project. |
 | `gg run [flags] [project] [-- args]` | Start a gg workflow. See [run-only overrides](#configuration). |
-| `gg resume [--repair-existing-verification] [project]` | Resume a stopped or failed gg workflow from its persisted snapshot. |
+| `gg resume [--repair-existing-verification] [--skip-checks=a,b\|--fix-checks] [project]` | Resume a stopped or failed gg workflow from its persisted snapshot. `--skip-checks` quarantines blocked verification checks; `--fix-checks` re-runs Planning to add one phase that makes them executable. |
 | `gg stop <project>` | Stop a running gg workflow. |
 | `gg stop-all` | Stop every persisted running gg workflow. |
 | `gg prune [--yes]` | Remove done (finished/terminated) projects. `--yes` skips the confirmation prompt. |

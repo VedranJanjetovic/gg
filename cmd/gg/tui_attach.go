@@ -33,7 +33,7 @@ func (a projectTUIAttacher) Attach(ctx context.Context, attachment cli.ProjectAt
 		ctx,
 		attachment.Project,
 		tui.Loader(attachment.Load),
-		tui.Actions{Start: attachment.Start, Stop: attachment.Stop, Resume: attachment.Resume, Configure: attachment.Configure, Skip: attachment.Skip, SkipAvailable: attachment.SkipAvailable, SkipLabel: attachment.SkipLabel, SkipTarget: attachment.SkipTarget, OpenCode: attachment.OpenCode, OpenTerminal: attachment.OpenTerminal},
+		tui.Actions{Start: attachment.Start, Stop: attachment.Stop, Resume: attachment.Resume, Configure: attachment.Configure, Skip: attachment.Skip, SkipAvailable: attachment.SkipAvailable, SkipLabel: attachment.SkipLabel, SkipTarget: attachment.SkipTarget, OpenCode: attachment.OpenCode, OpenTerminal: attachment.OpenTerminal, SkipChecks: attachment.SkipChecks, FixChecks: attachment.FixChecks, ChecksPaused: attachment.ChecksPaused},
 		a.input,
 		a.output,
 		options...,

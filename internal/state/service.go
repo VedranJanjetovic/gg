@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -387,6 +388,7 @@ func (s *LifecycleService) MigrateVerificationContract(ctx context.Context, slug
 		verification.CurrentFindings = cloneVerificationFindings(verification.CurrentFindings)
 		verification.Warnings = cloneVerificationFindings(verification.Warnings)
 		verification.PromotedRequiredGreen = append([]string(nil), verification.PromotedRequiredGreen...)
+		verification.QuarantinedChecks = cloneVerificationQuarantines(verification.QuarantinedChecks)
 		project.Verification = verification
 		project.UpdatedAt = s.clock.Now()
 		if err := s.store.Save(locked, project); err != nil {
@@ -483,6 +485,85 @@ func (s *LifecycleService) PromoteVerificationIdentity(ctx context.Context, slug
 	})
 }
 
+// QuarantineVerificationChecks records the checks the user explicitly excluded
+// from boundary decisions. Entries merge by check name so repeating a name
+// refreshes its evidence instead of duplicating it, and the list is kept sorted
+// so persistence stays deterministic.
+func (s *LifecycleService) QuarantineVerificationChecks(ctx context.Context, slug string, checks []VerificationQuarantine) (ProjectState, error) {
+	return s.updateVerification(ctx, slug, func(verification *VerificationState) error {
+		for _, check := range checks {
+			name := strings.TrimSpace(check.CheckName)
+			if name == "" {
+				return errors.New("verification quarantine requires a check name")
+			}
+			check.CheckName = name
+			replaced := false
+			for index, existing := range verification.QuarantinedChecks {
+				if existing.CheckName == name {
+					verification.QuarantinedChecks[index] = check
+					replaced = true
+					break
+				}
+			}
+			if !replaced {
+				verification.QuarantinedChecks = append(verification.QuarantinedChecks, check)
+			}
+		}
+		sort.Slice(verification.QuarantinedChecks, func(i, j int) bool {
+			return verification.QuarantinedChecks[i].CheckName < verification.QuarantinedChecks[j].CheckName
+		})
+		return nil
+	})
+}
+
+// RequestVerificationBootstrap records that the user chose to repair the
+// checks that blocked the parent preflight instead of quarantining them.
+// Requesting it without a blocking check would rewind Planning for nothing, so
+// the request is rejected in that case.
+func (s *LifecycleService) RequestVerificationBootstrap(ctx context.Context, slug string) (ProjectState, error) {
+	if err := checkContext(ctx); err != nil {
+		return ProjectState{}, err
+	}
+	if s.store == nil || s.locker == nil {
+		return ProjectState{}, errors.New("lifecycle service requires store and locker")
+	}
+	project, err := s.Load(ctx, slug)
+	if err != nil {
+		return ProjectState{}, fmt.Errorf("load project %q: %w", slug, err)
+	}
+	if len(VerificationBlockingResults(project)) == 0 {
+		return ProjectState{}, fmt.Errorf("request verification bootstrap for %q: no verification check is unavailable or unclassifiable", slug)
+	}
+	return s.updateVerification(ctx, slug, func(verification *VerificationState) error {
+		verification.BootstrapRequested = true
+		return nil
+	})
+}
+
+// RecordVerificationBootstrapPhase names the plan phase whose completion
+// unblocks the deferred parent baseline capture.
+func (s *LifecycleService) RecordVerificationBootstrapPhase(ctx context.Context, slug, phase string) (ProjectState, error) {
+	phase = strings.TrimSpace(phase)
+	if phase == "" {
+		return ProjectState{}, errors.New("verification bootstrap phase is required")
+	}
+	return s.updateVerification(ctx, slug, func(verification *VerificationState) error {
+		verification.BootstrapPhase = phase
+		return nil
+	})
+}
+
+// CompleteVerificationBootstrap closes the repair detour: the baseline about to
+// be captured reflects the parent plus the repair phase. BootstrapPhase is kept
+// so the run stays auditable after the flag is cleared.
+func (s *LifecycleService) CompleteVerificationBootstrap(ctx context.Context, slug string) (ProjectState, error) {
+	return s.updateVerification(ctx, slug, func(verification *VerificationState) error {
+		verification.BaselineAfterPhase = verification.BootstrapPhase
+		verification.BootstrapRequested = false
+		return nil
+	})
+}
+
 // BeginVerificationRemediation atomically consumes one remediation cycle
 // before any agent work is dispatched. Persisting the increment first makes
 // a crash between the state write and the dispatch unable to reset the budget.
@@ -537,6 +618,7 @@ func (s *LifecycleService) updateVerification(ctx context.Context, slug string, 
 		verification.CurrentFindings = cloneVerificationFindings(project.Verification.CurrentFindings)
 		verification.Warnings = cloneVerificationFindings(project.Verification.Warnings)
 		verification.PromotedRequiredGreen = append([]string(nil), project.Verification.PromotedRequiredGreen...)
+		verification.QuarantinedChecks = cloneVerificationQuarantines(project.Verification.QuarantinedChecks)
 		if err := update(&verification); err != nil {
 			return err
 		}

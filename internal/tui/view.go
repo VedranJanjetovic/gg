@@ -105,8 +105,7 @@ func (m Model) renderBody(interactive bool) string {
 			}
 			switch m.project.Status {
 			case state.StatusRunning:
-				fmt.Fprintf(&output, "%s stop\n", m.styles.key.Render("s"))
-				output.WriteString("Keys: c code  t terminal  s stop  q detach\n")
+				output.WriteString(m.renderLegend([]legendEntry{{key: "c", label: "code"}, {key: "t", label: "terminal"}, {key: "s", label: "stop"}, {key: "q", label: "detach"}}))
 			case state.StatusStopped:
 				if m.resumePending {
 					output.WriteString("Continuing pipeline…\n")
@@ -125,52 +124,63 @@ func (m Model) renderBody(interactive bool) string {
 		if m.skipConfirm {
 			output.WriteString("Confirm skip of " + m.skipLabel + "?  y/Enter confirm  n/Esc cancel\n")
 		} else {
-			switch m.project.Status {
-			case state.StatusRunning:
-				fmt.Fprintf(&output, "%s stop  %s quit\n", m.styles.key.Render("s"), m.styles.key.Render("q"))
-			case state.StatusStopped:
+			if m.project.Status == state.StatusStopped {
 				output.WriteString("Type r to continue pipeline\n")
-				if m.actions.Configure != nil {
-					fmt.Fprintf(&output, "%s configure  %s quit\n", m.styles.key.Render("e"), m.styles.key.Render("q"))
-				} else {
-					fmt.Fprintf(&output, "%s quit\n", m.styles.key.Render("q"))
-				}
-			case state.StatusFailed:
-				configure := ""
-				if m.actions.Configure != nil {
-					configure = fmt.Sprintf("  %s configure", m.styles.key.Render("e"))
-				}
-				if m.actions.Skip != nil && skipAvailable {
-					fmt.Fprintf(&output, "%s skip  %s resume%s  %s quit\n", m.styles.key.Render("s"), m.styles.key.Render("r"), configure, m.styles.key.Render("q"))
-				} else {
-					fmt.Fprintf(&output, "%s resume%s  %s quit\n", m.styles.key.Render("r"), configure, m.styles.key.Render("q"))
-				}
-			default:
-				fmt.Fprintf(&output, "%s quit\n", m.styles.key.Render("q"))
 			}
-			if m.interviewOpen() {
-				keys := "Keys: g answer questions  c code  t terminal  r resume"
-				if m.project.Status == state.StatusRunning {
-					keys += "  s stop"
-				} else if m.project.Status == state.StatusFailed && skipAvailable {
-					keys += "  s skip"
-				}
-				if (m.project.Status == state.StatusFailed || m.project.Status == state.StatusStopped) && m.actions.Configure != nil {
-					keys += "  e configure"
-				}
-				output.WriteString(keys + "  q quit\n")
-			} else {
-				keys := "Keys: i interactive  c code  t terminal  r resume"
-				if m.project.Status == state.StatusRunning {
-					keys += "  s stop"
-				} else if m.project.Status == state.StatusFailed && m.actions.Skip != nil && skipAvailable {
-					keys += "  s skip"
-				}
-				output.WriteString(keys + "  q quit\n")
-			}
+			output.WriteString(m.renderLegend(m.legendEntries(skipAvailable)))
 		}
 	}
 	return output.String()
+}
+
+// legendEntry is one keystroke the footer offers in the current state.
+type legendEntry struct {
+	key   string
+	label string
+}
+
+// renderLegend draws every available action as a highlighted key chip followed
+// by its label. The footer previously split the same actions across a coloured
+// action line and a plain "Keys:" line, which listed some keys twice and made
+// the rest read as prose rather than as choices.
+func (m Model) renderLegend(entries []legendEntry) string {
+	parts := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		parts = append(parts, m.styles.keyChip.Render(entry.key)+" "+entry.label)
+	}
+	return strings.Join(parts, "  ") + "\n"
+}
+
+// legendEntries lists the actions reachable from the current project status, in
+// a stable order so the footer does not reshuffle as the run progresses.
+func (m Model) legendEntries(skipAvailable bool) []legendEntry {
+	entries := make([]legendEntry, 0, 7)
+	if m.interviewOpen() {
+		entries = append(entries, legendEntry{key: "g", label: "answer questions"})
+	} else {
+		entries = append(entries, legendEntry{key: "i", label: "interactive"})
+	}
+	entries = append(entries, legendEntry{key: "c", label: "code"}, legendEntry{key: "t", label: "terminal"}, legendEntry{key: "r", label: "resume"})
+	switch m.project.Status {
+	case state.StatusRunning:
+		entries = append(entries, legendEntry{key: "s", label: "stop"})
+	case state.StatusFailed:
+		if m.actions.Skip != nil && skipAvailable {
+			entries = append(entries, legendEntry{key: "s", label: "skip"})
+		}
+	}
+	if m.actions.Configure != nil && (m.project.Status == state.StatusFailed || m.project.Status == state.StatusStopped) {
+		entries = append(entries, legendEntry{key: "e", label: "configure"})
+	}
+	if m.checksPaused() {
+		if m.actions.SkipChecks != nil {
+			entries = append(entries, legendEntry{key: "k", label: "skip checks"})
+		}
+		if m.actions.FixChecks != nil {
+			entries = append(entries, legendEntry{key: "f", label: "fix checks"})
+		}
+	}
+	return append(entries, legendEntry{key: "q", label: "quit"})
 }
 
 func verificationLines(project state.ProjectState, width int) []string {

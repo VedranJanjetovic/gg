@@ -93,6 +93,21 @@ func inferredNamePreview(description string) string {
 	return name
 }
 
+// verificationQuarantineService is the optional lifecycle extension behind
+// --skip-checks. Keeping it separate from lifecycleService leaves that narrow
+// seam — and the fakes built on it — unchanged.
+type verificationQuarantineService interface {
+	QuarantineVerificationChecks(context.Context, string, []state.VerificationQuarantine) (state.ProjectState, error)
+}
+
+// verificationBootstrapService is the optional lifecycle extension behind
+// --fix-checks. It rewinds the run to Planning so one repair phase can make the
+// blocked checks executable.
+type verificationBootstrapService interface {
+	RequestVerificationBootstrap(context.Context, string) (state.ProjectState, error)
+	RequireReplan(context.Context, string, string) (state.ProjectState, error)
+}
+
 type lifecycleService interface {
 	Create(context.Context, state.ProjectState) error
 	Load(context.Context, string) (state.ProjectState, error)
@@ -821,6 +836,87 @@ func hasPersistedExecutionSnapshot(snapshot state.PipelineConfigSnapshot) bool {
 	return snapshot.SchemaVersion > 0 && len(bytes.TrimSpace(snapshot.Data)) > 0 && !bytes.Equal(bytes.TrimSpace(snapshot.Data), []byte("{}"))
 }
 
+// quarantineVerificationChecks excludes the named checks from every boundary
+// decision before the run resumes. The checks still execute; carrying the
+// recorded status, reason, and log path into the quarantine keeps the evidence
+// for why the user excluded them durable rather than implicit.
+func (a *App) quarantineVerificationChecks(ctx context.Context, stdout io.Writer, selector string, names []string) error {
+	service, err := a.projectService(ctx)
+	if err != nil {
+		return fmt.Errorf("load project service: %w", err)
+	}
+	quarantiner, ok := service.(verificationQuarantineService)
+	if !ok {
+		return errors.New("project service cannot persist verification quarantines")
+	}
+	project, err := service.Load(ctx, selector)
+	if err != nil {
+		return fmt.Errorf("load project %q: %w", selector, err)
+	}
+	if project.Verification == nil {
+		return errors.New("project has no persisted verification contract; rerun Planning before skipping checks")
+	}
+	planned := make(map[string]struct{}, len(project.Verification.PlannedSteps))
+	plannedNames := make([]string, 0, len(project.Verification.PlannedSteps))
+	for _, step := range project.Verification.PlannedSteps {
+		planned[step.Name] = struct{}{}
+		plannedNames = append(plannedNames, step.Name)
+	}
+	recorded := make(map[string]state.VerificationCommandResult, len(project.Verification.CurrentResults))
+	for _, result := range project.Verification.CurrentResults {
+		recorded[result.CheckName] = result
+	}
+	quarantines := make([]state.VerificationQuarantine, 0, len(names))
+	for _, name := range names {
+		if _, isPlanned := planned[name]; !isPlanned {
+			return fmt.Errorf("unknown verification check %q; planned checks are: %s", name, strings.Join(plannedNames, ", "))
+		}
+		quarantine := state.VerificationQuarantine{CheckName: name}
+		if result, hasResult := recorded[name]; hasResult {
+			quarantine.BaselineStatus = result.Status
+			quarantine.Reason = result.UnavailableErr
+			quarantine.LogPath = result.LogPath
+		}
+		quarantines = append(quarantines, quarantine)
+	}
+	if _, err := quarantiner.QuarantineVerificationChecks(ctx, selector, quarantines); err != nil {
+		return fmt.Errorf("quarantine verification checks: %w", err)
+	}
+	_, err = fmt.Fprintf(stdout, "Quarantined verification check(s): %s. They still execute, but contribute no regression signal for this run.\n", strings.Join(names, ", "))
+	return err
+}
+
+// requestVerificationBootstrap records the user's choice to repair the checks
+// that parked the run and rewinds the resume cursor to Planning, which is the
+// only phase that can add the repair phase to the plan. The blocked checks stay
+// blocking: a repair that does not work parks the run again.
+func (a *App) requestVerificationBootstrap(ctx context.Context, stdout io.Writer, selector string) error {
+	service, err := a.projectService(ctx)
+	if err != nil {
+		return fmt.Errorf("load project service: %w", err)
+	}
+	bootstrapper, ok := service.(verificationBootstrapService)
+	if !ok {
+		return errors.New("project service cannot persist verification bootstrap requests")
+	}
+	project, err := service.Load(ctx, selector)
+	if err != nil {
+		return fmt.Errorf("load project %q: %w", selector, err)
+	}
+	if project.Verification == nil {
+		return errors.New("project has no persisted verification contract; rerun Planning before fixing checks")
+	}
+	blocked := state.VerificationBlockingCheckNames(project)
+	if _, err := bootstrapper.RequestVerificationBootstrap(ctx, selector); err != nil {
+		return fmt.Errorf("request verification bootstrap: %w", err)
+	}
+	if _, err := bootstrapper.RequireReplan(ctx, selector, string(pipeline.PhasePlanning)); err != nil {
+		return fmt.Errorf("rewind resume cursor to Planning: %w", err)
+	}
+	_, err = fmt.Fprintf(stdout, "Fixing verification check(s): %s. Planning re-runs to add one leading phase that makes them executable; Development runs that phase before the verification baseline is captured.\n", strings.Join(blocked, ", "))
+	return err
+}
+
 func (a *App) resume(ctx context.Context, stdout io.Writer, options resumeOptions) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -830,6 +926,12 @@ func (a *App) resume(ctx context.Context, stdout io.Writer, options resumeOption
 		return fmt.Errorf("resume: %w", err)
 	}
 	if selector == "" {
+		if len(options.skipChecks) > 0 {
+			return errors.New("resume --skip-checks requires a project selector")
+		}
+		if options.fixChecks {
+			return errors.New("resume --fix-checks requires a project selector")
+		}
 		if a.resumeAll == nil {
 			return errors.New("resume requires a project selector")
 		}
@@ -847,6 +949,16 @@ func (a *App) resume(ctx context.Context, stdout io.Writer, options resumeOption
 	}
 	if err := a.verifyProjectWorktree(ctx, selector); err != nil {
 		return fmt.Errorf("resume project %q: %w", selector, err)
+	}
+	if len(options.skipChecks) > 0 {
+		if err := a.quarantineVerificationChecks(ctx, stdout, selector, options.skipChecks); err != nil {
+			return fmt.Errorf("resume project %q: %w", selector, err)
+		}
+	}
+	if options.fixChecks {
+		if err := a.requestVerificationBootstrap(ctx, stdout, selector); err != nil {
+			return fmt.Errorf("resume project %q: %w", selector, err)
+		}
 	}
 	if a.controller != nil {
 		projectService, serviceErr := a.projectService(ctx)
@@ -1512,7 +1624,7 @@ func writeCommandHelp(w io.Writer, command string) {
 		fmt.Fprint(w, "\nRun controls: --parent-branch, --base-ref, --enable-pr, --disable-pr, --enable-ci, --disable-ci, and --max-iterations (default 3 total QA attempts). Add --repair-existing-verification to let Development repair the verification failures that already existed on the parent branch; without it those failures are recorded as warnings and only new regressions block the run. New projects choose Inherit or Pick configuration in the attached TUI; use -- to pass every following token to the pipeline unchanged.\n")
 	}
 	if command == "resume" {
-		fmt.Fprint(w, "\nResume controls: --repair-existing-verification, which behaves exactly as it does for \"gg run\".\n")
+		fmt.Fprint(w, "\nResume controls: --repair-existing-verification, which behaves exactly as it does for \"gg run\", and --skip-checks=<name,name> to quarantine verification checks that cannot be classified in this environment. Quarantined checks still execute but contribute no regression signal in either direction. Use --fix-checks instead to repair them: Planning re-runs and adds one leading phase that makes the blocked checks executable, and the verification baseline is captured after that phase. --fix-checks and --skip-checks are mutually exclusive and both require a project selector.\n")
 	}
 }
 

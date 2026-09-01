@@ -26,6 +26,8 @@ const (
 	actionSkip
 	actionCode
 	actionTerminal
+	actionSkipChecks
+	actionFixChecks
 )
 
 type actionResultMsg struct {
@@ -67,6 +69,25 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			case "n", "esc":
 				m.skipConfirm = false
 				m.notice = "Skip cancelled."
+			}
+			return m, nil
+		}
+		if m.skipChecksConfirm || m.fixChecksConfirm {
+			fix := m.fixChecksConfirm
+			switch message.String() {
+			case "y", "enter":
+				m.skipChecksConfirm, m.fixChecksConfirm = false, false
+				if fix {
+					m.fixChecksPending = true
+					m.notice = "Requesting a repair phase for the blocked verification checks…"
+					return m, actionCmd(m.ctx, actionFixChecks, m.actions.FixChecks)
+				}
+				m.skipChecksPending = true
+				m.notice = "Skipping the blocked verification checks…"
+				return m, actionCmd(m.ctx, actionSkipChecks, m.actions.SkipChecks)
+			case "n", "esc":
+				m.skipChecksConfirm, m.fixChecksConfirm = false, false
+				m.notice = "Verification check change cancelled."
 			}
 			return m, nil
 		}
@@ -147,6 +168,20 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				return m, actionCmd(m.ctx, actionTerminal, m.actions.OpenTerminal)
 			}
 			m.notice = keyNotice("terminal", m.actions.OpenTerminal != nil, m.launchPending(), "another launch is still running")
+		case "k":
+			if m.checksPaused() && m.actions.SkipChecks != nil && !m.actionPending() {
+				m.skipChecksConfirm = true
+				m.notice = "Confirm skipping the blocked verification check(s)? They keep running but can never block."
+				return m, nil
+			}
+			m.notice = keyNotice("skip checks", m.actions.SkipChecks != nil, !m.checksPaused() || m.actionPending(), "verification is not parked on an unclassifiable check")
+		case "f":
+			if m.checksPaused() && m.actions.FixChecks != nil && !m.actionPending() {
+				m.fixChecksConfirm = true
+				m.notice = "Confirm fixing the blocked verification check(s)? Planning re-runs to add one repair phase."
+				return m, nil
+			}
+			m.notice = keyNotice("fix checks", m.actions.FixChecks != nil, !m.checksPaused() || m.actionPending(), "verification is not parked on an unclassifiable check")
 		}
 	case spinner.TickMsg:
 		var command tea.Cmd
@@ -207,6 +242,10 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.codePending = false
 		case actionTerminal:
 			m.terminalPending = false
+		case actionSkipChecks:
+			m.skipChecksPending = false
+		case actionFixChecks:
+			m.fixChecksPending = false
 		}
 		if message.err != nil {
 			m.actionErr = message.err
@@ -243,13 +282,24 @@ func actionDoneNotice(kind actionKind) string {
 		return "Opened Visual Studio Code."
 	case actionTerminal:
 		return "Opened terminal."
+	case actionSkipChecks:
+		return "Blocked verification check(s) skipped; press r to resume."
+	case actionFixChecks:
+		return "Repair phase requested; press r to resume — Planning runs again first."
 	default:
 		return ""
 	}
 }
 
 func (m Model) foregroundOwned() bool {
-	return m.startPending || m.resumePending || m.skipPending || m.codePending || m.terminalPending
+	return m.startPending || m.resumePending || m.skipPending || m.codePending || m.terminalPending || m.skipChecksPending || m.fixChecksPending
+}
+
+// checksPaused reports whether this session can change the verification checks
+// that parked the run. The session-level gate comes from the attachment; the
+// durable pause is re-read on every poll so the keys disappear once it clears.
+func (m Model) checksPaused() bool {
+	return m.actions.ChecksPaused && state.VerificationIsPaused(m.project)
 }
 
 func (m Model) actionPending() bool { return m.foregroundOwned() || m.stopPending }

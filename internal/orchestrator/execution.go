@@ -937,10 +937,26 @@ func (c *sequentialController) executeDevelopmentLoop(ctx context.Context, reque
 		return outcomes, runSequence(nil, 0, nil)
 	}
 	completed := total - len(pending)
+	bootstrapPhase := ""
+	if request.Project.Verification != nil {
+		bootstrapPhase = request.Project.Verification.BootstrapPhase
+	}
 	for index, name := range pending {
 		scope := &PlanPhaseScope{Name: name, Index: completed + index + 1, Total: total}
 		if err := runSequence(scope, 0, nil); err != nil {
 			return outcomes, err
+		}
+		if name == bootstrapPhase {
+			// The repair phase has no baseline to compare against — capturing
+			// one is exactly what it unblocks. Record its completion first so a
+			// second park cannot re-run it, then run the deferred preflight.
+			if err := c.completeVerificationBootstrap(context.WithoutCancel(ctx), request, name); err != nil {
+				return outcomes, err
+			}
+			if err := c.ensureVerificationBaseline(context.WithoutCancel(ctx), request); err != nil {
+				return outcomes, err
+			}
+			continue
 		}
 		if err := c.verifyBoundaryWithRemediation(context.WithoutCancel(ctx), request, name, func(attempt int, feedback []string) error {
 			return runSequence(scope, attempt, feedback)
