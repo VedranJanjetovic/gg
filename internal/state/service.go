@@ -336,10 +336,23 @@ func (s *LifecycleService) SetVerificationContract(ctx context.Context, slug str
 			return err
 		}
 		project.PipelineConfig = PipelineConfigSnapshot{SchemaVersion: snapshot.SchemaVersion, Data: append(json.RawMessage(nil), snapshot.Data...)}
-		project.Verification = &VerificationState{
+		verification := &VerificationState{
 			PlannedSteps: cloneVerificationSteps(contract.Steps),
 			RepairMode:   contract.RepairMode,
 		}
+		if prior := project.Verification; prior != nil {
+			// A re-declared contract invalidates prior observations (baseline,
+			// findings, boundary cursor) but not the user's standing decisions:
+			// quarantines from --skip-checks and a pending --fix-checks
+			// bootstrap request must survive the Planning re-run that request
+			// triggered, or the deferred preflight can never happen.
+			// BootstrapPhase and BaselineAfterPhase stay reset — they name a
+			// phase of the plan being replaced, and the deferral re-records
+			// the new plan's leading phase when the request flag is set.
+			verification.QuarantinedChecks = cloneVerificationQuarantines(prior.QuarantinedChecks)
+			verification.BootstrapRequested = prior.BootstrapRequested
+		}
+		project.Verification = verification
 		project.UpdatedAt = s.clock.Now()
 		if err := s.store.Save(locked, project); err != nil {
 			return err
