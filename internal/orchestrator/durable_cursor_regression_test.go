@@ -58,7 +58,7 @@ func TestStopDuringPostConflictQASurvivesRestartWithoutReplayingRebase(t *testin
 
 	conflictRunner := &feedbackRunner{
 		statuses: []state.LifecycleStatus{
-			state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFinished,
+			state.StatusFinished, state.StatusFinished, state.StatusFinished,
 			state.StatusFailed,
 		},
 		artifacts: []string{"rebase-report.md"},
@@ -131,7 +131,7 @@ func TestStopDuringPostConflictQASurvivesRestartWithoutReplayingRebase(t *testin
 	}
 
 	want := []string{
-		"development/implementation", "development/testing", "development/review",
+		"development/implementation",
 		"rebase/", "qa/", "test_document/",
 	}
 	if !reflect.DeepEqual(finishRunner.calls, want) {
@@ -171,7 +171,7 @@ func TestResumeAfterSuccessfulQAFixSubphaseStartsAtNextSubphase(t *testing.T) {
 	runner := &feedbackRunner{
 		statuses: []state.LifecycleStatus{
 			state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFinished,
-			state.StatusFinished, state.StatusFailed, state.StatusFinished,
+			state.StatusFailed, state.StatusFinished,
 		},
 		artifacts: []string{"qa-report.md"},
 	}
@@ -212,8 +212,8 @@ func TestResumeAfterSuccessfulQAFixSubphaseStartsAtNextSubphase(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Resume() error = %v", err)
 	}
-	if len(resumeRunner.calls) == 0 || resumeRunner.calls[0] != "development/testing" {
-		t.Fatalf("resume dispatches = %v, want next fix subphase development/testing", resumeRunner.calls)
+	if len(resumeRunner.calls) == 0 || resumeRunner.calls[0] != "qa/" {
+		t.Fatalf("resume dispatches = %v, want QA re-run after the completed implementation fix", resumeRunner.calls)
 	}
 	if containsRegressionString(resumeRunner.calls, "development/implementation") {
 		t.Fatalf("resume replayed already successful fix subphase: %v", resumeRunner.calls)

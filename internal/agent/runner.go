@@ -338,7 +338,15 @@ func (r *AgentRunner) Run(ctx context.Context, req RunRequest) (RunResult, error
 			result.Disposition = DispositionFailed
 			result.Status = state.StatusFailed
 			status, et = state.StatusFailed, EventFailed
-			waitErr = errors.Join(waitErr, fmt.Errorf("validate QA proof: %w", proofErr))
+			if waitErr == nil && pr.ExitCode == 0 {
+				// The agent process itself succeeded, so the verification work
+				// likely happened and only the artifact is broken: surface a
+				// typed error the orchestrator can answer with one cheap
+				// artifact-repair invocation instead of a full QA re-run.
+				waitErr = &QAProofProtocolError{Cause: proofErr}
+			} else {
+				waitErr = errors.Join(waitErr, fmt.Errorf("validate QA proof: %w", proofErr))
+			}
 		} else {
 			result.DeferredChecks = append([]proof.DeferredCheck(nil), artifact.DeferredChecks...)
 			result.ArtifactPaths = appendUniquePath(result.ArtifactPaths, artifact.Path)

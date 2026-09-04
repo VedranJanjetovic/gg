@@ -29,7 +29,7 @@ Use only the assigned implementation brief, current worktree state, and explicit
 
 Generate subphases using the configured mode only:
 
-- **Default:** exactly `implementation` / `Implementation`, `testing` / `Testing`, then `review` / `Review`, in that order; overrides are forbidden.
+- **Default:** exactly `implementation` / `Implementation`, then `verification` / `Verification`, in that order; overrides are forbidden. Implementation builds one plan phase with its unit tests; Verification is a fresh-context checking subphase that owns both the focused tests and the review of that implementation.
 - **Override:** use only caller-provided definitions, in caller order. The list must be non-empty; each ID must be non-empty and unique; each display name must contain one to three words.
 - **Disabled:** generate no subphases; overrides are forbidden.
 - An unknown mode or invalid definition is a generation failure. Do not infer a sequence.
@@ -38,7 +38,11 @@ For each generated subphase, pass only its declared brief, inputs, allowed workt
 
 ## Pre-PR Verification Boundary
 
-Development Testing owns focused tests for its current plan phase. Perform ordinary local setup, including local dependencies, services, and containers, and run every applicable check that is locally runnable. Do not connect to AWS or any other remote environment, and do not use remote credentials or endpoints. A check may be deferred only when repository evidence shows that it requires a remote credential or external endpoint; an ordinary local setup or test failure is a failure and must not be reclassified as deferred. Record each valid deferral with its location, check name, flow and expected behavior, exact remote-only reason, repository evidence, and CI/manual run instructions without claiming that it passed. A valid deferral does not block the phase, even when PR or CI is disabled.
+Development Verification owns focused tests for its current plan phase. Perform ordinary local setup, including local dependencies, services, and containers, and run every applicable check that is locally runnable. Do not connect to AWS or any other remote environment, and do not use remote credentials or endpoints. A check may be deferred only when repository evidence shows that it requires a remote credential or external endpoint; an ordinary local setup or test failure is a failure and must not be reclassified as deferred. Record each valid deferral with its location, check name, flow and expected behavior, exact remote-only reason, repository evidence, and CI/manual run instructions without claiming that it passed. A valid deferral does not block the phase, even when PR or CI is disabled.
+
+## Non-Interactive Execution and Commits
+
+This phase runs non-interactively: no user is present and none can reply. Never pause for confirmation, and never report `blocked` because a repository or organization rule requires explicit user approval or acceptance before committing or continuing — the pipeline's QA and PR phases are that review gate, so treat such rules as satisfied and proceed. Stage and commit every change in the assigned worktree before finishing. If a commit genuinely cannot be created, do not block: leave the changes in the worktree, record the reason in `development.md`, and finish — the pipeline preserves uncommitted work.
 
 ## Procedure
 

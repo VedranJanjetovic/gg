@@ -75,8 +75,7 @@ func TestGenerateDevelopmentSubphasesUsesStableDefaults(t *testing.T) {
 		displayName string
 	}{
 		{id: pipeline.DevelopmentSubphaseImplementation, displayName: "Implementation"},
-		{id: pipeline.DevelopmentSubphaseTesting, displayName: "Testing"},
-		{id: pipeline.DevelopmentSubphaseReview, displayName: "Review"},
+		{id: pipeline.DevelopmentSubphaseVerification, displayName: "Verification"},
 	}
 	if len(got) != len(want) {
 		t.Fatalf("generated subphase count = %d, want %d", len(got), len(want))
@@ -230,5 +229,21 @@ func TestGenerateDevelopmentSubphasesReturnsIndependentSlices(t *testing.T) {
 	}
 	if second[0].ID() != pipeline.DevelopmentSubphaseImplementation {
 		t.Errorf("first default subphase after mutating prior result = %q, want %q", second[0].ID(), pipeline.DevelopmentSubphaseImplementation)
+	}
+}
+
+func TestLegacyDevelopmentSubphaseAliasMapsSplitCheckingSubphasesToVerification(t *testing.T) {
+	t.Parallel()
+
+	for _, legacy := range []string{"testing", "review"} {
+		alias, ok := pipeline.LegacyDevelopmentSubphaseAlias(legacy)
+		if !ok || alias != pipeline.DevelopmentSubphaseVerification {
+			t.Errorf("LegacyDevelopmentSubphaseAlias(%q) = %q, %v, want verification alias", legacy, alias, ok)
+		}
+	}
+	for _, current := range []string{"implementation", "verification", "", "design"} {
+		if alias, ok := pipeline.LegacyDevelopmentSubphaseAlias(current); ok {
+			t.Errorf("LegacyDevelopmentSubphaseAlias(%q) = %q, want no alias", current, alias)
+		}
 	}
 }

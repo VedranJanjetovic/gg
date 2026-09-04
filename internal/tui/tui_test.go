@@ -30,8 +30,7 @@ Status: pending
   ○ Acceptance criteria
   ○ Development
       ○ Implementation
-      ○ Testing
-      ○ Review
+      ○ Verification
   ○ Rebase
   ○ Test/Document
 
@@ -42,10 +41,10 @@ i interactive  c code  t terminal  r resume  q quit
 		},
 		{
 			name: "running",
-			project: testProject(snapshot, state.StatusRunning, string(pipeline.PhaseDevelopment), "testing", []state.PhaseRecord{
+			project: testProject(snapshot, state.StatusRunning, string(pipeline.PhaseDevelopment), "verification", []state.PhaseRecord{
 				{Phase: string(pipeline.PhaseAcceptanceCriteria), Status: state.StatusFinished},
 				{Phase: string(pipeline.PhaseDevelopment), Subphase: "implementation", Status: state.StatusFinished},
-				{Phase: string(pipeline.PhaseDevelopment), Subphase: "testing", Status: state.StatusRunning},
+				{Phase: string(pipeline.PhaseDevelopment), Subphase: "verification", Status: state.StatusRunning},
 			}),
 			want: `gg · Demo project
 Status: running
@@ -53,8 +52,7 @@ Status: running
   ✓ Acceptance criteria
   ⠋ Development
       ✓ Implementation
-      ⠋ Testing
-      ○ Review
+      ⠋ Verification
   ○ Rebase
   ○ Test/Document
 
@@ -72,8 +70,7 @@ Status: succeeded
   ✓ Acceptance criteria
   ✓ Development
       ✓ Implementation
-      ✓ Testing
-      ✓ Review
+      ✓ Verification
   ✓ Rebase
   ✓ Test/Document
 
@@ -91,8 +88,7 @@ Status: failed
   ✓ Acceptance criteria
   ✓ Development
       ✓ Implementation
-      ✓ Testing
-      ✓ Review
+      ✓ Verification
   ✗ Rebase (failed)
   ○ Test/Document
 
@@ -103,10 +99,10 @@ i interactive  c code  t terminal  r resume  q quit
 		},
 		{
 			name: "stopped",
-			project: testProject(snapshot, state.StatusStopped, string(pipeline.PhaseDevelopment), "testing", []state.PhaseRecord{
+			project: testProject(snapshot, state.StatusStopped, string(pipeline.PhaseDevelopment), "verification", []state.PhaseRecord{
 				{Phase: string(pipeline.PhaseAcceptanceCriteria), Status: state.StatusFinished},
 				{Phase: string(pipeline.PhaseDevelopment), Subphase: "implementation", Status: state.StatusFinished},
-				{Phase: string(pipeline.PhaseDevelopment), Subphase: "testing", Status: state.StatusStopped},
+				{Phase: string(pipeline.PhaseDevelopment), Subphase: "verification", Status: state.StatusStopped},
 			}),
 			want: `gg · Demo project
 Status: stopped
@@ -114,8 +110,7 @@ Status: stopped
   ✓ Acceptance criteria
   ■ Development (stopped)
       ✓ Implementation
-      ■ Testing (stopped)
-      ○ Review
+      ■ Verification (stopped)
   ○ Rebase
   ○ Test/Document
 
@@ -753,7 +748,7 @@ func TestPollingIsBoundedAndTestableWithoutSleeping(t *testing.T) {
 
 func TestWriteStatusLoadsOnceWithoutANSIOrControls(t *testing.T) {
 	snapshot := testSnapshot(t)
-	project := testProject(snapshot, state.StatusRunning, string(pipeline.PhaseDevelopment), "testing", nil)
+	project := testProject(snapshot, state.StatusRunning, string(pipeline.PhaseDevelopment), "verification", nil)
 	loads := 0
 	var output bytes.Buffer
 	err := WriteStatus(context.Background(), &output, project, func(context.Context) (state.ProjectState, error) {
@@ -776,8 +771,7 @@ Status: running
   ○ Acceptance criteria
   ▶ Development
       ○ Implementation
-      ▶ Testing
-      ○ Review
+      ▶ Verification
   ○ Rebase
   ○ Test/Document
 
@@ -1020,8 +1014,7 @@ func completedThroughDevelopment() []state.PhaseRecord {
 	return []state.PhaseRecord{
 		{Phase: string(pipeline.PhaseAcceptanceCriteria), Status: state.StatusFinished},
 		{Phase: string(pipeline.PhaseDevelopment), Subphase: "implementation", Status: state.StatusFinished},
-		{Phase: string(pipeline.PhaseDevelopment), Subphase: "testing", Status: state.StatusFinished},
-		{Phase: string(pipeline.PhaseDevelopment), Subphase: "review", Status: state.StatusFinished},
+		{Phase: string(pipeline.PhaseDevelopment), Subphase: "verification", Status: state.StatusFinished},
 		{Phase: string(pipeline.PhaseRebase), Status: state.StatusFailed},
 	}
 }
@@ -1254,17 +1247,17 @@ func TestSkipIsNotOfferedForIneligibleOrStoppedFailures(t *testing.T) {
 }
 
 func TestSkippedExecutionKeepsStickyCountAfterLaterPass(t *testing.T) {
-	project := testProject(testSnapshot(t), state.StatusRunning, string(pipeline.PhaseDevelopment), "review", []state.PhaseRecord{
-		{Phase: string(pipeline.PhaseDevelopment), Subphase: "testing", Status: state.StatusFailed, OccurrenceID: "testing-1", Skip: &state.SkipResolution{Cleanup: state.SkipCleanup{Status: state.SkipCleanupNotRequired}}},
-		{Phase: string(pipeline.PhaseDevelopment), Subphase: "testing", Status: state.StatusFinished, OccurrenceID: "testing-2"},
-		{Phase: string(pipeline.PhaseDevelopment), Subphase: "review", Status: state.StatusRunning},
+	project := testProject(testSnapshot(t), state.StatusRunning, string(pipeline.PhaseRebase), "", []state.PhaseRecord{
+		{Phase: string(pipeline.PhaseDevelopment), Subphase: "verification", Status: state.StatusFailed, OccurrenceID: "verification-1", Skip: &state.SkipResolution{Cleanup: state.SkipCleanup{Status: state.SkipCleanupNotRequired}}},
+		{Phase: string(pipeline.PhaseDevelopment), Subphase: "verification", Status: state.StatusFinished, OccurrenceID: "verification-2"},
+		{Phase: string(pipeline.PhaseRebase), Status: state.StatusRunning},
 	})
 	model, err := NewModel(context.Background(), project, nil, Actions{}, WithColor(false))
 	if err != nil {
 		t.Fatal(err)
 	}
 	view := model.View()
-	if !strings.Contains(view, "Testing (1 skipped execution)") || strings.Contains(view, "Testing (skipped)") {
+	if !strings.Contains(view, "Verification (1 skipped execution)") || strings.Contains(view, "Verification (skipped)") {
 		t.Fatalf("sticky skip projection missing or stale:\n%s", view)
 	}
 }

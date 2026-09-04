@@ -102,7 +102,7 @@ func TestProductionGitOpsServicesRouteConfiguredPhasesWithoutAgentFallback(t *te
 	if got := checks.identities; len(got) != 1 || got[0] != "https://github.com/example/repo/pull/7" {
 		t.Fatalf("same-run CI identities = %v, want created PR URL", got)
 	}
-	if len(runner.phases) != 5 || runner.phases[0] != pipeline.PhaseAcceptanceCriteria || runner.phases[1] != pipeline.PhaseDevelopment || runner.phases[4] != pipeline.PhaseTestDocument {
+	if len(runner.phases) != 4 || runner.phases[0] != pipeline.PhaseAcceptanceCriteria || runner.phases[1] != pipeline.PhaseDevelopment || runner.phases[3] != pipeline.PhaseTestDocument {
 		t.Fatalf("agent phases = %v", runner.phases)
 	}
 	for _, name := range []string{"rebase-report.md", "pr.md"} {
@@ -147,7 +147,7 @@ func TestResumedConfiguredGitOpsSnapshotRoutesToInjectedServices(t *testing.T) {
 	if got := checks.identities; len(got) != 1 || got[0] != "https://github.com/example/repo/pull/7" {
 		t.Fatalf("resumed CI identities = %v, want persisted PR URL", got)
 	}
-	if len(runner.phases) != 4 || runner.phases[0] != pipeline.PhaseDevelopment || runner.phases[3] != pipeline.PhaseTestDocument {
+	if len(runner.phases) != 3 || runner.phases[0] != pipeline.PhaseDevelopment || runner.phases[2] != pipeline.PhaseTestDocument {
 		t.Fatalf("resumed agent phases = %v", runner.phases)
 	}
 }

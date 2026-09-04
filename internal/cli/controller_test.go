@@ -277,8 +277,8 @@ func TestProductionRunPromptBoundaryUsesCanonicalContractsForEveryEnabledPhase(t
 			t.Errorf("enabled phase %q did not reach prompt construction", phase)
 		}
 	}
-	if seen[pipeline.PhaseDevelopment] != 3 {
-		t.Errorf("development prompts=%d, want default implementation/testing/review subphases", seen[pipeline.PhaseDevelopment])
+	if seen[pipeline.PhaseDevelopment] != 2 {
+		t.Errorf("development prompts=%d, want default implementation/verification subphases", seen[pipeline.PhaseDevelopment])
 	}
 }
 

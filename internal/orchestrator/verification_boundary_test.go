@@ -411,7 +411,7 @@ func TestVerificationBoundaryResumeFinalGateUsesBoundedRemediation(t *testing.T)
 	if checks.calls != 2 {
 		t.Fatalf("verification calls=%d, want failed final gate and one post-remediation gate", checks.calls)
 	}
-	if len(runner.phases) != 3 || runner.phases[0] != pipeline.PhaseDevelopment {
+	if len(runner.phases) != 2 || runner.phases[0] != pipeline.PhaseDevelopment {
 		t.Fatalf("remediation phases=%v, want the Development sequence", runner.phases)
 	}
 	if store.project.Status != state.StatusFinished {

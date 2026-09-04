@@ -24,18 +24,29 @@ Only `qa`, `build_checker`, `pr`, and `ci` can be disabled, by effective
 configuration or run-only flags. The other six phases always run and accept
 per-phase agent, model, and effort settings but no enabled toggle.
 
-Development uses the default subphase sequence **Implementation → Testing →
-Review**. With a plan, gg runs that sequence once for each pending plan phase,
-marking the plan phase complete only after its review passes. Without a plan,
-Development runs one worktree-wide sequence.
+Development uses the default subphase sequence **Implementation →
+Verification**. Implementation builds one plan phase with its unit tests;
+Verification is a fresh-context checking subphase that owns both the focused
+tests and the review of that implementation. With a plan, gg runs the sequence
+once for each pending plan phase, marking the plan phase complete only after
+its verification passes. Without a plan, Development runs one worktree-wide
+sequence. Cursors persisted by older versions that name the legacy `testing`
+or `review` subphases resume at `verification`.
 
 ## QA feedback
 
 QA writes `.gg/qa-report.md` and `.gg/PROOF.md`. A passing QA result advances to
-the next phase. Structured QA feedback sends the project back through Development
-and then QA, preserving the bounded attempt count. `--max-iterations` sets the
+the next phase. Structured QA feedback sends the project back through the
+Development implementation subphase and then QA — the following QA attempt is
+the verification gate for the fix, so the checking subphase is not re-run per
+iteration — preserving the bounded attempt count. `--max-iterations` sets the
 maximum number of QA attempts for the run and defaults to `3`; exhaustion leaves
 the project failed with the attempt count recorded.
+
+A QA run whose agent succeeds but whose `.gg/PROOF.md` is missing or violates
+the deterministic proof protocol gets one artifact-repair invocation: a fresh
+QA agent receives the exact validation errors and fixes the artifacts without
+redoing the verification. A repair that breaks protocol again fails the run.
 
 For example:
 

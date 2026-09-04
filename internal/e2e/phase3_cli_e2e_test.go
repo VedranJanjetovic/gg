@@ -147,7 +147,7 @@ func TestRealCLIFakePipelineOrdersAgentsAndCopiesCanonicalProof(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"acceptance_criteria", "grooming", "planning", "development", "development", "development", "rebase", "qa", "development", "development", "development", "rebase", "qa", "test_document"}
+	want := []string{"acceptance_criteria", "grooming", "planning", "development", "development", "rebase", "qa", "development", "rebase", "qa", "test_document"}
 	if got := phase3Phases(t, data); !equalStrings(got, want) {
 		t.Fatalf("phase order = %v, want %v\nlog=%s", got, want, data)
 	}
@@ -226,9 +226,12 @@ func TestRealCLIFailureProofsAreTerminalAndNotCopied(t *testing.T) {
 				t.Fatalf("invalid %s proof unexpectedly succeeded: %+v", mode, result)
 			}
 			phases := phase3Phases(t, mustRead(t, log))
-			want := []string{"acceptance_criteria", "grooming", "planning", "development", "development", "development", "rebase", "qa"}
+			// An invalid proof gets exactly one artifact-repair QA attempt;
+			// the fake agent reproduces the same invalid proof, so the run
+			// stays terminal without entering the Development fix loop.
+			want := []string{"acceptance_criteria", "grooming", "planning", "development", "development", "rebase", "qa", "qa"}
 			if !equalStrings(phases, want) {
-				t.Fatalf("phases = %v, want terminal QA without Development retry", phases)
+				t.Fatalf("phases = %v, want terminal QA after one proof repair without Development retry", phases)
 			}
 			store, err := state.NewFileStore(repo.Root)
 			if err != nil {
@@ -317,7 +320,7 @@ func TestRealCLIFakePipelineBoundsQAAttempts(t *testing.T) {
 		t.Fatalf("bounded run unexpectedly succeeded: %+v", result)
 	}
 	phases := phase3Phases(t, mustRead(t, log))
-	if len(phases) != 13 || phases[7] != "qa" || phases[12] != "qa" {
+	if len(phases) != 10 || phases[6] != "qa" || phases[9] != "qa" {
 		t.Fatalf("bounded phases = %v", phases)
 	}
 	store, err := state.NewFileStore(repo.Root)

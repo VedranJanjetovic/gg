@@ -149,8 +149,8 @@ func TestProductionCompositionRunsFakeAgentsGitStateAndPersistsAllEvents(t *test
 	}
 
 	signatures := strings.Fields(runProductionGit(t, project.WorktreePath, "log", "--format=%G?", "--grep=^development-"))
-	if len(signatures) != 6 {
-		t.Fatalf("development commits = %d, want 6 initial/fix subphase commits; signatures=%v", len(signatures), signatures)
+	if len(signatures) != 3 {
+		t.Fatalf("development commits = %d, want 3 initial/fix subphase commits; signatures=%v", len(signatures), signatures)
 	}
 	for i, signature := range signatures {
 		if signature != "N" {
@@ -195,13 +195,10 @@ func TestProductionCompositionRunsFakeAgentsGitStateAndPersistsAllEvents(t *test
 		"phase_started:grooming/", "phase_succeeded:grooming/",
 		"phase_started:planning/", "phase_succeeded:planning/",
 		"phase_started:development/implementation", "phase_succeeded:development/implementation",
-		"phase_started:development/testing", "phase_succeeded:development/testing",
-		"phase_started:development/review", "phase_succeeded:development/review",
+		"phase_started:development/verification", "phase_succeeded:development/verification",
 		"phase_started:rebase/", "phase_succeeded:rebase/",
 		"phase_started:qa/", "phase_failed:qa/", "feedback_created:qa/", "phase_retried:qa/",
 		"phase_started:development/implementation", "phase_succeeded:development/implementation",
-		"phase_started:development/testing", "phase_succeeded:development/testing",
-		"phase_started:development/review", "phase_succeeded:development/review",
 		"phase_started:rebase/", "phase_succeeded:rebase/",
 		"phase_started:qa/", "phase_succeeded:qa/",
 		"phase_started:test_document/", "phase_succeeded:test_document/",
@@ -213,8 +210,8 @@ func TestProductionCompositionRunsFakeAgentsGitStateAndPersistsAllEvents(t *test
 	if strings.Join(lifecycle, "\n") != strings.Join(wantLifecycle, "\n") {
 		t.Fatalf("durable lifecycle event order:\n got %v\nwant %v", lifecycle, wantLifecycle)
 	}
-	if processCounts["started"] != 15 || processCounts["completed"] != 14 || processCounts["failed"] != 1 || processCounts["canceled"] != 0 {
-		t.Fatalf("agent lifecycle event counts = %v, want 15 started, 14 completed, 1 failed, 0 canceled", processCounts)
+	if processCounts["started"] != 12 || processCounts["completed"] != 11 || processCounts["failed"] != 1 || processCounts["canceled"] != 0 {
+		t.Fatalf("agent lifecycle event counts = %v, want 12 started, 11 completed, 1 failed, 0 canceled", processCounts)
 	}
 	if processCounts["output"] < processCounts["started"] {
 		t.Fatalf("agent output events = %d, want at least one per invocation (%d)", processCounts["output"], processCounts["started"])

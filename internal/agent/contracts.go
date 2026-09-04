@@ -75,6 +75,33 @@ func (e *SemanticFailureError) Error() string {
 	return fmt.Sprintf("phase %q reported semantic disposition %q", e.Phase, e.Disposition)
 }
 
+// QAProofProtocolError reports a QA run whose agent process succeeded but
+// whose proof artifact is missing or violates the deterministic PROOF.md
+// protocol. It is not semantic QA feedback: the verification evidence likely
+// exists in the worktree and only the artifact is broken, so the orchestrator
+// may launch one artifact-repair invocation instead of failing the run.
+type QAProofProtocolError struct {
+	Cause error
+}
+
+func (e *QAProofProtocolError) Error() string {
+	if e == nil || e.Cause == nil {
+		return "validate QA proof: proof artifact is invalid"
+	}
+	return "validate QA proof: " + e.Cause.Error()
+}
+
+func (e *QAProofProtocolError) Unwrap() error { return e.Cause }
+
+// Violations renders the protocol errors as prompt-ready lines for a repair
+// invocation.
+func (e *QAProofProtocolError) Violations() []string {
+	if e == nil || e.Cause == nil {
+		return nil
+	}
+	return []string{e.Cause.Error()}
+}
+
 // IsSemanticFailure reports whether err consists exclusively of semantic
 // failures. A semantic failure joined with any operational error is not pure
 // and must not be treated as retryable.

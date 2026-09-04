@@ -38,6 +38,7 @@ QA independently validates the acceptance criteria. Perform ordinary local setup
 5. Record failures with input, expected result, actual result, and affected area.
 6. Do not classify unavailable evidence as a pass; classify incomplete evidence as fail or feedback.
 7. Classify every reproducible defect or unmet-but-fixable acceptance check as `feedback` with an actionable `## Feedback` section — feedback routes the findings into the bounded QA-fix loop where Development addresses them. Reserve `fail` for findings no further development work can remedy (unmeetable criteria, falsified or impossible evidence); a `fail` ends the run instead of requesting fixes.
+8. Before finishing, re-read `.gg/PROOF.md` and check every entry against the deterministic format below: each non-deferred entry must contain a literal `$ `-prefixed (or backticked) command AND its observed result in `Proof it passed`, and each deferred entry must omit `Proof it passed` while carrying the remote-only reason, repository evidence, and run instructions. One malformed entry fails the whole phase, so fix format defects now — this check costs seconds and a re-run costs an entire QA attempt.
 
 ## Deterministic PROOF.md Format
 
@@ -48,7 +49,7 @@ QA independently validates the acceptance criteria. Perform ordinary local setup
 - `Test name: <test, command, or flow name>`
 - `Flow/scenario: <scenario exercised>`
 - `What it verifies: <observable behavior>`
-- `Proof it passed: <required for pass|fail|feedback; the exact command prefixed with "$ " plus its observed result>`
+- `Proof it passed: <required for pass|fail|feedback; the exact command prefixed with "$ " plus its observed result>`. Both halves are mandatory in the same field: the literal command line (for example `$ go test ./...`) and its observed outcome (for example `exit 0`, `PASS`, or the relevant output line). Prose such as "verified manually", "covered by unit tests", or a result without the command is rejected by the deterministic parser and fails the entire phase.
 - `Remote-only reason: <required for deferred; why AWS or another remote credential/endpoint is unavoidable locally>`
 - `Repository evidence: <required for deferred; the repository file, command, or configuration proving that remote requirement>`
 - `Manual run instructions: <required for every entry; reproducible local steps or the CI/manual command for deferred validation>`

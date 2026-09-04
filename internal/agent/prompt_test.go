@@ -25,6 +25,8 @@ func TestBuildPromptContainsRequiredStandaloneSections(t *testing.T) {
 		"## Relevant artifact paths", `- "IMPLEMENTATION.md"`, "## Worktree-only instruction",
 		"/tmp/worktree", "## Development instructions", "Do not create signed commits", `git -c commit.gpgsign=false commit -m "<message>"`,
 		"you MUST stage and commit every change",
+		"commit without asking anyone",
+		"If a commit genuinely cannot be created, do not stop or report `blocked` for that reason",
 		"Verification you cannot perform in this environment", "is NOT a failure",
 		"Only report `failed` for work you could do but that remains undone or broken",
 		"gg_plan_completed",
@@ -128,7 +130,7 @@ func TestQAPromptRequiresProofRunIDFrontmatter(t *testing.T) {
 
 func TestPrePRPromptsShareLocalOnlyVerificationBoundary(t *testing.T) {
 	ownership := map[pipeline.PhaseID]string{
-		pipeline.PhaseDevelopment:  "Development Testing owns focused tests for this plan phase",
+		pipeline.PhaseDevelopment:  "Development Verification owns focused tests for this plan phase",
 		pipeline.PhaseQA:           "QA independently validates the acceptance criteria",
 		pipeline.PhaseTestDocument: "Test/Document owns final test and documentation gaps",
 		pipeline.PhaseBuildChecker: "Build checker owns the declared build, lint, format, static-analysis, and packaging gates",
@@ -179,6 +181,7 @@ func TestBuildPromptScopesDevelopmentToOnePlanPhase(t *testing.T) {
 		want     string
 	}{
 		{"implementation", "Implement ONLY this plan phase"},
+		{"verification", "Verify this plan phase's implementation with fresh eyes"},
 		{"testing", "tests that thoroughly cover this plan phase"},
 		{"review", "Review the changes made for this plan phase"},
 	}
@@ -409,6 +412,27 @@ func TestBuildPromptForbidsGitInGitDisabledProjects(t *testing.T) {
 	}
 }
 
+func TestBuildPromptForbidsBlockingOnUserApprovalGatesInEveryPhase(t *testing.T) {
+	for _, phase := range pipeline.DefaultPipeline().Phases() {
+		got, err := BuildPrompt(PromptInput{
+			ProjectGoal: "ship it", AcceptanceCriteria: []string{"tests pass"},
+			Phase: phase.ID(), PhaseContract: "contract",
+			WorkingDirectory: "/worktree", RunID: "run/" + string(phase.ID()) + "/phase/iteration-0",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, want := range []string{
+			"This run is non-interactive",
+			"never report `blocked` because a repository or organization rule requires presenting work for explicit user approval or acceptance",
+		} {
+			if !strings.Contains(got, want) {
+				t.Errorf("phase %q prompt missing %q", phase.ID(), want)
+			}
+		}
+	}
+}
+
 func TestPlanningPromptUpdatesExistingPlanWithoutDiscardingCompletedWork(t *testing.T) {
 	got, err := BuildPrompt(PromptInput{
 		Project: state.ProjectState{OriginalGoal: "ship it", AcceptanceCriteria: []string{"tests pass", "User feedback — make jumps higher"},
@@ -459,6 +483,38 @@ func TestPlanningPromptIncludesRubricAndExactCorrectionEvidence(t *testing.T) {
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("planning prompt missing %q:\n%s", want, got)
+		}
+	}
+}
+
+func TestQAPromptCarriesProofRepairInstructionsOnlyWhenViolationsPresent(t *testing.T) {
+	base := PromptInput{
+		ProjectGoal: "ship it", AcceptanceCriteria: []string{"tests pass"},
+		Phase: pipeline.PhaseQA, PhaseContract: "verify",
+		WorkingDirectory: "/worktree", RunID: "run/qa/phase/iteration-1",
+	}
+	plain, err := BuildPrompt(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(plain, "## QA proof repair") {
+		t.Fatalf("QA prompt without violations unexpectedly carries repair section:\n%s", plain)
+	}
+
+	repair := base
+	repair.QAProofViolations = []string{"validation 9: proof it passed must include the command run and its result"}
+	got, err := BuildPrompt(repair)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"## QA proof repair",
+		"Repair the artifacts instead of redoing the verification",
+		"fix ONLY the protocol violations listed below",
+		`"validation 9: proof it passed must include the command run and its result"`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("QA repair prompt missing %q:\n%s", want, got)
 		}
 	}
 }

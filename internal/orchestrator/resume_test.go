@@ -803,7 +803,7 @@ func TestQAFixCursorAndBudgetSurviveStopAndControllerRestart(t *testing.T) {
 	firstRunner := &feedbackRunner{
 		statuses: []state.LifecycleStatus{
 			state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFinished,
-			state.StatusFinished, state.StatusFailed, state.StatusStopped,
+			state.StatusFailed, state.StatusStopped,
 		},
 		artifacts: []string{"qa-report.md"},
 	}
@@ -844,7 +844,7 @@ func TestQAFixCursorAndBudgetSurviveStopAndControllerRestart(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Resume() error = %v", err)
 	}
-	want := []string{"development/implementation", "development/testing", "development/review", "rebase/", "qa/", "test_document/"}
+	want := []string{"development/implementation", "rebase/", "qa/", "test_document/"}
 	if !reflect.DeepEqual(resumeRunner.calls, want) {
 		t.Fatalf("resume dispatches = %v, want exact fix cursor %v", resumeRunner.calls, want)
 	}
@@ -873,8 +873,8 @@ func TestExhaustedQABudgetRemainsExhaustedAfterRestart(t *testing.T) {
 	plan := resolvedPipeline(t, config.PhaseQA)
 	runner := &feedbackRunner{
 		statuses: []state.LifecycleStatus{
-			state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFinished,
-			state.StatusFinished, state.StatusFailed, state.StatusFinished, state.StatusFinished, state.StatusFinished,
+			state.StatusFinished, state.StatusFinished, state.StatusFinished,
+			state.StatusFinished, state.StatusFailed, state.StatusFinished,
 			state.StatusFinished, state.StatusFailed,
 		},
 		artifacts: []string{"qa-report.md"},
@@ -975,7 +975,7 @@ func TestPendingRebaseConflictRefusesUnresolvedResumeThenRunsQAAfterResolution(t
 	reader := &mutableConflictReader{unresolved: true}
 	firstRunner := &feedbackRunner{
 		statuses: []state.LifecycleStatus{
-			state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFinished,
+			state.StatusFinished, state.StatusFinished, state.StatusFinished,
 			state.StatusFailed,
 		},
 		artifacts: []string{"rebase-report.md"},
