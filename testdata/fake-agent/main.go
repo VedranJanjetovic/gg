@@ -218,7 +218,7 @@ func phaseAndSubphase(prompt string) (string, string) {
 		}
 	}
 	if subphase == "" && phase == "development" {
-		for _, candidate := range []string{"implementation", "testing", "review"} {
+		for _, candidate := range []string{"implementation", "verification", "testing", "review"} {
 			if strings.Contains(prompt, "\"development\" / \""+candidate+"\"") {
 				subphase = candidate
 				break

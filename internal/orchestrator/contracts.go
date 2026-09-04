@@ -46,11 +46,22 @@ type Request struct {
 	// It is never persisted as project state; the rejected artifact and exact
 	// violations are quoted into the fresh standalone prompt.
 	PlanningRetry *PlanningRetry
+	// QAProofRepair is transient context for a QA invocation that repairs a
+	// missing or protocol-invalid proof artifact instead of redoing the
+	// verification. It is never persisted; the exact violations are quoted
+	// into the fresh standalone prompt.
+	QAProofRepair *QAProofRepair
 }
 
 type PlanningRetry struct {
 	Attempt    int
 	Artifact   string
+	Violations []string
+}
+
+// QAProofRepair carries the exact proof protocol violations one repair
+// invocation must fix.
+type QAProofRepair struct {
 	Violations []string
 }
 

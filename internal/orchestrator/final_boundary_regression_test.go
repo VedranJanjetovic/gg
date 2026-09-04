@@ -256,8 +256,9 @@ func TestResumeReconcilesFinishedQAFixCursorAfterReservation(t *testing.T) {
 		finished      string
 		firstDispatch string
 	}{
-		{name: "middle fix advances", finished: "implementation", firstDispatch: "development/testing"},
-		{name: "final fix returns to QA", finished: "review", firstDispatch: "qa/"},
+		{name: "completed implementation fix returns to QA", finished: "implementation", firstDispatch: "qa/"},
+		{name: "legacy testing fix cursor returns to QA", finished: "testing", firstDispatch: "qa/"},
+		{name: "legacy review fix cursor returns to QA", finished: "review", firstDispatch: "qa/"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

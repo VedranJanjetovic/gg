@@ -552,7 +552,7 @@ func (c *sequentialController) executeQAFeedbackLoop(ctx context.Context, reques
 	}
 
 	runFixes := func(iteration int, resumeSubphase string) error {
-		fixSubphases, err := c.subphases(pipeline.PhaseDevelopment, request.Subphases)
+		fixSubphases, err := c.qaFixSubphases(request.Subphases)
 		if err != nil {
 			return fmt.Errorf("generate Development fix subphases: %w", err)
 		}
@@ -596,7 +596,12 @@ func (c *sequentialController) executeQAFeedbackLoop(ctx context.Context, reques
 			}
 		}
 		if resuming {
-			return fmt.Errorf("resume Development fix subphase %q is not configured", cursor)
+			if !c.completedLegacyFixCursor(cursor, request.Subphases) {
+				return fmt.Errorf("resume Development fix subphase %q is not configured", cursor)
+			}
+			// The persisted cursor names a checking subphase an older binary
+			// re-ran per fix pass; the QA re-run below now owns that
+			// responsibility, so the fix stage is already complete.
 		}
 		rebaseOutcome, rebaseErr := c.executeRebaseBeforeQA(ctx, request, iteration, feedback)
 		if rebaseOutcome.Result.Phase != "" {
@@ -631,6 +636,19 @@ func (c *sequentialController) executeQAFeedbackLoop(ctx context.Context, reques
 		outcome, err := c.executePhase(ctx, *request, executable, "", attempt, feedback)
 		outcomes = append(outcomes, outcome)
 		request.Project.ArtifactPaths = appendUnique(request.Project.ArtifactPaths, outcome.Result.ArtifactPaths...)
+		var proofErr *agent.QAProofProtocolError
+		if err != nil && !isCancellation(err) && errors.As(err, &proofErr) {
+			// The QA agent finished but its proof artifact broke protocol. The
+			// verification evidence already exists in the worktree, so run ONE
+			// repair invocation that fixes the artifacts instead of redoing
+			// the verification. A repair that breaks protocol again falls
+			// through to the terminal non-retryable handling below.
+			request.QAProofRepair = &QAProofRepair{Violations: proofErr.Violations()}
+			outcome, err = c.executePhase(ctx, *request, executable, "", attempt, feedback)
+			request.QAProofRepair = nil
+			outcomes = append(outcomes, outcome)
+			request.Project.ArtifactPaths = appendUnique(request.Project.ArtifactPaths, outcome.Result.ArtifactPaths...)
+		}
 		if err == nil {
 			if durable, ok := c.state.(durableOrchestrationState); ok {
 				project, resetErr := durable.ResetQALoop(ctx, request.Project.Slug)
@@ -659,7 +677,7 @@ func (c *sequentialController) executeQAFeedbackLoop(ctx context.Context, reques
 		}
 		fixCursor := ""
 		if stage == "fix" {
-			fixSubphases, subphaseErr := c.subphases(pipeline.PhaseDevelopment, request.Subphases)
+			fixSubphases, subphaseErr := c.qaFixSubphases(request.Subphases)
 			if subphaseErr != nil || len(fixSubphases) == 0 {
 				return outcomes, errors.Join(err, subphaseErr, errors.New("QA feedback requires at least one Development fix subphase"))
 			}
@@ -840,7 +858,7 @@ func (c *sequentialController) retryCIFailure(ctx context.Context, request *Requ
 		if err := c.persistQALoop(context.WithoutCancel(ctx), request, attempt, "fix", "", feedback); err != nil {
 			return outcomes, PhaseOutcome{}, err
 		}
-		fixes, err := c.subphases(pipeline.PhaseDevelopment, request.Subphases)
+		fixes, err := c.qaFixSubphases(request.Subphases)
 		if err != nil {
 			return outcomes, PhaseOutcome{}, err
 		}
@@ -882,7 +900,7 @@ func (c *sequentialController) retryCIFailure(ctx context.Context, request *Requ
 
 // executeDevelopmentLoop runs the Development phase. When the project's plan
 // has pending phases, every pending plan phase gets its own fresh
-// implementation → testing → review agent sequence (each subphase a new
+// implementation → verification agent sequence (each subphase a new
 // agent with a clean context, scoped to that one plan phase), and completion
 // is recorded only after the phase's full sequence succeeded — so resume
 // re-enters at the first unfinished plan phase. Without a plan, or when
@@ -908,6 +926,33 @@ func (c *sequentialController) executeDevelopmentLoop(ctx context.Context, reque
 	skipUntil := ""
 	if resumePhase == string(pipeline.PhaseDevelopment) && resumeSubphase != "" {
 		skipUntil = resumeSubphase
+		configured := false
+		for _, subphase := range subphases {
+			if subphase == skipUntil {
+				configured = true
+				break
+			}
+		}
+		if !configured {
+			// A cursor persisted by an older binary may name a legacy split
+			// checking subphase; the merged verification subphase covers its
+			// remaining work, so resume there instead of silently skipping
+			// every generated subphase.
+			alias, ok := pipeline.LegacyDevelopmentSubphaseAlias(skipUntil)
+			aliasConfigured := false
+			if ok {
+				for _, subphase := range subphases {
+					if subphase == string(alias) {
+						aliasConfigured = true
+						break
+					}
+				}
+			}
+			if !aliasConfigured {
+				return nil, fmt.Errorf("resume Development subphase %q is not configured", resumeSubphase)
+			}
+			skipUntil = string(alias)
+		}
 	}
 	var outcomes []PhaseOutcome
 	runSequence := func(scope *PlanPhaseScope, iteration int, feedback []string) error {
@@ -1209,13 +1254,17 @@ func (c *sequentialController) executePhase(ctx context.Context, request Request
 	artifacts := appendUnique(request.Project.ArtifactPaths, feedback...)
 	invocationID := phaseInvocationID(request.RunID, phase, subphase, iteration)
 	promptInput := agent.PromptInput{Project: request.Project, Phase: phase, Subphase: subphase, PhaseContract: request.PhaseContracts[phase], ArtifactPaths: artifacts, WorkingDirectory: request.Project.WorktreePath, RunID: invocationID, Development: phase == pipeline.PhaseDevelopment, RepairExistingVerification: request.RepairExistingVerification, PlanningDisabled: verificationContractPhase(request.Pipeline) != pipeline.PhasePlanning}
-	if phase == pipeline.PhaseDevelopment && subphase == string(pipeline.DevelopmentSubphaseReview) {
+	if phase == pipeline.PhaseDevelopment &&
+		(subphase == string(pipeline.DevelopmentSubphaseReview) || subphase == string(pipeline.DevelopmentSubphaseVerification)) {
 		promptInput.SkippedTestingEvidence = skippedTestingEvidence(request.Project)
 	}
 	if request.PlanningRetry != nil && phase == pipeline.PhasePlanning {
 		promptInput.PlanningAttempt = request.PlanningRetry.Attempt
 		promptInput.RejectedPlanningArtifact = request.PlanningRetry.Artifact
 		promptInput.PlanningValidationErrors = append([]string(nil), request.PlanningRetry.Violations...)
+	}
+	if request.QAProofRepair != nil && phase == pipeline.PhaseQA {
+		promptInput.QAProofViolations = append([]string(nil), request.QAProofRepair.Violations...)
 	}
 	if request.PlanScope != nil {
 		promptInput.PlanPhase = request.PlanScope.Name
@@ -1801,6 +1850,39 @@ func (c *sequentialController) subphases(phase pipeline.PhaseID, generation pipe
 	return subphases, nil
 }
 
+// qaFixSubphases returns the Development subphases one QA feedback iteration
+// re-runs. Fixes are confined to the first (implementation) subphase: the QA
+// attempt that follows every fix pass is the verification gate, so re-running
+// the later checking subphases per iteration would only duplicate it.
+func (c *sequentialController) qaFixSubphases(generation pipeline.DevelopmentSubphaseGeneration) ([]string, error) {
+	subphases, err := c.subphases(pipeline.PhaseDevelopment, generation)
+	if err != nil || len(subphases) == 0 {
+		return subphases, err
+	}
+	return subphases[:1], nil
+}
+
+// completedLegacyFixCursor reports whether a persisted QA fix cursor names a
+// subphase that no longer runs in the fix pipeline — either a legacy split
+// checking subphase from an older binary or a later subphase of the full
+// generated sequence. Both mean every remaining fix responsibility now belongs
+// to the QA re-run, so the fix stage is complete.
+func (c *sequentialController) completedLegacyFixCursor(cursor string, generation pipeline.DevelopmentSubphaseGeneration) bool {
+	if _, ok := pipeline.LegacyDevelopmentSubphaseAlias(cursor); ok {
+		return true
+	}
+	subphases, err := c.subphases(pipeline.PhaseDevelopment, generation)
+	if err != nil || len(subphases) < 2 {
+		return false
+	}
+	for _, subphase := range subphases[1:] {
+		if subphase == cursor {
+			return true
+		}
+	}
+	return false
+}
+
 // planStateRecorder is the optional capability for mirroring plan.md's phase
 // list and development completion marks into project state.
 type planStateRecorder interface {
@@ -2319,9 +2401,32 @@ func (c *sequentialController) reconcileFinishedQAFixCursor(
 		last.Status != state.StatusFinished {
 		return project, nil
 	}
-	subphases, err := c.subphases(pipeline.PhaseDevelopment, generation)
+	subphases, err := c.qaFixSubphases(generation)
 	if err != nil {
 		return state.ProjectState{}, fmt.Errorf("restore Development fix subphases: %w", err)
+	}
+	returnToQA := func() (state.ProjectState, error) {
+		durable, ok := c.state.(durableOrchestrationState)
+		if !ok {
+			return state.ProjectState{}, errors.New("phase state cannot return a completed QA fix to QA")
+		}
+		updated, updateErr := durable.UpdateQALoop(
+			ctx,
+			project.Slug,
+			project.QACompletedAttempts,
+			"qa",
+			project.QAFeedbackArtifactPaths,
+		)
+		if updateErr != nil {
+			return state.ProjectState{}, fmt.Errorf("persist QA cursor after final fix: %w", updateErr)
+		}
+		return updated, nil
+	}
+	if c.completedLegacyFixCursor(project.QAFixNextSubphase, generation) {
+		// The finished cursor names a checking subphase an older binary ran
+		// per fix pass; that responsibility now belongs to the QA re-run, so
+		// the fix stage is complete.
+		return returnToQA()
 	}
 	for index, subphase := range subphases {
 		if subphase != project.QAFixNextSubphase {
@@ -2338,21 +2443,7 @@ func (c *sequentialController) reconcileFinishedQAFixCursor(
 			}
 			return updated, nil
 		}
-		durable, ok := c.state.(durableOrchestrationState)
-		if !ok {
-			return state.ProjectState{}, errors.New("phase state cannot return a completed QA fix to QA")
-		}
-		updated, updateErr := durable.UpdateQALoop(
-			ctx,
-			project.Slug,
-			project.QACompletedAttempts,
-			"qa",
-			project.QAFeedbackArtifactPaths,
-		)
-		if updateErr != nil {
-			return state.ProjectState{}, fmt.Errorf("persist QA cursor after final fix: %w", updateErr)
-		}
-		return updated, nil
+		return returnToQA()
 	}
 	return state.ProjectState{}, fmt.Errorf("persisted QA fix subphase %q is not configured", project.QAFixNextSubphase)
 }
@@ -2428,6 +2519,15 @@ func resumeExecutionCursor(project state.ProjectState, plan pipeline.ExecutableP
 	return phase, subphase, false, nil
 }
 
+func developmentSubphaseConfigured(generated []pipeline.DevelopmentSubphase, id string) bool {
+	for _, subphase := range generated {
+		if string(subphase.ID()) == id {
+			return true
+		}
+	}
+	return false
+}
+
 func pipelineContains(plan pipeline.ExecutablePipeline, target pipeline.PhaseID) bool {
 	for _, executable := range plan.Phases() {
 		if executable.Phase().ID() == target {
@@ -2451,8 +2551,23 @@ func nextExecutionCursor(plan pipeline.ExecutablePipeline, generation pipeline.D
 			if currentSubphase == "" && len(generated) > 0 {
 				return string(current), string(generated[0].ID()), true, nil
 			}
+			effective := currentSubphase
+			if effective != "" && !developmentSubphaseConfigured(generated, effective) {
+				alias, ok := pipeline.LegacyDevelopmentSubphaseAlias(effective)
+				if ok && developmentSubphaseConfigured(generated, string(alias)) {
+					if pipeline.DevelopmentSubphaseID(effective) == pipeline.DevelopmentSubphaseTesting {
+						// A finished legacy testing subphase still owed its plan
+						// phase a review; the merged verification subphase owns
+						// that work now and runs next.
+						return string(current), string(alias), true, nil
+					}
+					// A finished legacy review subphase completed its plan
+					// phase's checking; advance as if verification finished.
+					effective = string(alias)
+				}
+			}
 			for subphaseIndex, subphase := range generated {
-				if string(subphase.ID()) != currentSubphase {
+				if string(subphase.ID()) != effective {
 					continue
 				}
 				if subphaseIndex+1 < len(generated) {
@@ -2460,14 +2575,8 @@ func nextExecutionCursor(plan pipeline.ExecutablePipeline, generation pipeline.D
 				}
 				break
 			}
-			if currentSubphase != "" {
-				found := false
-				for _, subphase := range generated {
-					found = found || string(subphase.ID()) == currentSubphase
-				}
-				if !found {
-					return "", "", false, fmt.Errorf("current Development subphase %q is not configured", currentSubphase)
-				}
+			if effective != "" && !developmentSubphaseConfigured(generated, effective) {
+				return "", "", false, fmt.Errorf("current Development subphase %q is not configured", currentSubphase)
 			}
 		} else if currentSubphase != "" {
 			return "", "", false, fmt.Errorf("phase %q cannot resume unknown subphase %q", current, currentSubphase)

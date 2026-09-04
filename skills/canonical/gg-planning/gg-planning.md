@@ -32,9 +32,10 @@ Use only the assigned brief, current repository/worktree state, and artifacts ex
    - **Simple**: one localized component with routine backward-compatible behavior and tests.
    - **Moderate**: multiple components, meaningful ordering, new public behavior, or a contained data/config migration.
    - **Complex**: cross-service work, breaking contracts, substantial migration or rollback concerns, security-critical changes, or several independently deliverable outcomes.
-3. Use advisory phase bands: Trivial exactly 1; Simple usually 1–2; Moderate usually 2–4; Complex usually 5–10. Only Trivial exactly one and the hard maximum of 10 phases are enforced. Do not create artificial splits to satisfy an advisory band.
-4. Choose the smallest cohesive design that satisfies the complete criteria (KISS/DRY/YAGNI). Never truncate, merge, rename, or drop scope to fit the hard maximum; consolidate cohesive work before writing the artifact.
-5. Record prerequisites and blockers; do not silently expand scope.
+3. Use advisory phase bands: Trivial exactly 1; Simple usually 1–2; Moderate usually 2–3; Complex usually 4–7. Only Trivial exactly one and the hard maximum of 10 phases are enforced. Do not create artificial splits to satisfy an advisory band.
+4. Keep the phase count economical: every phase is executed and independently verified by multiple isolated agent sessions, so each additional phase carries fixed execution cost. A phase boundary is justified only when the phase delivers an independently verifiable outcome. Fold setup, scaffolding, configuration, and wiring work into the first phase that consumes it — never emit a phase whose scope is only setup (a verification bootstrap phase the brief explicitly instructs you to add is the sole exception). When in doubt between more and fewer phases, choose fewer.
+5. Choose the smallest cohesive design that satisfies the complete criteria (KISS/DRY/YAGNI). Never truncate, merge, rename, or drop scope to fit the hard maximum; consolidate cohesive work before writing the artifact.
+6. Record prerequisites and blockers; do not silently expand scope.
 
 ## Planning Artifact Contract
 
@@ -49,7 +50,7 @@ gg_plan_phase_boundaries: [{"phase":"Phase 1: name","justification":"why this bo
 
 The body must contain `## Complexity assessment`, `- Complexity category: **<category>**`, `- Selected phase count: **<count>**`, a `Supporting evidence:` numbered list, one heading exactly matching each phase name (for example `## Phase 1: <name>`), and a `Boundary justification: <justification>` line under each heading. Category, evidence, phase names/order/count, and justifications must match frontmatter. Every phase receives one boundary explanation, including a one-phase Trivial plan.
 
-Benchmark the classification consistently: a README-only wording update is Trivial with exactly one phase; a localized backward-compatible bug fix is Simple and normally one to two phases; an ordered multi-component feature is Moderate and normally two to four phases; a cross-service or breaking migration is Complex and normally five to ten phases. These are examples, not an independent gg classifier.
+Benchmark the classification consistently: a README-only wording update is Trivial with exactly one phase; a localized backward-compatible bug fix is Simple and normally one to two phases; an ordered multi-component feature is Moderate and normally two to three phases; a cross-service or breaking migration is Complex and normally four to seven phases. These are examples, not an independent gg classifier.
 
 If an existing plan has completed phases, update only pending work and preserve completed phase names and scope exactly. Do not independently reclassify the work in a way that discards accepted completed work.
 

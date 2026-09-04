@@ -56,6 +56,11 @@ type PromptInput struct {
 	// verification contract, and Development implements the whole accepted
 	// scope in one pass instead of iterating plan phases.
 	PlanningDisabled bool
+	// QAProofViolations carries the exact protocol errors from a prior QA run
+	// of the same attempt whose proof artifact was missing or malformed. When
+	// non-empty, the QA invocation repairs the artifacts instead of redoing
+	// the verification they already evidence.
+	QAProofViolations []string
 }
 
 // PromptBuilder constructs a standalone prompt without consulting chat state.
@@ -179,6 +184,7 @@ func BuildPrompt(input PromptInput) (string, error) {
 	b.WriteString("---\n\n")
 	b.WriteString("Set `gg_disposition` to exactly `passed`, `failed`, or `blocked`: `passed` means the phase contract is satisfied; `failed` means actionable work remains and QA may request fixes; `blocked` means execution cannot proceed without external resolution. A zero process exit does not override this semantic disposition.\n")
 	b.WriteString("Verification you cannot perform in this environment — manual browser or UI interaction, human review, unavailable external systems — is NOT a failure: when every check that is executable here passes and no actionable work remains, report `passed` and list the outstanding human verification steps in the artifact for reviewers. Only report `failed` for work you could do but that remains undone or broken.\n")
+	b.WriteString("This run is non-interactive: no user is present and none can reply mid-phase. Never pause to wait for confirmation, and never report `blocked` because a repository or organization rule requires presenting work for explicit user approval or acceptance before committing or continuing — the pipeline's own downstream review phases are that approval gate, so treat such rules as satisfied and proceed.\n")
 	if input.Phase == pipeline.PhaseAcceptanceCriteria || input.Phase == pipeline.PhaseGrooming || input.Phase == pipeline.PhasePlanning {
 		b.WriteString("If you cannot proceed because a requirement is ambiguous or a decision only the project owner can make is missing, set `gg_disposition: blocked` and add `gg_open_questions: [\"<question>\", ...]` to the frontmatter — a single-line JSON array naming precisely what must be answered. gg will interview the owner with those questions and re-run. Use this only for genuine blockers, never for details you can reasonably decide yourself.\n")
 	}
@@ -188,6 +194,19 @@ func BuildPrompt(input PromptInput) (string, error) {
 		b.WriteString("gg_run_id: ")
 		writeQuotedValue(&b, input.RunID)
 		b.WriteString("\n---\n")
+		if len(input.QAProofViolations) > 0 {
+			b.WriteString("\n## QA proof repair\n")
+			b.WriteString("A previous QA run for this same attempt completed its verification but left `" + proof.ArtifactName + "` missing or protocol-invalid; the worktree still contains that run's QA report and any partial proof. Repair the artifacts instead of redoing the verification: read the existing proof and QA report, keep every validation and its recorded evidence, and fix ONLY the protocol violations listed below. Re-run a command only when its required evidence (the exact command and its observed result) is genuinely absent from the worktree artifacts. Rewrite `" + proof.ArtifactName + "` with the exact run ID shown above so it satisfies the deterministic PROOF.md format from the phase contract.\n")
+			b.WriteString("Exact proof validation errors:\n")
+			for _, violation := range input.QAProofViolations {
+				if strings.TrimSpace(violation) == "" {
+					continue
+				}
+				b.WriteString("- ")
+				writeQuotedValue(&b, violation)
+				b.WriteByte('\n')
+			}
+		}
 	}
 	if prePRVerificationPhase(input.Phase) {
 		b.WriteString("\n## Pre-PR verification boundary\n")
@@ -195,7 +214,7 @@ func BuildPrompt(input PromptInput) (string, error) {
 		b.WriteString("A check may be deferred only when repository evidence shows that it requires remote credentials or an external endpoint; an ordinary local setup or test failure is a failure and must not be reclassified as deferred. If a check is deferred, record its location, name, flow and expected behavior, exact remote-only reason, repository evidence, and CI/manual run instructions without claiming that it passed. A valid deferral does not block the phase, even when PR or CI is disabled.\n")
 		switch input.Phase {
 		case pipeline.PhaseDevelopment:
-			b.WriteString("Development Testing owns focused tests for this plan phase: add and run them, plus every other locally runnable check relevant to the implementation.\n")
+			b.WriteString("Development Verification owns focused tests for this plan phase: add and run them, plus every other locally runnable check relevant to the implementation.\n")
 		case pipeline.PhaseQA:
 			b.WriteString("QA independently validates the acceptance criteria and records every exercised validation in PROOF.md.\n")
 		case pipeline.PhaseTestDocument:
@@ -204,7 +223,9 @@ func BuildPrompt(input PromptInput) (string, error) {
 			b.WriteString("Build checker owns the declared build, lint, format, static-analysis, and packaging gates.\n")
 		}
 	}
-	if input.Phase == pipeline.PhaseDevelopment && input.Subphase == string(pipeline.DevelopmentSubphaseReview) && input.SkippedTestingEvidence != nil {
+	if input.Phase == pipeline.PhaseDevelopment &&
+		(input.Subphase == string(pipeline.DevelopmentSubphaseReview) || input.Subphase == string(pipeline.DevelopmentSubphaseVerification)) &&
+		input.SkippedTestingEvidence != nil {
 		evidence := input.SkippedTestingEvidence
 		b.WriteString("\n## Explicitly waived Development Testing evidence\n")
 		b.WriteString("The user explicitly confirmed skipping this exact failed Testing occurrence. Inspect the retained failure and fix any concrete defect it reveals, but do not fail Review solely because the waived check remains failed or was unavailable.\n")
@@ -264,10 +285,11 @@ func BuildPrompt(input PromptInput) (string, error) {
 		writeVerificationContractInstruction(&b, "Planning", "plan", input.RepairExistingVerification)
 		b.WriteString("\n## Plan tracking instruction\n")
 		b.WriteString("Classify the complete requested work before choosing phases. Use the highest applicable signal: Trivial is one cohesive localized outcome with no migration, public-contract change, or dependency ordering; Simple is one localized component with routine backward-compatible behavior and tests; Moderate means multiple components, meaningful ordering, new public behavior, or a contained data/config migration; Complex means cross-service work, breaking contracts, substantial migration or rollback concerns, security-critical changes, or several independently deliverable outcomes.\n")
-		b.WriteString("Use advisory phase bands of exactly 1 for Trivial, usually 1–2 for Simple, usually 2–4 for Moderate, and usually 5–10 for Complex. Only Trivial exactly one and the hard maximum of 10 phases are enforced; do not create artificial splits to satisfy an advisory band. Preserve the complete scope.\n")
+		b.WriteString("Use advisory phase bands of exactly 1 for Trivial, usually 1–2 for Simple, usually 2–3 for Moderate, and usually 4–7 for Complex. Only Trivial exactly one and the hard maximum of 10 phases are enforced; do not create artificial splits to satisfy an advisory band. Preserve the complete scope.\n")
+		b.WriteString("Keep the phase count economical: every phase is executed and independently verified by multiple isolated agent sessions, so each additional phase carries fixed execution cost. A phase boundary is justified only when the phase delivers an independently verifiable outcome. Fold setup, scaffolding, configuration, and wiring work into the first phase that consumes it — never emit a phase whose scope is only setup (a verification bootstrap phase this prompt explicitly instructs you to add is the sole exception). When in doubt between more and fewer phases, choose fewer.\n")
 		b.WriteString("The plan artifact frontmatter (between the `---` markers, alongside gg_run_id) MUST contain these single-line JSON-compatible YAML fields: `gg_plan_complexity`, `gg_plan_complexity_evidence`, `gg_plan_phases`, and `gg_plan_phase_boundaries`. `gg_plan_phases` names every implementation phase in execution order. `gg_plan_phase_boundaries` is an ordered array of objects with `phase` and `justification`, one for every phase.\n")
 		b.WriteString("Mirror those fields in the fixed body structure: `## Complexity assessment`, `- Complexity category: **<category>**`, `- Selected phase count: **<count>**`, a `Supporting evidence:` numbered list, one heading exactly matching each phase name (for example `## Phase 1: <name>`), and a `Boundary justification: <justification>` line under each heading. The names, order, count, evidence, category, and justifications must match frontmatter exactly.\n")
-		b.WriteString("Representative benchmark: a README-only wording update is Trivial with exactly one phase; a localized backward-compatible bug fix is Simple and normally one to two phases; an ordered multi-component feature is Moderate and normally two to four phases; a cross-service or breaking migration is Complex and normally five to ten phases.\n")
+		b.WriteString("Representative benchmark: a README-only wording update is Trivial with exactly one phase; a localized backward-compatible bug fix is Simple and normally one to two phases; an ordered multi-component feature is Moderate and normally two to three phases; a cross-service or breaking migration is Complex and normally four to seven phases.\n")
 		b.WriteString("Never truncate, merge, rename, or drop requested scope to fit the limit. If a plan would exceed ten phases, consolidate cohesive work while preserving the complete outcome before writing the artifact.\n")
 		attempt := input.PlanningAttempt
 		if attempt <= 0 {
@@ -309,13 +331,15 @@ func BuildPrompt(input PromptInput) (string, error) {
 		if input.Project.GitDisabled {
 			b.WriteString("Implement and test only this phase in the stated folder. The folder is NOT a git repository: do not run git commands, do not initialize a repository, and do not create commits — leave your changes as plain files.\n")
 		} else {
-			b.WriteString("Implement and test only this phase in the stated worktree. Before finishing you MUST stage and commit every change you made (`git add -A`, then commit); a development run that leaves the worktree uncommitted fails this phase. Do not create signed commits; every commit must use exactly `git -c commit.gpgsign=false commit -m \"<message>\"` and must remain in this worktree.\n")
+			b.WriteString("Implement and test only this phase in the stated worktree. Before finishing you MUST stage and commit every change you made (`git add -A`, then commit); commit without asking anyone — repository approval-before-commit rules are satisfied by the pipeline's review phases. Do not create signed commits; every commit must use exactly `git -c commit.gpgsign=false commit -m \"<message>\"` and must remain in this worktree. If a commit genuinely cannot be created, do not stop or report `blocked` for that reason: leave the changes in the worktree, record why in the artifact, and finish — the pipeline preserves and commits leftover changes.\n")
 		}
 		if input.PlanPhase != "" {
 			fmt.Fprintf(&b, "\n## Plan phase scope\nThis run is confined to plan phase %d of %d from the plan artifact: %s.\n", input.PlanPhaseIndex, input.PlanPhaseTotal, strconv.Quote(input.PlanPhase))
 			switch input.Subphase {
 			case string(pipeline.DevelopmentSubphaseImplementation):
-				b.WriteString("Implement ONLY this plan phase, including its unit tests, and make those tests pass. Do NOT start work that belongs to later plan phases. Earlier plan phases are already implemented and reviewed — build on them and do not break their tests.\n")
+				b.WriteString("Implement ONLY this plan phase, including its unit tests, and make those tests pass. Do NOT start work that belongs to later plan phases. Earlier plan phases are already implemented and verified — build on them and do not break their tests.\n")
+			case string(pipeline.DevelopmentSubphaseVerification):
+				b.WriteString("Verify this plan phase's implementation with fresh eyes. First write and run tests that thoroughly cover its functionality — edge cases, failure paths, and its integration with the previously completed plan phases — then review the changes for correctness, edge cases, and integration, and fix every defect you find. The full existing test suite must also pass; fix regressions this phase introduced. Do not expand scope into later plan phases.\n")
 			case string(pipeline.DevelopmentSubphaseTesting):
 				b.WriteString("Write and run tests that thoroughly cover this plan phase's functionality — edge cases, failure paths, and its integration with the previously completed plan phases. The full existing test suite must also pass; fix regressions this phase introduced.\n")
 			case string(pipeline.DevelopmentSubphaseReview):
@@ -325,10 +349,12 @@ func BuildPrompt(input PromptInput) (string, error) {
 			}
 		} else if input.PlanningDisabled {
 			// No plan artifact exists, so this single pass covers the whole
-			// accepted scope. Testing and Review still run as subphases.
+			// accepted scope. Verification still runs as a subphase.
 			switch input.Subphase {
 			case string(pipeline.DevelopmentSubphaseImplementation):
 				b.WriteString("Planning is disabled for this run, so there is no plan artifact. Implement the COMPLETE accepted scope from the acceptance criteria above in this single pass, including its unit tests, and make those tests pass.\n")
+			case string(pipeline.DevelopmentSubphaseVerification):
+				b.WriteString("Verify the complete implemented scope with fresh eyes. First write and run tests that thoroughly cover it — edge cases, failure paths, and the integration between the parts built — then review every change in this worktree against the acceptance criteria above and fix every defect you find. The full existing test suite must also pass; fix every regression this work introduced.\n")
 			case string(pipeline.DevelopmentSubphaseTesting):
 				b.WriteString("Write and run tests that thoroughly cover the complete implemented scope — edge cases, failure paths, and the integration between the parts you built. The full existing test suite must also pass; fix every regression this work introduced.\n")
 			case string(pipeline.DevelopmentSubphaseReview):
@@ -416,6 +442,8 @@ func phaseSkillName(phase pipeline.PhaseID) string {
 func phaseMethodologySkills(phase pipeline.PhaseID, subphase string) []string {
 	if phase == pipeline.PhaseDevelopment {
 		switch subphase {
+		case string(pipeline.DevelopmentSubphaseVerification):
+			return []string{"gg-test", "gg-review"}
 		case string(pipeline.DevelopmentSubphaseTesting):
 			return []string{"gg-test"}
 		case string(pipeline.DevelopmentSubphaseReview):
