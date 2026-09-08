@@ -795,10 +795,28 @@ func TestWriteStatusRendersVerificationEvidenceAndNextAction(t *testing.T) {
 	if err := WriteStatus(context.Background(), &output, project, nil, WithColor(false)); err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"Verification:", "warning:", "check=tests", "command=go test ./...", "identity=pkg/TestLegacy", "reason=known failure", "classification=flaky", "attempts=2/3", "log=.gg/logs/tests.log", "Next action: continue; flaky warning retained"} {
+	for _, want := range []string{"Verification:", "warning: tests — pkg/TestLegacy — known failure (flaky) — attempt 2/3", "Logs: .gg/logs", "Next action: continue; flaky warning retained"} {
 		if !strings.Contains(output.String(), want) {
 			t.Fatalf("TUI status missing %q:\n%s", want, output.String())
 		}
+	}
+}
+
+func TestWriteStatusOmitsSentinelCommandIdentityFromVerificationLines(t *testing.T) {
+	snapshot := testSnapshot(t)
+	project := testProject(snapshot, state.StatusFinished, string(pipeline.PhaseTestDocument), "", nil)
+	project.Verification = &state.VerificationState{
+		Warnings: []state.VerificationFinding{{CheckName: "proto-breaking", Identity: "command", Reason: "command reported failure", Classification: "unchanged_baseline"}},
+	}
+	var output bytes.Buffer
+	if err := WriteStatus(context.Background(), &output, project, nil, WithColor(false)); err != nil {
+		t.Fatal(err)
+	}
+	if want := "warning: proto-breaking — command reported failure (unchanged baseline)"; !strings.Contains(output.String(), want) {
+		t.Fatalf("TUI status missing %q:\n%s", want, output.String())
+	}
+	if strings.Contains(output.String(), "— command —") {
+		t.Fatalf("TUI status did not suppress the sentinel identity:\n%s", output.String())
 	}
 }
 

@@ -24,6 +24,22 @@ func TestVerificationDisplayJoinsCommandEvidenceAndRetainsWarnings(t *testing.T)
 	}
 }
 
+func TestVerificationDisplayShowsRetainedBaselineFailureOnceAsWarning(t *testing.T) {
+	finding := VerificationFinding{CheckName: "tests", Identity: "command", Reason: "command reported failure", Classification: "unchanged_baseline"}
+	project := ProjectState{Verification: &VerificationState{
+		CurrentFindings: []VerificationFinding{finding},
+		Warnings:        []VerificationFinding{finding},
+	}}
+
+	findings := VerificationDisplay(project)
+	if len(findings) != 1 {
+		t.Fatalf("display findings = %#v, want the retained warning only", findings)
+	}
+	if !findings[0].Warning || findings[0].Classification != "unchanged_baseline" {
+		t.Fatalf("display finding = %#v, want the warning projection", findings[0])
+	}
+}
+
 func TestVerificationIsPausedOnlyForStrictVerificationFailures(t *testing.T) {
 	for _, test := range []struct {
 		name     string

@@ -1326,6 +1326,7 @@ type fakeDevelopmentCommits struct {
 	head                  string
 	headErr               error
 	inspectChanges        []git.DevelopmentWorktreeChange
+	inspectOnce           bool
 	inspectErr            error
 	inspectCalls          int
 	verifyErr             error
@@ -1339,6 +1340,9 @@ type fakeDevelopmentCommits struct {
 
 func (f *fakeDevelopmentCommits) InspectDevelopmentWorktree(_ context.Context, _ string) ([]git.DevelopmentWorktreeChange, error) {
 	f.inspectCalls++
+	if f.inspectOnce && f.inspectCalls > 1 {
+		return nil, f.inspectErr
+	}
 	return append([]git.DevelopmentWorktreeChange(nil), f.inspectChanges...), f.inspectErr
 }
 
@@ -1460,6 +1464,75 @@ func TestExecutePausesBeforeDevelopmentWhenWorktreeHasPreExistingChanges(t *test
 	last := store.calls[len(store.calls)-1]
 	if last.phase != string(pipeline.PhaseDevelopment) || last.status != state.StatusStopped {
 		t.Fatalf("last persisted call = %#v, want stopped Development ownership pause", last)
+	}
+}
+
+func TestExecuteAdoptsInterruptedDevelopmentWorkBeforeRedispatch(t *testing.T) {
+	commits := &fakeDevelopmentCommits{
+		head:           "base",
+		inspectOnce:    true,
+		inspectChanges: []git.DevelopmentWorktreeChange{{Status: "??", Path: "docs/matrix.md"}},
+	}
+	runner := &fakeSeqRunner{}
+	req := request(t, resolvedPipeline(t, config.PhaseQA))
+	// The real interrupted shape: a dispatch checkpoint that never finished,
+	// buried under the stop records earlier resume attempts persisted.
+	req.Project.PhaseHistory = []state.PhaseRecord{
+		{Phase: string(pipeline.PhaseDevelopment), Subphase: "implementation", Status: state.StatusFailed, Outcome: &state.ExecutionOutcome{DevelopmentBaseCommit: "base"}},
+		{Phase: string(pipeline.PhaseDevelopment), Subphase: "implementation", Status: state.StatusStopped},
+		{Phase: string(pipeline.PhaseDevelopment), Subphase: "implementation", Status: state.StatusStopped},
+	}
+	if _, err := orchestrator.NewController(
+		orchestrator.WithRunner(runner),
+		orchestrator.WithPhaseState(&fakeState{}),
+		orchestrator.WithPromptBuilder(fakePrompt{}),
+		orchestrator.WithDevelopmentCommitVerifier(commits),
+	).Execute(context.Background(), req); err != nil {
+		t.Fatalf("execute after adoption = %v, want the pipeline to run through", err)
+	}
+	if len(commits.autoCommitMsgs) == 0 || commits.autoCommitMsgs[0] != "gg: recover interrupted development/implementation" {
+		t.Fatalf("auto-commit messages = %v, want a recovery commit before re-dispatch", commits.autoCommitMsgs)
+	}
+	if len(runner.phases) != 6 {
+		t.Fatalf("dispatches = %v, want all phases after adoption", runner.phases)
+	}
+}
+
+func TestExecuteDoesNotAdoptWorktreeChangesWithoutInterruptedCheckpoint(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		history []state.PhaseRecord
+	}{
+		{name: "finished subphase left the checkpoint", history: []state.PhaseRecord{
+			{Phase: string(pipeline.PhaseDevelopment), Subphase: "implementation", Status: state.StatusFinished, Outcome: &state.ExecutionOutcome{DevelopmentBaseCommit: "base"}},
+		}},
+		{name: "checkpoint belongs to a different subphase", history: []state.PhaseRecord{
+			{Phase: string(pipeline.PhaseDevelopment), Subphase: "verification", Status: state.StatusFailed, Outcome: &state.ExecutionOutcome{DevelopmentBaseCommit: "base"}},
+		}},
+		{name: "interrupted record has no checkpoint", history: []state.PhaseRecord{
+			{Phase: string(pipeline.PhaseDevelopment), Subphase: "implementation", Status: state.StatusStopped},
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			commits := &fakeDevelopmentCommits{
+				head:           "base",
+				inspectChanges: []git.DevelopmentWorktreeChange{{Status: "??", Path: "manual-edit.go"}},
+			}
+			req := request(t, resolvedPipeline(t, config.PhaseQA))
+			req.Project.PhaseHistory = test.history
+			_, err := orchestrator.NewController(
+				orchestrator.WithRunner(&fakeSeqRunner{}),
+				orchestrator.WithPhaseState(&fakeState{}),
+				orchestrator.WithPromptBuilder(fakePrompt{}),
+				orchestrator.WithDevelopmentCommitVerifier(commits),
+			).Execute(context.Background(), req)
+			if err == nil || !strings.Contains(err.Error(), "pre-existing changes") {
+				t.Fatalf("error = %v, want the pre-existing changes pause", err)
+			}
+			if len(commits.autoCommitMsgs) != 0 {
+				t.Fatalf("auto-commit messages = %v, want no adoption", commits.autoCommitMsgs)
+			}
+		})
 	}
 }
 

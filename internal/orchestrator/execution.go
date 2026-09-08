@@ -1326,16 +1326,27 @@ func (c *sequentialController) executePhase(ctx context.Context, request Request
 				return c.finishFailedPhase(context.Background(), request, phase, subphase, runResult, fmt.Errorf("inspect Development worktree ownership before %q/%q: %w", phase, subphase, inspectErr), iteration, feedback)
 			}
 			if len(changes) > 0 {
-				paths := make([]string, 0, len(changes))
-				for _, change := range changes {
-					path := change.Path
-					if change.OriginalPath != "" {
-						path = change.OriginalPath + " -> " + path
+				// A persisted ownership checkpoint for this subphase proves it
+				// previously dispatched from a clean worktree, so uncommitted
+				// changes can only be the interrupted agent's work: adopt them
+				// instead of dead-ending every resume on the guard below.
+				if interruptedOwnershipCheckpoint(request.Project.PhaseHistory, subphase) != "" {
+					if commitErr := c.developmentCommits.AutoCommitUncommittedChanges(ctx, request.Project.WorktreePath, fmt.Sprintf("gg: recover interrupted %s/%s", phase, subphase)); commitErr != nil {
+						runResult = agent.RunResult{Phase: phase, Subphase: subphase, Status: state.StatusStopped}
+						return c.finishFailedPhase(context.Background(), request, phase, subphase, runResult, fmt.Errorf("recover interrupted Development work before dispatch: %w", commitErr), iteration, feedback)
 					}
-					paths = append(paths, path)
+				} else {
+					paths := make([]string, 0, len(changes))
+					for _, change := range changes {
+						path := change.Path
+						if change.OriginalPath != "" {
+							path = change.OriginalPath + " -> " + path
+						}
+						paths = append(paths, path)
+					}
+					runResult = agent.RunResult{Phase: phase, Subphase: subphase, Status: state.StatusStopped}
+					return c.finishFailedPhase(context.Background(), request, phase, subphase, runResult, fmt.Errorf("Development worktree has pre-existing changes; preserve and resolve before dispatch: %s", strings.Join(paths, ", ")), iteration, feedback)
 				}
-				runResult = agent.RunResult{Phase: phase, Subphase: subphase, Status: state.StatusStopped}
-				return c.finishFailedPhase(context.Background(), request, phase, subphase, runResult, fmt.Errorf("Development worktree has pre-existing changes; preserve and resolve before dispatch: %s", strings.Join(paths, ", ")), iteration, feedback)
 			}
 			previousHead, runErr = c.developmentCommits.HeadCommit(ctx, request.Project.WorktreePath)
 			if runErr != nil {
@@ -2372,6 +2383,32 @@ func (c *sequentialController) verifyInterruptedDevelopment(ctx context.Context,
 		)
 	}
 	return nil
+}
+
+// interruptedOwnershipCheckpoint returns the base commit persisted by the most
+// recent Development dispatch when that dispatch targeted the given subphase
+// and did not finish. Every dispatch records its checkpoint only after the
+// clean-worktree guard passes, so a surviving interrupted checkpoint proves
+// any uncommitted changes were written after dispatch — by the agent.
+func interruptedOwnershipCheckpoint(history []state.PhaseRecord, subphase string) string {
+	for index := len(history) - 1; index >= 0; index-- {
+		record := history[index]
+		if record.Phase != string(pipeline.PhaseDevelopment) {
+			return ""
+		}
+		if record.Outcome == nil || record.Outcome.DevelopmentBaseCommit == "" {
+			continue
+		}
+		if record.Subphase != subphase {
+			return ""
+		}
+		switch record.Status {
+		case state.StatusRunning, state.StatusFailed, state.StatusStopped:
+			return record.Outcome.DevelopmentBaseCommit
+		}
+		return ""
+	}
+	return ""
 }
 
 func (c *sequentialController) persistDevelopmentOwnership(ctx context.Context, slug string, phase pipeline.PhaseID, subphase, baseCommit string) error {

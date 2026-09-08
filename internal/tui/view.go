@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 
 	"github.com/VedranJanjetovic/gg/internal/pipeline"
@@ -193,15 +194,34 @@ func verificationLines(project state.ProjectState, width int) []string {
 		return nil
 	}
 	lines := []string{"Verification:"}
+	logDir := ""
 	for _, finding := range findings {
 		label := "finding"
 		if finding.Warning {
 			label = "warning"
 		}
-		part := fmt.Sprintf("%s: check=%s command=%s identity=%s reason=%s classification=%s attempts=%d/%d log=%s", label, displayVerificationValue(finding.CheckName), displayVerificationValue(finding.Command), displayVerificationValue(finding.Identity), displayVerificationValue(finding.Reason), displayVerificationValue(finding.Classification), finding.Attempts, finding.MaxAttempts, displayVerificationValue(finding.LogPath))
+		part := label + ": " + displayVerificationValue(finding.CheckName)
+		// The sentinel identity "command" marks a whole-command failure and adds
+		// nothing beyond the reason, so only per-failure identities are shown.
+		if identity := strings.TrimSpace(finding.Identity); identity != "" && identity != "command" {
+			part += " — " + identity
+		}
+		part += " — " + displayVerificationValue(finding.Reason)
+		if classification := strings.TrimSpace(finding.Classification); classification != "" {
+			part += " (" + strings.ReplaceAll(classification, "_", " ") + ")"
+		}
+		if finding.Attempts > 0 {
+			part += fmt.Sprintf(" — attempt %d/%d", finding.Attempts, finding.MaxAttempts)
+		}
 		for _, wrapped := range strings.Split(wrapToWidth(part, width-4), "\n") {
 			lines = append(lines, wrapped)
 		}
+		if logDir == "" && strings.TrimSpace(finding.LogPath) != "" {
+			logDir = filepath.Dir(finding.LogPath)
+		}
+	}
+	if logDir != "" {
+		lines = append(lines, "Logs: "+logDir)
 	}
 	if project.Verification != nil && strings.TrimSpace(project.Verification.NextAction) != "" {
 		lines = append(lines, "Next action: "+project.Verification.NextAction)

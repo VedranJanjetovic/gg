@@ -72,7 +72,18 @@ func VerificationDisplay(project ProjectState) []VerificationDisplayFinding {
 		})
 		displayedChecks[finding.CheckName] = struct{}{}
 	}
+	// An unchanged-baseline failure is persisted in both CurrentFindings and
+	// Warnings; display it once, as the retained warning, so status output does
+	// not repeat the same evidence under two labels.
+	type findingKey struct{ check, identity, reason, classification string }
+	retainedWarnings := make(map[findingKey]struct{}, len(verification.Warnings))
+	for _, warning := range verification.Warnings {
+		retainedWarnings[findingKey{warning.CheckName, warning.Identity, warning.Reason, warning.Classification}] = struct{}{}
+	}
 	for _, finding := range verification.CurrentFindings {
+		if _, retained := retainedWarnings[findingKey{finding.CheckName, finding.Identity, finding.Reason, finding.Classification}]; retained {
+			continue
+		}
 		appendFinding(finding, false)
 	}
 	for _, finding := range verification.Warnings {
