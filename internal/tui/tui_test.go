@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -786,7 +787,7 @@ func TestWriteStatusRendersVerificationEvidenceAndNextAction(t *testing.T) {
 	snapshot := testSnapshot(t)
 	project := testProject(snapshot, state.StatusFinished, string(pipeline.PhaseTestDocument), "", nil)
 	project.Verification = &state.VerificationState{
-		CurrentResults:      []state.VerificationCommandResult{{CheckName: "tests", Command: "go", Args: []string{"test", "./..."}, LogPath: ".gg/logs/tests.log"}},
+		CurrentResults:      []state.VerificationCommandResult{{CheckName: "tests", Command: "go", Args: []string{"test", "./..."}, LogPath: filepath.Join(".gg", "logs", "tests.log")}},
 		Warnings:            []state.VerificationFinding{{CheckName: "tests", Identity: "pkg/TestLegacy", Reason: "known failure", Classification: "flaky"}},
 		RemediationAttempts: 2,
 		NextAction:          "continue; flaky warning retained",
@@ -795,7 +796,7 @@ func TestWriteStatusRendersVerificationEvidenceAndNextAction(t *testing.T) {
 	if err := WriteStatus(context.Background(), &output, project, nil, WithColor(false)); err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"Verification:", "warning: tests — pkg/TestLegacy — known failure (flaky) — attempt 2/3", "Logs: .gg/logs", "Next action: continue; flaky warning retained"} {
+	for _, want := range []string{"Verification:", "warning: tests — pkg/TestLegacy — known failure (flaky) — attempt 2/3", "Logs: " + filepath.Join(".gg", "logs"), "Next action: continue; flaky warning retained"} {
 		if !strings.Contains(output.String(), want) {
 			t.Fatalf("TUI status missing %q:\n%s", want, output.String())
 		}
