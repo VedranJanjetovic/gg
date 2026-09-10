@@ -1111,6 +1111,36 @@ func (s *LifecycleService) CloseRun(ctx context.Context, slug string, target Lif
 	})
 }
 
+// CloseRunPaused closes an active run as stopped and records why it parked so
+// status surfaces can present the run as paused with a concrete next action.
+func (s *LifecycleService) CloseRunPaused(ctx context.Context, slug, reason, nextAction string) error {
+	if err := checkContext(ctx); err != nil {
+		return err
+	}
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		return errors.New("pausing a run requires a non-empty reason")
+	}
+	return s.withProjectLock(ctx, slug, func(locked context.Context) error {
+		current, err := s.store.Load(locked, slug)
+		if err != nil {
+			return err
+		}
+		now := s.clock.Now()
+		if current.Status != StatusStopped {
+			current.Status, current.StatusChangedAt = StatusStopped, now
+		}
+		current.Pause = &PauseRecord{Reason: reason, NextAction: strings.TrimSpace(nextAction), At: now}
+		current.UpdatedAt = now
+		current.RunReservationToken = ""
+		current.DispatchClaimRunID = ""
+		current.StopRequested = false
+		current.StopRequestID = ""
+		current.ActiveRunID = ""
+		return s.store.Save(locked, current)
+	})
+}
+
 // ConfigureOrchestration persists run-level limits before any phase dispatch.
 // Existing QA progress is retained so resume cannot reset an exhausted budget.
 func (s *LifecycleService) ConfigureOrchestration(ctx context.Context, slug string, maxQAAttempts int) error {
@@ -1246,6 +1276,29 @@ func (s *LifecycleService) RequireReplan(ctx context.Context, slug, phase string
 }
 
 // ResetQALoop clears completed-loop state after a successful QA disposition.
+// SetQAFindingStrikes replaces the durable recurrence counts of the current
+// QA loop's structured findings.
+func (s *LifecycleService) SetQAFindingStrikes(ctx context.Context, slug string, strikes []QAFindingStrike) (ProjectState, error) {
+	if err := checkContext(ctx); err != nil {
+		return ProjectState{}, err
+	}
+	var result ProjectState
+	err := s.withProjectLock(ctx, slug, func(locked context.Context) error {
+		project, err := s.store.Load(locked, slug)
+		if err != nil {
+			return err
+		}
+		project.QAFindingStrikes = append([]QAFindingStrike(nil), strikes...)
+		project.UpdatedAt = s.clock.Now()
+		if err := s.store.Save(locked, project); err != nil {
+			return err
+		}
+		result = project
+		return nil
+	})
+	return result, err
+}
+
 func (s *LifecycleService) ResetQALoop(ctx context.Context, slug string) (ProjectState, error) {
 	var result ProjectState
 	err := s.withProjectLock(ctx, slug, func(locked context.Context) error {
@@ -1257,6 +1310,7 @@ func (s *LifecycleService) ResetQALoop(ctx context.Context, slug string) (Projec
 		project.QALoopStage = ""
 		project.QAFeedbackArtifactPaths = nil
 		project.QAFixNextSubphase = ""
+		project.QAFindingStrikes = nil
 		project.UpdatedAt = s.clock.Now()
 		if err := s.store.Save(locked, project); err != nil {
 			return err
@@ -1394,6 +1448,10 @@ func (s *LifecycleService) Transition(ctx context.Context, slug string, target L
 			state.StopRequested = false
 			state.StopRequestID = ""
 			state.ActiveRunID = ""
+		} else {
+			// A run that starts again is no longer parked; the pause record
+			// must not outlive the decision it asked for.
+			state.Pause = nil
 		}
 		if err := s.store.Save(locked, state); err != nil {
 			return err

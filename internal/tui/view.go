@@ -32,7 +32,10 @@ func (m Model) renderBody(interactive bool) string {
 	var output strings.Builder
 	skipAvailable, _ := m.skipTarget()
 	fmt.Fprintf(&output, "%s\n", m.styles.title.Render("gg · "+m.project.Name))
-	fmt.Fprintf(&output, "Status: %s\n\n", projectStatus(m.project.Status))
+	fmt.Fprintf(&output, "Status: %s\n\n", projectStatus(m.project))
+	for _, line := range pauseLines(m.project) {
+		fmt.Fprintf(&output, "  %s\n", line)
+	}
 	for _, line := range verificationLines(m.project, width) {
 		fmt.Fprintf(&output, "  %s\n", line)
 	}
@@ -43,6 +46,9 @@ func (m Model) renderBody(interactive bool) string {
 		display := phase
 		if phase.ID == string(pipeline.PhaseDevelopment) {
 			display.Name = m.developmentName(phase.Name)
+		}
+		if phase.ID == string(pipeline.PhaseQA) {
+			display.Name += qaLoopSuffix(m.project)
 		}
 		fmt.Fprintf(&output, "  %s\n", m.phaseLine(display, interactive))
 		for _, line := range m.failureLines(phase, phase.ID, "", width) {
@@ -186,6 +192,31 @@ func (m Model) legendEntries(skipAvailable bool) []legendEntry {
 		}
 	}
 	return append(entries, legendEntry{key: "q", label: "quit"})
+}
+
+// qaLoopSuffix annotates the QA phase with the consumed attempt budget and
+// the number of structured findings still open in the current loop.
+func qaLoopSuffix(project state.ProjectState) string {
+	if project.QACompletedAttempts == 0 {
+		return ""
+	}
+	suffix := fmt.Sprintf(" · attempt %d/%d", project.QACompletedAttempts, project.MaxQAAttempts)
+	if open := len(project.QAFindingStrikes); open > 0 {
+		suffix += fmt.Sprintf(" · %d finding(s)", open)
+	}
+	return suffix
+}
+
+// pauseLines surfaces why a parked run stopped and what unblocks it.
+func pauseLines(project state.ProjectState) []string {
+	if project.Pause == nil {
+		return nil
+	}
+	lines := []string{"paused: " + project.Pause.Reason}
+	if strings.TrimSpace(project.Pause.NextAction) != "" {
+		lines = append(lines, "next action: "+project.Pause.NextAction)
+	}
+	return lines
 }
 
 func verificationLines(project state.ProjectState, width int) []string {
@@ -453,12 +484,15 @@ func remainingLabel(remaining int) string {
 	return fmt.Sprintf("%d phases remaining", remaining)
 }
 
-func projectStatus(status state.LifecycleStatus) string {
-	if status == state.StatusFinished {
+func projectStatus(project state.ProjectState) string {
+	if project.Status == state.StatusStopped && (project.Pause != nil || state.VerificationIsPaused(project)) {
+		return "paused"
+	}
+	if project.Status == state.StatusFinished {
 		return string(PhaseSucceeded)
 	}
-	if status == state.StatusTerminated {
+	if project.Status == state.StatusTerminated {
 		return string(PhaseFailed)
 	}
-	return string(status)
+	return string(project.Status)
 }

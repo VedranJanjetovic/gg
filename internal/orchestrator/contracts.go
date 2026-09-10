@@ -149,6 +149,9 @@ const (
 	EventPhaseRetried     EventType = "phase_retried"
 	EventProjectStopped   EventType = "project_stopped"
 	EventProjectFinished  EventType = "project_finished"
+	// EventDispositionOverridden records that a phase's failed self-verdict
+	// was contradicted by a green verification boundary and the run continued.
+	EventDispositionOverridden EventType = "disposition_overridden"
 )
 
 // Event records an orchestrator lifecycle transition for TUI and persistence

@@ -33,25 +33,10 @@ type verificationBootstrapState interface {
 // would silently report an unverified run as verified.
 var errVerificationServiceMissing = errors.New("project declares a verification contract but the controller has no verification service")
 
-type verificationPauseError struct{ cause error }
-
-func (e *verificationPauseError) Error() string {
-	if e == nil || e.cause == nil {
-		return "verification requires external resolution"
-	}
-	return e.cause.Error()
-}
-
-func (e *verificationPauseError) Unwrap() error {
-	if e == nil {
-		return nil
-	}
-	return e.cause
-}
-
-func isVerificationPause(err error) bool {
-	var pause *verificationPauseError
-	return errors.As(err, &pause)
+// verificationPause wraps a boundary condition in the general pauseError so
+// closeFailedRun parks the run with the verification repair guidance.
+func verificationPause(reason, nextAction string, cause error) *pauseError {
+	return &pauseError{reason: reason, nextAction: nextAction, cause: cause}
 }
 
 // verificationBoundaryError keeps the structured report available to the
@@ -100,13 +85,13 @@ func (c *sequentialController) ensureVerificationBaseline(ctx context.Context, r
 	if runErr != nil {
 		if hasUnavailableOrUnclassifiable(report, steps, quarantined) {
 			_, persistErr := persist.RecordVerificationResultReport(ctx, request.Project.Slug, commandResults(report), nil, nil, "parent-preflight", 0, "make every planned verification step executable, then resume")
-			return &verificationPauseError{cause: errors.Join(fmt.Errorf("parent verification preflight cannot complete: %w%s", runErr, skipChecksHint(report, request.Project.Slug, quarantined)), persistErr)}
+			return verificationPause("parent verification preflight cannot complete", "make every planned verification step executable, then resume (--skip-checks or --fix-checks)", errors.Join(fmt.Errorf("parent verification preflight cannot complete: %w%s", runErr, skipChecksHint(report, request.Project.Slug, quarantined)), persistErr))
 		}
 		return runErr
 	}
 	if hasUnavailableOrUnclassifiable(report, steps, quarantined) {
 		_, persistErr := persist.RecordVerificationResultReport(ctx, request.Project.Slug, commandResults(report), nil, nil, "parent-preflight", 0, "make every planned verification step executable, then resume")
-		return &verificationPauseError{cause: errors.Join(preflightBlockedError(report, request.Project.Slug, quarantined), persistErr)}
+		return verificationPause("verification preflight blocked on unclassifiable checks", "make every planned verification step executable, then resume (--skip-checks or --fix-checks)", errors.Join(preflightBlockedError(report, request.Project.Slug, quarantined), persistErr))
 	}
 	baseline := verification.CaptureBaseline(report)
 	findings := reportFindings(report, "")
@@ -231,10 +216,10 @@ func (c *sequentialController) verifyBoundary(ctx context.Context, request *Requ
 		request.Project = updated
 	}
 	if runErr != nil && hasUnavailableOrUnclassifiable(report, steps, quarantined) {
-		return &verificationPauseError{cause: errors.Join(fmt.Errorf("verification boundary %q cannot be classified: %w", cursor, runErr), &verificationBoundaryError{cursor: cursor, report: boundary, current: report})}
+		return verificationPause(fmt.Sprintf("verification boundary %q cannot be classified", cursor), "repair or quarantine the unclassifiable checks, then resume", errors.Join(fmt.Errorf("verification boundary %q cannot be classified: %w", cursor, runErr), &verificationBoundaryError{cursor: cursor, report: boundary, current: report}))
 	}
 	if hasUnavailableOrUnclassifiable(report, steps, quarantined) {
-		return &verificationPauseError{cause: errors.Join(fmt.Errorf("verification boundary %q cannot be classified: %s", cursor, reportSummary(report)), &verificationBoundaryError{cursor: cursor, report: boundary, current: report})}
+		return verificationPause(fmt.Sprintf("verification boundary %q cannot be classified", cursor), "repair or quarantine the unclassifiable checks, then resume", errors.Join(fmt.Errorf("verification boundary %q cannot be classified: %s", cursor, reportSummary(report)), &verificationBoundaryError{cursor: cursor, report: boundary, current: report}))
 	}
 	if runErr != nil {
 		return runErr

@@ -104,7 +104,8 @@ gg run dashboard \
 
 `--parent-branch` and `--base-ref` set GitOps references; `--enable-pr`,
 `--disable-pr`, `--enable-ci`, and `--disable-ci` control release integration;
-`--max-iterations` bounds the QA feedback loop; and
+`--max-iterations` is the absolute ceiling of QA attempts (default 10 — the
+loop normally ends earlier, on a pass or on a finding that keeps recurring); and
 `--repair-existing-verification` opts Development into repairing verification
 failures that predate the run. These operational flags are the complete run-only
 set, and `--` passes every following token to the pipeline unchanged.

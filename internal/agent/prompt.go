@@ -184,6 +184,7 @@ func BuildPrompt(input PromptInput) (string, error) {
 	b.WriteString("---\n\n")
 	b.WriteString("Set `gg_disposition` to exactly `passed`, `failed`, or `blocked`: `passed` means the phase contract is satisfied; `failed` means actionable work remains and QA may request fixes; `blocked` means execution cannot proceed without external resolution. A zero process exit does not override this semantic disposition.\n")
 	b.WriteString("Verification you cannot perform in this environment — manual browser or UI interaction, human review, unavailable external systems — is NOT a failure: when every check that is executable here passes and no actionable work remains, report `passed` and list the outstanding human verification steps in the artifact for reviewers. Only report `failed` for work you could do but that remains undone or broken.\n")
+	b.WriteString("Set `gg_disposition: failed` ONLY when your assigned scope is incomplete or broken. Pre-existing baseline failures you did not cause, environment limitations (commands or checks that cannot run in this worktree), and findings outside your assigned scope are REPORTED in the artifact and are NOT failure — a report that lists only such findings must carry `gg_disposition: passed`.\n")
 	b.WriteString("This run is non-interactive: no user is present and none can reply mid-phase. Never pause to wait for confirmation, and never report `blocked` because a repository or organization rule requires presenting work for explicit user approval or acceptance before committing or continuing — the pipeline's own downstream review phases are that approval gate, so treat such rules as satisfied and proceed.\n")
 	if input.Phase == pipeline.PhaseAcceptanceCriteria || input.Phase == pipeline.PhaseGrooming || input.Phase == pipeline.PhasePlanning {
 		b.WriteString("If you cannot proceed because a requirement is ambiguous or a decision only the project owner can make is missing, set `gg_disposition: blocked` and add `gg_open_questions: [\"<question>\", ...]` to the frontmatter — a single-line JSON array naming precisely what must be answered. gg will interview the owner with those questions and re-run. Use this only for genuine blockers, never for details you can reasonably decide yourself.\n")
@@ -194,6 +195,7 @@ func BuildPrompt(input PromptInput) (string, error) {
 		b.WriteString("gg_run_id: ")
 		writeQuotedValue(&b, input.RunID)
 		b.WriteString("\n---\n")
+		writeQAFindingsInstruction(&b, input.Project.QAFindingStrikes)
 		if len(input.QAProofViolations) > 0 {
 			b.WriteString("\n## QA proof repair\n")
 			b.WriteString("A previous QA run for this same attempt completed its verification but left `" + proof.ArtifactName + "` missing or protocol-invalid; the worktree still contains that run's QA report and any partial proof. Repair the artifacts instead of redoing the verification: read the existing proof and QA report, keep every validation and its recorded evidence, and fix ONLY the protocol violations listed below. Re-run a command only when its required evidence (the exact command and its observed result) is genuinely absent from the worktree artifacts. Rewrite `" + proof.ArtifactName + "` with the exact run ID shown above so it satisfies the deterministic PROOF.md format from the phase contract.\n")
@@ -419,6 +421,28 @@ func writeVerificationContractInstruction(b *strings.Builder, owner, artifact st
 		b.WriteString("The caller explicitly selected repair of existing verification failures, so set `gg_repair_mode: true`.\n")
 	} else {
 		b.WriteString("This invocation did not explicitly select repair of existing verification failures, so set `gg_repair_mode: false`.\n")
+	}
+}
+
+// writeQAFindingsInstruction demands structured, stable-identity findings
+// from a non-passing QA run and hands the agent every previously reported
+// finding so recurrence is labeled deterministically.
+func writeQAFindingsInstruction(b *strings.Builder, prior []state.QAFindingStrike) {
+	b.WriteString("\n## QA findings contract\n")
+	b.WriteString("When your disposition is not a pass, the QA report's frontmatter MUST also carry `gg_qa_findings`: a non-empty single-line JSON array with one entry per distinct issue, each `{\"id\": \"<stable-kebab-case-slug>\", \"summary\": \"<one sentence>\", \"new\": true|false}`. The `id` must identify the underlying issue, not its symptom wording, so the same issue keeps the same id across QA attempts. A passing report carries no `gg_qa_findings` key or an empty array.\n")
+	if len(prior) == 0 {
+		b.WriteString("This is the first QA attempt of the loop: every finding is `\"new\": true`.\n")
+		return
+	}
+	b.WriteString("Previously reported findings (reuse the exact id and set `\"new\": false` when the same issue is still present; ids absent from your report are treated as resolved):\n")
+	for _, finding := range prior {
+		b.WriteString("- id ")
+		writeQuotedValue(b, finding.ID)
+		if strings.TrimSpace(finding.Summary) != "" {
+			b.WriteString(" summary ")
+			writeQuotedValue(b, finding.Summary)
+		}
+		b.WriteByte('\n')
 	}
 }
 

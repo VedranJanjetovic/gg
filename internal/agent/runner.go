@@ -294,7 +294,7 @@ func (r *AgentRunner) Run(ctx context.Context, req RunRequest) (RunResult, error
 		if outputGate != nil {
 			outputGate.release()
 		}
-		return RunResult{}, err
+		return RunResult{}, classifyStartFailure(err)
 	}
 	id := req.RunID
 	if id == "" {
@@ -361,6 +361,7 @@ func (r *AgentRunner) Run(ctx context.Context, req RunRequest) (RunResult, error
 			if result.Disposition != DispositionPassed {
 				result.Status = state.StatusFailed
 				status, et = state.StatusFailed, EventFailed
+				result.QAFindings = readQAFindings(req.WorkingDirectory)
 				waitErr = errors.Join(waitErr, &SemanticFailureError{Phase: req.Phase, Disposition: result.Disposition})
 			}
 		}
@@ -384,9 +385,15 @@ func (r *AgentRunner) Run(ctx context.Context, req RunRequest) (RunResult, error
 		// an empty stderr; a broken agent installation dies with stderr only.
 		if message := parseClaudeErrorResult(stdoutData); message != "" {
 			waitErr = errors.Join(waitErr, fmt.Errorf("agent error: %s", message))
+			if infrastructure := classifyInfrastructureDetail(message); infrastructure != nil {
+				waitErr = errors.Join(waitErr, infrastructure)
+			}
 		}
 		if tail := stderrTail(log.Path()); tail != "" {
 			waitErr = errors.Join(waitErr, fmt.Errorf("agent stderr: %s", tail))
+			if infrastructure := classifyInfrastructureDetail(tail); infrastructure != nil {
+				waitErr = errors.Join(waitErr, infrastructure)
+			}
 		}
 	}
 	if result.StartedAt.IsZero() {

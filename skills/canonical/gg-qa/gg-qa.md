@@ -22,7 +22,7 @@ Use only the assigned brief, current repository/worktree state, and artifacts ex
 ## Outputs and Artifacts
 
 - Independent pass/fail findings tied to acceptance checks with reproducible evidence.
-- `qa-report.md`: executed checks, results, evidence, residual risk, and disposition at the assigned path.
+- `qa-report.md`: executed checks, results, evidence, residual risk, and disposition at the assigned path. When the disposition is not a pass, its frontmatter also carries `gg_qa_findings`: a non-empty single-line JSON array with one entry per distinct issue, each `{"id": "<stable-kebab-case-slug>", "summary": "<one sentence>", "new": true|false}`. The `id` names the underlying issue, not its symptom wording, so the same issue keeps the same id across QA attempts; when the orchestrator supplies previously reported findings, reuse their exact ids and set `"new": false` for issues that are still present.
 - `.gg/PROOF.md`: one validation entry per exercised flow, written inside the ignored `.gg/` artifact directory of the assigned worktree (never committed). Each entry must name the status (`pass`, `fail`, `feedback`, or `deferred`), test location, test name, flow/scenario, and what it verifies. Pass, fail, and feedback entries also include proof it passed with the exact command run and manual run instructions. A deferred entry omits `Proof it passed`, and instead includes the exact remote-only reason, repository evidence proving the remote requirement, and manual/CI run instructions.
 
 ## Pre-PR Verification Boundary

@@ -177,12 +177,7 @@ func VerificationBlockingResults(project ProjectState) []VerificationCommandResu
 	if project.Verification == nil {
 		return nil
 	}
-	quarantined := make(map[string]struct{}, len(project.Verification.QuarantinedChecks))
-	for _, quarantine := range project.Verification.QuarantinedChecks {
-		if name := strings.TrimSpace(quarantine.CheckName); name != "" {
-			quarantined[name] = struct{}{}
-		}
-	}
+	quarantined := quarantinedCheckNames(project.Verification)
 	blocking := make([]VerificationCommandResult, 0, len(project.Verification.CurrentResults))
 	for _, result := range project.Verification.CurrentResults {
 		if _, excluded := quarantined[strings.TrimSpace(result.CheckName)]; excluded {
@@ -215,19 +210,38 @@ func VerificationBlockingCheckNames(project ProjectState) []string {
 
 // VerificationIsPaused reports whether verification stopped the pipeline
 // because a required result was unavailable or could not be classified.
+// Quarantined checks are excluded: they carry no boundary authority, so their
+// retained strict results must not present a resumed run as still parked.
 func VerificationIsPaused(project ProjectState) bool {
 	if project.Verification == nil {
 		return false
 	}
+	quarantined := quarantinedCheckNames(project.Verification)
 	for _, result := range project.Verification.CurrentResults {
+		if _, excluded := quarantined[strings.TrimSpace(result.CheckName)]; excluded {
+			continue
+		}
 		if strictVerificationResult(result) {
 			return true
 		}
 	}
 	for _, finding := range project.Verification.CurrentFindings {
+		if _, excluded := quarantined[strings.TrimSpace(finding.CheckName)]; excluded {
+			continue
+		}
 		if finding.Classification == "unavailable" || finding.Classification == "unclassifiable" {
 			return true
 		}
 	}
 	return false
+}
+
+func quarantinedCheckNames(verification *VerificationState) map[string]struct{} {
+	quarantined := make(map[string]struct{}, len(verification.QuarantinedChecks))
+	for _, quarantine := range verification.QuarantinedChecks {
+		if name := strings.TrimSpace(quarantine.CheckName); name != "" {
+			quarantined[name] = struct{}{}
+		}
+	}
+	return quarantined
 }

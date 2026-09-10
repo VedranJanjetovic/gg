@@ -39,9 +39,20 @@ QA writes `.gg/qa-report.md` and `.gg/PROOF.md`. A passing QA result advances to
 the next phase. Structured QA feedback sends the project back through the
 Development implementation subphase and then QA — the following QA attempt is
 the verification gate for the fix, so the checking subphase is not re-run per
-iteration — preserving the bounded attempt count. `--max-iterations` sets the
-maximum number of QA attempts for the run and defaults to `3`; exhaustion leaves
-the project failed with the attempt count recorded.
+iteration.
+
+The loop is progress-based rather than a fixed budget. A non-passing QA report
+declares its issues in the `gg_qa_findings` frontmatter array (stable `id`,
+`summary`, `new` flag); each QA attempt receives the previously reported
+findings and labels recurrence. As long as every attempt resolves the previous
+findings, the loop continues; the same finding reported three times parks the
+run, and a Development fix agent that keeps failing gets three invocations
+before parking. `--max-iterations` is the absolute ceiling of QA attempts
+(default `10`); reaching it also parks the run. A parked project closes as
+`stopped` with a durable pause record — reason plus next action — shown as
+`paused` by `gg list`, `gg status`, and the TUI, and `gg resume` clears it.
+Reports from payloads that predate the findings contract fall back to the
+ceiling-bounded loop.
 
 A QA run whose agent succeeds but whose `.gg/PROOF.md` is missing or violates
 the deterministic proof protocol gets one artifact-repair invocation: a fresh
