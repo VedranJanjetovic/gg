@@ -112,7 +112,7 @@ func TestTheParentBaselineIsNotDeferredOnceTheBootstrapPhaseIsComplete(t *testin
 	if err == nil {
 		t.Fatal("a still-broken repair was accepted; the run must park again")
 	}
-	if !isVerificationPause(err) {
+	if !isPause(err) {
 		t.Fatalf("error = %v, want a verification pause offering skip and fix again", err)
 	}
 	if verifier.calls != 1 {

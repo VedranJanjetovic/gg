@@ -61,3 +61,5 @@ This phase runs non-interactively: no user is present and none can reply. Never 
 ## Failure / Escalation
 
 Stop on invalid subphase generation, failed required verification, merge conflict, or out-of-scope requirement. Preserve evidence, report the failing command/output and affected artifact, and escalate for a decision; do not skip a failed generated subphase or invent an alternate workflow.
+
+Failure means YOUR assigned scope is incomplete or broken. Pre-existing baseline failures you did not cause, environment limitations (commands that cannot run in this worktree), and findings outside the assigned scope are reported in `development.md` as findings — they are not failure and must not fail the phase on their own.

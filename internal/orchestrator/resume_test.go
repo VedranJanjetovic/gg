@@ -893,8 +893,13 @@ func TestExhaustedQABudgetRemainsExhaustedAfterRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if exhausted.Status != state.StatusFailed || exhausted.QACompletedAttempts != 2 || exhausted.QALoopStage != "exhausted" {
+	// Exhaustion parks the run for a human decision instead of failing it:
+	// the project closes as stopped with a durable pause record.
+	if exhausted.Status != state.StatusStopped || exhausted.QACompletedAttempts != 2 || exhausted.QALoopStage != "exhausted" {
 		t.Fatalf("exhausted state = %#v", exhausted)
+	}
+	if exhausted.Pause == nil || !strings.Contains(exhausted.Pause.Reason, "ceiling of 2 attempt") {
+		t.Fatalf("exhausted pause record = %#v", exhausted.Pause)
 	}
 
 	resumeRunner := &finiteRunner{}

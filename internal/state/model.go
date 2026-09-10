@@ -414,6 +414,10 @@ type ProjectState struct {
 	// advanced after every durable fix result so resume never replays a
 	// successful subphase.
 	QAFixNextSubphase string `json:"qaFixNextSubphase,omitempty"`
+	// QAFindingStrikes tracks how many QA attempts reported each structured
+	// finding. Strikes never reset within a loop, so a finding that keeps
+	// coming back parks the run instead of consuming the budget forever.
+	QAFindingStrikes []QAFindingStrike `json:"qaFindingStrikes,omitempty"`
 	// PendingRebaseConflict distinguishes an actual persisted unmerged-index
 	// failure from an ordinary Rebase phase failure.
 	PendingRebaseConflict       bool     `json:"pendingRebaseConflict,omitempty"`
@@ -431,6 +435,27 @@ type ProjectState struct {
 	// PRCIMonitor is the restart-safe cursor and terminal outcome for the
 	// post-pipeline pull-request lifecycle monitor.
 	PRCIMonitor *PRCIMonitorState `json:"prCiMonitor,omitempty"`
+	// Pause records why a parked run stopped and what unblocks it. It is set
+	// when an exhausted retry budget or an unresolvable condition closes the
+	// run as stopped, and cleared when the run transitions back to running.
+	Pause *PauseRecord `json:"pause,omitempty"`
+}
+
+// PauseRecord is the durable evidence for a parked run: the pipeline stopped
+// on a condition that needs a human decision, not on failed work or broken
+// agent infrastructure.
+type PauseRecord struct {
+	Reason     string    `json:"reason"`
+	NextAction string    `json:"nextAction,omitempty"`
+	At         time.Time `json:"at"`
+}
+
+// QAFindingStrike is the durable recurrence count of one structured QA
+// finding within the current QA loop.
+type QAFindingStrike struct {
+	ID      string `json:"id"`
+	Summary string `json:"summary,omitempty"`
+	Strikes int    `json:"strikes"`
 }
 
 // PRCIMonitorState is provider-neutral. Cursor is an opaque provider cursor;
@@ -464,6 +489,7 @@ func NewProjectState(input ProjectState) (ProjectState, error) {
 	state.ArtifactPaths = append([]string(nil), input.ArtifactPaths...)
 	state.DeferredChecks = append([]proof.DeferredCheck(nil), input.DeferredChecks...)
 	state.QAFeedbackArtifactPaths = append([]string(nil), input.QAFeedbackArtifactPaths...)
+	state.QAFindingStrikes = append([]QAFindingStrike(nil), input.QAFindingStrikes...)
 	state.RebaseConflictArtifactPaths = append([]string(nil), input.RebaseConflictArtifactPaths...)
 	state.PipelineConfig.Data = append(json.RawMessage(nil), input.PipelineConfig.Data...)
 	if input.Verification != nil {
@@ -482,6 +508,10 @@ func NewProjectState(input ProjectState) (ProjectState, error) {
 		monitor := *input.PRCIMonitor
 		monitor.RemediationKeys = append([]string(nil), input.PRCIMonitor.RemediationKeys...)
 		state.PRCIMonitor = &monitor
+	}
+	if input.Pause != nil {
+		pause := *input.Pause
+		state.Pause = &pause
 	}
 	if input.Interview != nil {
 		interview := *input.Interview

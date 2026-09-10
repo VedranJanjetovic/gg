@@ -73,8 +73,13 @@ func statusSelector(args []string) (string, error) {
 }
 
 func writeProjectDetail(output io.Writer, project state.ProjectState) error {
-	if _, err := fmt.Fprintf(output, "Name: %s\nSlug: %s\nStatus: %s\nCurrent phase: %s\nBranch: %s\nWorktree: %s\nUpdated: %s\n", project.Name, project.Slug, project.Status, displayValue(project.CurrentPhase), displayValue(project.BranchName), displayValue(project.WorktreePath), formatUpdated(project.UpdatedAt)); err != nil {
+	if _, err := fmt.Fprintf(output, "Name: %s\nSlug: %s\nStatus: %s\nCurrent phase: %s\nBranch: %s\nWorktree: %s\nUpdated: %s\n", project.Name, project.Slug, displayStatus(project), displayValue(project.CurrentPhase), displayValue(project.BranchName), displayValue(project.WorktreePath), formatUpdated(project.UpdatedAt)); err != nil {
 		return err
+	}
+	if project.Pause != nil {
+		if _, err := fmt.Fprintf(output, "Paused: %s\n  Next action: %s\n", project.Pause.Reason, displayValue(project.Pause.NextAction)); err != nil {
+			return err
+		}
 	}
 	labels := make([]string, 0)
 	seen := make(map[string]struct{})
@@ -170,15 +175,17 @@ func skippedFailureSummary(record state.PhaseRecord) string {
 
 }
 
-func verificationStatusSuffix(project state.ProjectState) string {
-	switch {
-	case state.VerificationIsPaused(project):
-		return " [paused]"
-	case state.VerificationHasWarnings(project):
-		return " [warning]"
-	default:
-		return ""
+// displayStatus renders the lifecycle status as one word. A parked run reads
+// "paused" instead of "stopped [paused]" — a status is either paused or
+// running, never both. Retained warnings keep their suffix.
+func displayStatus(project state.ProjectState) string {
+	if project.Status == state.StatusStopped && (project.Pause != nil || state.VerificationIsPaused(project)) {
+		return "paused"
 	}
+	if state.VerificationHasWarnings(project) {
+		return string(project.Status) + " [warning]"
+	}
+	return string(project.Status)
 }
 
 func writeProjectStatusTable(output io.Writer, projects []state.ProjectState) error {
@@ -187,7 +194,7 @@ func writeProjectStatusTable(output io.Writer, projects []state.ProjectState) er
 		return err
 	}
 	for _, project := range projects {
-		if _, err := fmt.Fprintf(writer, "%s\t%s%s\t%s\t%s\t%s\t%s\n", project.Name, project.Status, verificationStatusSuffix(project), displayValue(project.CurrentPhase), displayValue(project.BranchName), displayValue(project.WorktreePath), formatUpdated(project.UpdatedAt)); err != nil {
+		if _, err := fmt.Fprintf(writer, "%s\t%s\t%s\t%s\t%s\t%s\n", project.Name, displayStatus(project), displayValue(project.CurrentPhase), displayValue(project.BranchName), displayValue(project.WorktreePath), formatUpdated(project.UpdatedAt)); err != nil {
 			return err
 		}
 	}

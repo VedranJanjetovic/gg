@@ -54,6 +54,13 @@ type durableRunCloser interface {
 	CloseRun(context.Context, string, state.LifecycleStatus) error
 }
 
+// durablePauseCloser is the optional lifecycle extension that closes a parked
+// run with a durable pause record. Controllers built on states without it
+// fall back to a plain stopped CloseRun.
+type durablePauseCloser interface {
+	CloseRunPaused(ctx context.Context, slug, reason, nextAction string) error
+}
+
 type durableOrchestrationState interface {
 	ConfigureOrchestration(context.Context, string, int) error
 	UpdateQALoop(context.Context, string, int, string, []string) (state.ProjectState, error)
@@ -213,7 +220,7 @@ func NewController(options ...ControllerOption) Controller {
 }
 
 // Execute runs enabled phases in canonical order. MaxIterations is the maximum
-// total number of QA attempts; zero uses the product default of three.
+// total number of QA attempts; zero uses the product default of ten.
 func (c *sequentialController) Execute(ctx context.Context, request Request) ([]PhaseOutcome, error) {
 	return c.execute(ctx, request, "", "", false, false)
 }
@@ -236,7 +243,7 @@ func (c *sequentialController) execute(ctx context.Context, request Request, res
 	}
 	maxAttempts := request.MaxIterations
 	if maxAttempts == 0 {
-		maxAttempts = 3
+		maxAttempts = 10
 	}
 	request.MaxIterations = maxAttempts
 
@@ -380,6 +387,9 @@ func (c *sequentialController) execute(ctx context.Context, request Request, res
 			outcome, err := c.executePhase(ctx, request, executable, subphase, 0, nil)
 			outcomes = append(outcomes, outcome)
 			request.Project.ArtifactPaths = appendUnique(request.Project.ArtifactPaths, outcome.Result.ArtifactPaths...)
+			if err != nil && simpleRetryPhases[phase] {
+				outcome, err = c.retrySimplePhase(ctx, &request, executable, phase, subphase, outcome, err, &outcomes)
+			}
 			if outcome.Result.ExternalIdentity != "" {
 				request.PullRequestURL = outcome.Result.ExternalIdentity
 				if durable, ok := c.state.(durablePullRequestIdentityState); ok {
@@ -463,8 +473,17 @@ func (c *sequentialController) closeFailedRun(slug string, cause error) error {
 	if !ok {
 		return cause
 	}
+	var pause *pauseError
+	if errors.As(cause, &pause) && !isCancellation(cause) {
+		if pauser, ok := c.state.(durablePauseCloser); ok {
+			if err := pauser.CloseRunPaused(context.Background(), slug, pause.reason, pause.nextAction); err != nil {
+				return errors.Join(cause, fmt.Errorf("close paused project run: %w", err))
+			}
+			return cause
+		}
+	}
 	target := state.StatusFailed
-	if isVerificationPause(cause) {
+	if isPause(cause) {
 		target = state.StatusStopped
 	}
 	if isCancellation(cause) {
@@ -542,7 +561,7 @@ func (c *sequentialController) executeQAFeedbackLoop(ctx context.Context, reques
 	feedback := append([]string(nil), request.Project.QAFeedbackArtifactPaths...)
 	stage := request.Project.QALoopStage
 	if stage == "exhausted" || completed >= maxAttempts {
-		return outcomes, fmt.Errorf("QA feedback loop exhausted after %d attempt(s)", maxAttempts)
+		return outcomes, qaCeilingPause(maxAttempts, fmt.Errorf("QA feedback loop exhausted after %d attempt(s)", maxAttempts))
 	}
 	if stage == "" {
 		stage = "qa"
@@ -579,7 +598,30 @@ func (c *sequentialController) executeQAFeedbackLoop(ctx context.Context, reques
 			fixOutcome, fixErr := c.executePhase(ctx, *request, development, subphase, iteration, feedback)
 			outcomes = append(outcomes, fixOutcome)
 			request.Project.ArtifactPaths = appendUnique(request.Project.ArtifactPaths, fixOutcome.Result.ArtifactPaths...)
+			// The fix agent itself gets a bounded budget: a pure failed verdict
+			// is retried with its own artifact as extra feedback, and only
+			// exhaustion parks the run.
+			for fixAttempt := 2; fixErr != nil && fixAttempt <= MaxQAFixAttempts; fixAttempt++ {
+				semantic, disposition := semanticDisposition(fixErr)
+				if !semantic || disposition == agent.DispositionBlocked || isCancellation(fixErr) {
+					break
+				}
+				if publishErr := c.publish(ctx, Event{ProjectSlug: request.Project.Slug, Phase: pipeline.PhaseDevelopment, Subphase: subphase, Type: EventPhaseRetried, At: time.Now().UTC(), Outcome: &fixOutcome}); publishErr != nil {
+					return errors.Join(fixErr, publishErr)
+				}
+				fixFeedback := appendUnique(append([]string(nil), feedback...), fixOutcome.Result.ArtifactPaths...)
+				fixOutcome, fixErr = c.executePhase(ctx, *request, development, subphase, iteration, fixFeedback)
+				outcomes = append(outcomes, fixOutcome)
+				request.Project.ArtifactPaths = appendUnique(request.Project.ArtifactPaths, fixOutcome.Result.ArtifactPaths...)
+			}
 			if fixErr != nil {
+				if semantic, disposition := semanticDisposition(fixErr); semantic && disposition == agent.DispositionFailed && !isCancellation(fixErr) {
+					return &pauseError{
+						reason:     fmt.Sprintf("development fix for QA feedback kept failing after %d attempts", MaxQAFixAttempts),
+						nextAction: "repair the failure described in the development artifact, then resume",
+						cause:      fixErr,
+					}
+				}
 				return fixErr
 			}
 			if index+1 < len(fixSubphases) {
@@ -686,12 +728,25 @@ func (c *sequentialController) executeQAFeedbackLoop(ctx context.Context, reques
 		if persistErr := c.persistQALoop(context.WithoutCancel(ctx), request, completed, stage, fixCursor, feedback); persistErr != nil {
 			return outcomes, errors.Join(err, persistErr)
 		}
+		strikes, struck := advanceQAFindingStrikes(request.Project.QAFindingStrikes, outcome.Result.QAFindings)
+		if len(outcome.Result.QAFindings) > 0 {
+			if persistErr := c.persistQAFindingStrikes(context.WithoutCancel(ctx), request, strikes); persistErr != nil {
+				return outcomes, errors.Join(err, persistErr)
+			}
+		}
 		outcome.FeedbackArtifactPaths = append([]string(nil), feedback...)
 		if persistErr := c.publishFeedback(ctx, request.Project.Slug, outcome); persistErr != nil {
 			return outcomes, errors.Join(err, persistErr)
 		}
+		if struck != nil {
+			return outcomes, &pauseError{
+				reason:     fmt.Sprintf("QA finding %q survived %d fix attempts", struck.ID, struck.Strikes-1),
+				nextAction: "fix the recurring finding manually or adjust the scope via the feedback loop, then resume",
+				cause:      err,
+			}
+		}
 		if completed >= maxAttempts {
-			return outcomes, fmt.Errorf("QA feedback loop exhausted after %d attempt(s): %w", maxAttempts, err)
+			return outcomes, qaCeilingPause(maxAttempts, fmt.Errorf("QA feedback loop exhausted after %d attempt(s): %w", maxAttempts, err))
 		}
 		if err := c.publish(ctx, Event{ProjectSlug: request.Project.Slug, Phase: pipeline.PhaseQA, Type: EventPhaseRetried, At: time.Now().UTC(), Outcome: &outcome}); err != nil {
 			return outcomes, fmt.Errorf("publish QA retry: %w", err)
@@ -700,7 +755,73 @@ func (c *sequentialController) executeQAFeedbackLoop(ctx context.Context, reques
 			return outcomes, err
 		}
 	}
-	return outcomes, fmt.Errorf("QA feedback loop exhausted after %d attempt(s)", maxAttempts)
+	return outcomes, qaCeilingPause(maxAttempts, fmt.Errorf("QA feedback loop exhausted after %d attempt(s)", maxAttempts))
+}
+
+// MaxQAFindingStrikes is how many QA attempts may report the same structured
+// finding before the run parks: progress keeps the loop alive, recurrence
+// does not.
+const MaxQAFindingStrikes = 3
+
+// MaxQAFixAttempts bounds how many invocations one Development fix subphase
+// may consume on a repeating failed verdict within a single QA fix pass.
+const MaxQAFixAttempts = 3
+
+func qaCeilingPause(maxAttempts int, cause error) *pauseError {
+	return &pauseError{
+		reason:     fmt.Sprintf("QA loop reached its ceiling of %d attempt(s)", maxAttempts),
+		nextAction: "review the qa-report findings, repair or narrow the scope, then resume",
+		cause:      cause,
+	}
+}
+
+// advanceQAFindingStrikes merges the attempt's structured findings into the
+// durable recurrence counts. Counts never reset within a loop — a finding
+// that disappears and later returns resumes its count — and the first finding
+// reaching MaxQAFindingStrikes is returned as struck.
+func advanceQAFindingStrikes(previous []state.QAFindingStrike, current []agent.QAFinding) ([]state.QAFindingStrike, *state.QAFindingStrike) {
+	updated := append([]state.QAFindingStrike(nil), previous...)
+	index := make(map[string]int, len(updated))
+	for position, strike := range updated {
+		index[strike.ID] = position
+	}
+	var struck *state.QAFindingStrike
+	for _, finding := range current {
+		position, known := index[finding.ID]
+		if !known {
+			updated = append(updated, state.QAFindingStrike{ID: finding.ID, Summary: finding.Summary, Strikes: 1})
+			index[finding.ID] = len(updated) - 1
+			continue
+		}
+		updated[position].Strikes++
+		if updated[position].Summary == "" {
+			updated[position].Summary = finding.Summary
+		}
+		if updated[position].Strikes >= MaxQAFindingStrikes && struck == nil {
+			strike := updated[position]
+			struck = &strike
+		}
+	}
+	return updated, struck
+}
+
+// durableQAFindingStrikesState is the optional lifecycle extension persisting
+// QA finding recurrence counts.
+type durableQAFindingStrikesState interface {
+	SetQAFindingStrikes(context.Context, string, []state.QAFindingStrike) (state.ProjectState, error)
+}
+
+func (c *sequentialController) persistQAFindingStrikes(ctx context.Context, request *Request, strikes []state.QAFindingStrike) error {
+	if durable, ok := c.state.(durableQAFindingStrikesState); ok {
+		project, err := durable.SetQAFindingStrikes(ctx, request.Project.Slug, strikes)
+		if err != nil {
+			return fmt.Errorf("persist QA finding strikes: %w", err)
+		}
+		request.Project = project
+		return nil
+	}
+	request.Project.QAFindingStrikes = strikes
+	return nil
 }
 
 func (c *sequentialController) persistQALoop(ctx context.Context, request *Request, completed int, stage, fixSubphase string, feedback []string) error {
@@ -955,6 +1076,7 @@ func (c *sequentialController) executeDevelopmentLoop(ctx context.Context, reque
 		}
 	}
 	var outcomes []PhaseOutcome
+	var lastFailedArtifacts []string
 	runSequence := func(scope *PlanPhaseScope, iteration int, feedback []string) error {
 		for _, subphase := range subphases {
 			if skipUntil != "" {
@@ -972,6 +1094,7 @@ func (c *sequentialController) executeDevelopmentLoop(ctx context.Context, reque
 			outcomes = append(outcomes, outcome)
 			request.Project.ArtifactPaths = appendUnique(request.Project.ArtifactPaths, outcome.Result.ArtifactPaths...)
 			if err != nil {
+				lastFailedArtifacts = append([]string(nil), outcome.Result.ArtifactPaths...)
 				return err
 			}
 		}
@@ -979,7 +1102,9 @@ func (c *sequentialController) executeDevelopmentLoop(ctx context.Context, reque
 	}
 	pending, total := c.pendingPlanPhases(ctx, request.Project.Slug)
 	if len(pending) == 0 {
-		return outcomes, runSequence(nil, 0, nil)
+		return outcomes, c.runDevelopmentResilient(ctx, request, "development", &lastFailedArtifacts, func(iteration int, feedback []string) error {
+			return runSequence(nil, iteration, feedback)
+		})
 	}
 	completed := total - len(pending)
 	bootstrapPhase := ""
@@ -988,7 +1113,9 @@ func (c *sequentialController) executeDevelopmentLoop(ctx context.Context, reque
 	}
 	for index, name := range pending {
 		scope := &PlanPhaseScope{Name: name, Index: completed + index + 1, Total: total}
-		if err := runSequence(scope, 0, nil); err != nil {
+		if err := c.runDevelopmentResilient(ctx, request, name, &lastFailedArtifacts, func(iteration int, feedback []string) error {
+			return runSequence(scope, iteration, feedback)
+		}); err != nil {
 			return outcomes, err
 		}
 		if name == bootstrapPhase {
@@ -1050,6 +1177,143 @@ func (c *sequentialController) executePlanningLoop(ctx context.Context, request 
 	return outcomes, errors.New("phase-limit-exceeded: Planning attempts exhausted")
 }
 
+// MaxDevelopmentSemanticRetries bounds how many fresh Development sequences a
+// failed self-verdict may consume before the run parks for a human decision.
+const MaxDevelopmentSemanticRetries = 2
+
+// MaxPhaseAttempts bounds how many invocations a simple phase may consume on
+// a repeating failure before the run parks (semantic verdicts) or fails
+// (operational errors).
+const MaxPhaseAttempts = 3
+
+// simpleRetryPhases names the phases covered by the generic bounded retry.
+// Planning, Development, QA, Rebase, and CI keep their dedicated loops.
+var simpleRetryPhases = map[pipeline.PhaseID]bool{
+	pipeline.PhaseAcceptanceCriteria: true,
+	pipeline.PhaseGrooming:           true,
+	pipeline.PhaseTestDocument:       true,
+	pipeline.PhaseBuildChecker:       true,
+	pipeline.PhasePR:                 true,
+}
+
+// interviewPhases may answer a blocked disposition with the grooming
+// interview, so their blocked verdicts keep the existing flow instead of
+// parking.
+var interviewPhases = map[pipeline.PhaseID]bool{
+	pipeline.PhaseAcceptanceCriteria: true,
+	pipeline.PhaseGrooming:           true,
+	pipeline.PhasePlanning:           true,
+}
+
+// retrySimplePhase re-invokes a simple phase that reported a pure semantic
+// failure, with the failed artifact as feedback, up to MaxPhaseAttempts total
+// invocations; exhaustion parks the run. Operational errors — agent crashes,
+// infrastructure failures, event or persistence errors — pass through
+// unchanged: retrying them could mask an inconsistent orchestrator state.
+// Interview-answerable blocked verdicts keep their existing flow; other
+// blocked verdicts park immediately.
+func (c *sequentialController) retrySimplePhase(ctx context.Context, request *Request, executable pipeline.ExecutablePhase, phase pipeline.PhaseID, subphase string, outcome PhaseOutcome, cause error, outcomes *[]PhaseOutcome) (PhaseOutcome, error) {
+	for attempt := 1; ; attempt++ {
+		if ctx.Err() != nil || isCancellation(cause) || agent.IsInfrastructureFailure(cause) {
+			return outcome, cause
+		}
+		semantic, disposition := semanticDisposition(cause)
+		if !semantic {
+			return outcome, cause
+		}
+		if disposition == agent.DispositionBlocked {
+			if interviewPhases[phase] {
+				return outcome, cause
+			}
+			return outcome, &pauseError{
+				reason:     fmt.Sprintf("%s is blocked", phase),
+				nextAction: "resolve the blocker described in the phase artifact, then resume",
+				cause:      cause,
+			}
+		}
+		if attempt >= MaxPhaseAttempts {
+			return outcome, &pauseError{
+				reason:     fmt.Sprintf("%s kept reporting failure after %d attempts", phase, MaxPhaseAttempts),
+				nextAction: "inspect the phase artifact, resolve the reported failure, then resume",
+				cause:      cause,
+			}
+		}
+		if err := c.publish(ctx, Event{ProjectSlug: request.Project.Slug, Phase: phase, Subphase: subphase, Type: EventPhaseRetried, At: time.Now().UTC(), Outcome: &outcome}); err != nil {
+			return outcome, errors.Join(cause, err)
+		}
+		feedback := append([]string(nil), outcome.Result.ArtifactPaths...)
+		next, err := c.executePhase(ctx, *request, executable, subphase, attempt, feedback)
+		*outcomes = append(*outcomes, next)
+		request.Project.ArtifactPaths = appendUnique(request.Project.ArtifactPaths, next.Result.ArtifactPaths...)
+		outcome = next
+		if err == nil {
+			return outcome, nil
+		}
+		cause = err
+	}
+}
+
+// runDevelopmentResilient runs one Development sequence without taking the
+// agent's failed self-verdict at face value. A pure `gg_disposition: failed`
+// is cross-checked against gg's own verification boundary: a green boundary
+// means no check regressed against the parent baseline, so the reported
+// failure concerns pre-existing or environment findings and the run
+// continues. A contradicted verdict earns bounded retries with the failed
+// artifact as feedback; exhaustion parks the run instead of failing it.
+func (c *sequentialController) runDevelopmentResilient(ctx context.Context, request *Request, cursor string, failedArtifacts *[]string, run func(iteration int, feedback []string) error) error {
+	err := run(0, nil)
+	for attempt := 1; err != nil; attempt++ {
+		semantic, disposition := semanticDisposition(err)
+		if !semantic {
+			return err
+		}
+		if disposition == agent.DispositionBlocked {
+			return &pauseError{
+				reason:     fmt.Sprintf("development is blocked at %q", cursor),
+				nextAction: "resolve the blocker described in the development artifact, then resume",
+				cause:      err,
+			}
+		}
+		if c.boundaryContradictsFailedVerdict(ctx, request, cursor) {
+			if publishErr := c.publish(ctx, Event{ProjectSlug: request.Project.Slug, Phase: pipeline.PhaseDevelopment, Type: EventDispositionOverridden, At: time.Now().UTC(), Error: err}); publishErr != nil {
+				return errors.Join(err, publishErr)
+			}
+			return nil
+		}
+		if attempt > MaxDevelopmentSemanticRetries {
+			return &pauseError{
+				reason:     fmt.Sprintf("development kept reporting failure at %q after %d retries", cursor, MaxDevelopmentSemanticRetries),
+				nextAction: "inspect the development artifact, repair or narrow the failing scope, then resume",
+				cause:      err,
+			}
+		}
+		err = run(attempt, append([]string(nil), (*failedArtifacts)...))
+	}
+	return nil
+}
+
+// boundaryContradictsFailedVerdict reports whether gg's own verification
+// boundary is green while the Development agent reported failure. Without a
+// captured baseline there is no second opinion and the verdict stands.
+func (c *sequentialController) boundaryContradictsFailedVerdict(ctx context.Context, request *Request, cursor string) bool {
+	verificationState := request.Project.Verification
+	if verificationState == nil || !verificationState.ParentBaselineCaptured || c.verification == nil {
+		return false
+	}
+	return c.verifyBoundary(context.WithoutCancel(ctx), request, cursor) == nil
+}
+
+func semanticDisposition(err error) (bool, agent.Disposition) {
+	if !agent.IsSemanticFailure(err) {
+		return false, ""
+	}
+	var semantic *agent.SemanticFailureError
+	if !errors.As(err, &semantic) {
+		return false, ""
+	}
+	return true, semantic.Disposition
+}
+
 // verifyBoundaryWithRemediation keeps the full verification set as the only
 // success gate. A regression gets a bounded Development sequence, then the
 // same boundary is rerun; no plan phase is marked complete until this method
@@ -1090,7 +1354,7 @@ func (c *sequentialController) remediateVerificationBoundary(ctx context.Context
 			if err := c.persistVerificationAction(ctx, request, action); err != nil {
 				return errors.Join(failure, err)
 			}
-			return &verificationPauseError{cause: fmt.Errorf("verification remediation exhausted at %s after %d attempt(s): %w", cursor, verificationState.RemediationAttempts, failure)}
+			return verificationPause(fmt.Sprintf("verification remediation exhausted at %s", cursor), action, fmt.Errorf("verification remediation exhausted at %s after %d attempt(s): %w", cursor, verificationState.RemediationAttempts, failure))
 		}
 
 		attempt := verificationState.RemediationAttempts + 1

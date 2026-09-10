@@ -165,6 +165,10 @@ type RunResult struct {
 	// DeferredChecks contains validated remote-only checks reported by a
 	// structured proof artifact. It never claims that a check passed.
 	DeferredChecks []proof.DeferredCheck
+	// QAFindings carries the structured issues a non-passing QA run declared
+	// in the qa-report frontmatter; nil when the payload predates the
+	// findings contract.
+	QAFindings []QAFinding
 }
 
 // ProcessSpec describes an executable invocation. Args are passed directly

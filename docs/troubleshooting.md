@@ -42,6 +42,16 @@ The owning process died. The next command that observes the project repairs the
 stale `running` state to a resumable `stopped`, so run `gg list` or `gg status`
 and then `gg resume <project>`.
 
+## A project shows `paused`
+
+The run parked itself instead of failing: a retry budget was exhausted or a
+condition needs a human decision (an unclassifiable verification check, a QA
+finding that survived three fix attempts, a blocked phase). `gg status
+<project>` shows the recorded reason and next action; address it and run
+`gg resume <project>`, which clears the pause record. A run ends `failed` only
+on agent infrastructure errors — network, authentication, billing, or a broken
+agent installation.
+
 ## `gg update` refuses to proceed
 
 Update is blocked while any project's status is exactly `running`. Run

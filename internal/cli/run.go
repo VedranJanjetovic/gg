@@ -119,7 +119,7 @@ func splitCheckNames(value string) []string {
 }
 
 func parseRunOptions(args []string) (runOptions, error) {
-	options := runOptions{overrides: config.RunOverrides{PhaseOverrides: make(map[config.Phase]config.PhaseOverride)}, maxIterations: 3}
+	options := runOptions{overrides: config.RunOverrides{PhaseOverrides: make(map[config.Phase]config.PhaseOverride)}, maxIterations: 10}
 	flags := flag.NewFlagSet("gg run", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	flags.StringVar(&options.overrides.GitOps.ParentBranch, "parent-branch", "", "GitOps parent branch for this run")
@@ -128,7 +128,7 @@ func parseRunOptions(args []string) (runOptions, error) {
 	flags.Var(gitOpsToggleValue{target: &options.overrides.GitOps.EnablePR, value: false}, "disable-pr", "disable the PR phase for this run")
 	flags.Var(gitOpsToggleValue{target: &options.overrides.GitOps.EnableCI, value: true}, "enable-ci", "enable the CI phase for this run")
 	flags.Var(gitOpsToggleValue{target: &options.overrides.GitOps.EnableCI, value: false}, "disable-ci", "disable the CI phase for this run")
-	flags.IntVar(&options.maxIterations, "max-iterations", 3, "maximum total QA attempts")
+	flags.IntVar(&options.maxIterations, "max-iterations", 10, "absolute ceiling of QA attempts; the loop parks earlier when the same finding recurs")
 	flags.BoolVar(&options.repairExistingVerification, "repair-existing-verification", false, "explicitly repair existing parent verification failures")
 
 	orderedArgs, err := orderRunFlags(args)

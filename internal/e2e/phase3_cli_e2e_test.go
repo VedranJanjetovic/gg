@@ -331,8 +331,13 @@ func TestRealCLIFakePipelineBoundsQAAttempts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if project.Status != state.StatusFailed || project.MaxQAAttempts != 2 || project.QACompletedAttempts != 2 || project.QALoopStage != "exhausted" {
+	// An exhausted QA ceiling parks the run for a human decision instead of
+	// failing it: stopped, with a durable pause record naming the next action.
+	if project.Status != state.StatusStopped || project.MaxQAAttempts != 2 || project.QACompletedAttempts != 2 || project.QALoopStage != "exhausted" {
 		t.Fatalf("bounded state = %#v", project)
+	}
+	if project.Pause == nil || project.Pause.NextAction == "" {
+		t.Fatalf("parked run pause record = %#v", project.Pause)
 	}
 }
 

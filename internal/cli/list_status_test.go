@@ -153,6 +153,7 @@ func TestStatusAndListRenderVerificationEvidenceAndMarkers(t *testing.T) {
 
 func TestStatusMarksUnavailableVerificationAsPaused(t *testing.T) {
 	projects := fixtureProjects()
+	projects[0].Status = state.StatusStopped
 	projects[0].Verification = &state.VerificationState{
 		CurrentResults: []state.VerificationCommandResult{{CheckName: "tests", Command: "go", Args: []string{"test", "./..."}, Status: "unavailable", UnavailableErr: "go not found"}},
 		NextAction:     "install Go, then resume",
@@ -162,8 +163,11 @@ func TestStatusMarksUnavailableVerificationAsPaused(t *testing.T) {
 	if err := app.statusCommand(context.Background(), &out, nil); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out.String(), "running [paused]") {
+	if !strings.Contains(out.String(), "paused") {
 		t.Fatalf("status did not mark paused verification: %q", out.String())
+	}
+	if strings.Contains(out.String(), "stopped") {
+		t.Fatalf("paused run still rendered as stopped: %q", out.String())
 	}
 	var detail bytes.Buffer
 	if err := app.statusCommand(context.Background(), &detail, []string{"Active"}); err != nil {
@@ -173,6 +177,24 @@ func TestStatusMarksUnavailableVerificationAsPaused(t *testing.T) {
 		if !strings.Contains(detail.String(), want) {
 			t.Fatalf("paused status missing %q: %s", want, detail.String())
 		}
+	}
+}
+
+func TestStatusNeverRendersRunningProjectAsPaused(t *testing.T) {
+	projects := fixtureProjects()
+	projects[0].Verification = &state.VerificationState{
+		CurrentResults: []state.VerificationCommandResult{{CheckName: "tests", Status: "unclassifiable"}},
+	}
+	app := New(WithLifecycleService(&listStatusProjects{projects: projects}), WithRootResolver(listFixedRoot{}))
+	var out bytes.Buffer
+	if err := app.statusCommand(context.Background(), &out, nil); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out.String(), "paused") {
+		t.Fatalf("running project rendered as paused: %q", out.String())
+	}
+	if !strings.Contains(out.String(), "running") {
+		t.Fatalf("running project lost its status word: %q", out.String())
 	}
 }
 
