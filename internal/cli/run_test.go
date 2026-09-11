@@ -367,12 +367,12 @@ func TestParseRunOptionsRepairFlagDoesNotConsumeFollowingToken(t *testing.T) {
 		wantParent    string
 		wantIterating int
 	}{
-		{name: "flag then selector then valued flag", args: []string{"--repair-existing-verification", "proj", "--parent-branch", "main"}, wantRepair: true, wantParent: "main", wantIterating: 10},
+		{name: "flag then selector then valued flag", args: []string{"--repair-existing-verification", "proj", "--parent-branch", "main"}, wantRepair: true, wantParent: "main", wantIterating: 3},
 		{name: "flag then selector then max iterations", args: []string{"--repair-existing-verification", "proj", "--max-iterations", "5"}, wantRepair: true, wantIterating: 5},
-		{name: "selector first", args: []string{"proj", "--repair-existing-verification"}, wantRepair: true, wantIterating: 10},
-		{name: "assignment form", args: []string{"--repair-existing-verification=true", "proj"}, wantRepair: true, wantIterating: 10},
-		{name: "single dash", args: []string{"-repair-existing-verification", "proj"}, wantRepair: true, wantIterating: 10},
-		{name: "explicitly false", args: []string{"--repair-existing-verification=false", "proj"}, wantIterating: 10},
+		{name: "selector first", args: []string{"proj", "--repair-existing-verification"}, wantRepair: true, wantIterating: 3},
+		{name: "assignment form", args: []string{"--repair-existing-verification=true", "proj"}, wantRepair: true, wantIterating: 3},
+		{name: "single dash", args: []string{"-repair-existing-verification", "proj"}, wantRepair: true, wantIterating: 3},
+		{name: "explicitly false", args: []string{"--repair-existing-verification=false", "proj"}, wantIterating: 3},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

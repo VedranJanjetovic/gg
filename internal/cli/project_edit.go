@@ -100,6 +100,7 @@ func wizardDefaultsFromExecution(configuration pipeline.ProjectExecutionConfigur
 	defaults := tui.WizardDefaults{
 		Agent: configuration.Default.Agent, Model: configuration.Default.Model, Effort: configuration.Default.Effort,
 		FullTuples: true, Manual: configuration.Default.Provenance == config.ModelProvenanceManual,
+		Reconfigure: true,
 	}
 	for _, phase := range configuration.Phases {
 		defaults.Phases = append(defaults.Phases, tui.PhaseState{

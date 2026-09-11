@@ -119,7 +119,12 @@ type WizardDefaults struct {
 	Effort     config.Effort
 	FullTuples bool
 	Manual     bool
-	Phases     []PhaseState
+	// Reconfigure opens the wizard directly on the phase overview seeded with
+	// the defaults above, so an existing configuration is edited in place
+	// instead of being re-entered screen by screen. It takes effect only with
+	// a complete Agent/Model/Effort tuple and a non-empty Phases slice.
+	Reconfigure bool
+	Phases      []PhaseState
 }
 
 type PickerResult struct {
@@ -146,10 +151,14 @@ type ConfigureWizard struct {
 	// overridePhase indexes the phase row being configured by the per-phase
 	// override sub-flow; -1 means the main agent/model/effort flow.
 	overridePhase int
-	err           error
-	quit          bool
-	width         int
-	height        int
+	// editingDefaults marks a re-entry into the main agent/model/effort flow
+	// from the phase overview's Defaults row, so finishing or escaping the
+	// flow returns to the overview instead of cancelling.
+	editingDefaults bool
+	err             error
+	quit            bool
+	width           int
+	height          int
 }
 
 func NewConfigureWizard(catalog config.AgentCatalog, defaults WizardDefaults) ConfigureWizard {
@@ -169,6 +178,12 @@ func NewConfigureWizard(catalog config.AgentCatalog, defaults WizardDefaults) Co
 			wizard.cursor = i
 			break
 		}
+	}
+	if defaults.Reconfigure && len(wizard.phases) > 0 && defaults.Agent != "" && defaults.Model != "" && defaults.Effort != "" {
+		wizard.result = PickerResult{Agent: defaults.Agent, Model: defaults.Model, Manual: defaults.Manual, Effort: defaults.Effort}
+		wizard.selected = defaults.Agent
+		wizard.screen = PhaseToggleScreen
+		wizard.cursor = wizard.defaultsRowIndex()
 	}
 	return wizard
 }
@@ -198,9 +213,12 @@ func (m ConfigureWizard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case tea.KeySpace:
 				m.togglePhase()
 			case tea.KeyEsc:
-				if m.overridePhase >= 0 {
+				switch {
+				case m.overridePhase >= 0:
 					m.exitOverride()
-				} else {
+				case m.editingDefaults:
+					m.exitDefaultsEdit()
+				default:
 					m.cancel(ErrPickerCancelled)
 				}
 			case tea.KeyCtrlC:
@@ -242,18 +260,26 @@ func (m ConfigureWizard) View() string {
 	if m.err != nil {
 		b.WriteString(styles.error.Render(wrapToWidth(m.message(), m.width-2)))
 		b.WriteString("\n\n")
-		b.WriteString(styles.footer.Render("Esc cancel  ·  Enter acknowledge"))
+		b.WriteString(renderFooterHints(m.width, styles, []footerHint{
+			{"Esc", "cancel"},
+			{"Enter", "acknowledge"},
+		}))
 		return b.String() + "\n"
 	}
 
 	switch m.screen {
 	case AgentPickerScreen:
-		subtitle := "Choose an agent to configure"
+		subtitle := "Choose the default agent"
 		if m.overridePhase >= 0 {
 			subtitle = "Choose the agent for phase " + m.phases[m.overridePhase].displayName()
 		}
 		b.WriteString(styles.subtitle.Render(subtitle))
-		b.WriteString("\n\n")
+		b.WriteString("\n")
+		if m.overridePhase < 0 {
+			b.WriteString(styles.context.Render(wrapToWidth("The default agent, model, and effort apply to every phase without a custom override.", m.width-2)))
+			b.WriteString("\n")
+		}
+		b.WriteString("\n")
 		if len(m.agents) == 0 {
 			b.WriteString(styles.empty.Render("No supported agents are available."))
 		} else {
@@ -274,7 +300,11 @@ func (m ConfigureWizard) View() string {
 		b.WriteString("\n\n")
 		b.WriteString(styles.row.Render(wrapToWidth("Model: "+string(m.manual)+"▏", m.width-4)))
 		b.WriteString("\n\n")
-		b.WriteString(styles.footer.Render("Type a model name  ·  Enter confirm  ·  Esc back"))
+		b.WriteString(renderFooterHints(m.width, styles, []footerHint{
+			{"", "Type a model name"},
+			{"Enter", "confirm"},
+			{"Esc", "back"},
+		}))
 		return b.String() + "\n"
 	case EffortPickerScreen:
 		subtitle := "Select default effort"
@@ -289,6 +319,9 @@ func (m ConfigureWizard) View() string {
 	case PhaseToggleScreen:
 		b.WriteString(styles.subtitle.Render("Pipeline phases (in execution order)"))
 		b.WriteString("\n\n")
+		defaultsLine := strings.Join([]string{string(m.result.Agent), m.result.Model, string(m.result.Effort)}, " · ")
+		b.WriteString(renderPickerRow(m.width, m.cursor == m.defaultsRowIndex(), "Defaults — "+defaultsLine, "Default agent, model, and effort for phases without a custom override", styles))
+		b.WriteString("\n")
 		for i, phase := range m.phases {
 			marker := "[ ] "
 			switch {
@@ -308,13 +341,25 @@ func (m ConfigureWizard) View() string {
 		b.WriteString("\n")
 		b.WriteString(renderPickerRow(m.width, m.cursor == m.saveRowIndex(), "Save configuration", "Write the configuration and finish", styles))
 		b.WriteString("\n")
-		b.WriteString(styles.footer.Render(wrapToWidth("↑/↓ or j/k navigate  ·  Space toggle on/off  ·  Enter change agent/model/effort  ·  Enter on Save configuration finishes  ·  Esc cancel", m.width-2)))
+		enterLabel := "edit agent/model/effort"
+		switch m.cursor {
+		case m.saveRowIndex():
+			enterLabel = "save configuration"
+		case m.defaultsRowIndex():
+			enterLabel = "edit the defaults"
+		}
+		b.WriteString(renderFooterHints(m.width, styles, []footerHint{
+			{"↑/↓ or j/k", "navigate"},
+			{"Space", "toggle on/off"},
+			{"Enter", enterLabel},
+			{"Esc", "cancel"},
+		}))
 		return b.String() + "\n"
 	default:
 		entry, _ := m.catalog.Lookup(m.selected)
-		subtitle := "Select a model for " + m.selectedDisplayName()
+		subtitle := "Select the default model for " + m.selectedDisplayName()
 		if m.overridePhase >= 0 {
-			subtitle += " (phase " + m.phases[m.overridePhase].displayName() + ")"
+			subtitle = "Select a model for " + m.selectedDisplayName() + " (phase " + m.phases[m.overridePhase].displayName() + ")"
 		}
 		b.WriteString(styles.subtitle.Render(subtitle))
 		b.WriteString("\n")
@@ -337,7 +382,15 @@ func (m ConfigureWizard) View() string {
 		b.WriteString(renderPickerRow(m.width, m.cursor == len(m.models), manualModelOption, "Use a model that is not in this list", styles))
 	}
 	b.WriteString("\n")
-	b.WriteString(styles.footer.Render(wrapToWidth("↑/↓ or j/k navigate  ·  Enter select  ·  Esc cancel", m.width-2)))
+	escLabel := "cancel"
+	if m.overridePhase >= 0 || m.editingDefaults {
+		escLabel = "back"
+	}
+	b.WriteString(renderFooterHints(m.width, styles, []footerHint{
+		{"↑/↓ or j/k", "navigate"},
+		{"Enter", "select"},
+		{"Esc", escLabel},
+	}))
 	return b.String() + "\n"
 }
 
@@ -350,7 +403,7 @@ func (m ConfigureWizard) selectedDisplayName() string {
 }
 
 type pickerStylesSet struct {
-	title, subtitle, context, selected, selectedDesc, row, rowDesc, footer, empty, error, update lipgloss.Style
+	title, subtitle, context, selected, selectedDesc, row, rowDesc, footer, footerKey, empty, error, update lipgloss.Style
 }
 
 func pickerStyles() pickerStylesSet {
@@ -363,10 +416,54 @@ func pickerStyles() pickerStylesSet {
 		row:          lipgloss.NewStyle().PaddingLeft(2),
 		rowDesc:      lipgloss.NewStyle().Foreground(lipgloss.Color("8")).PaddingLeft(6),
 		footer:       lipgloss.NewStyle().Foreground(lipgloss.Color("8")),
+		footerKey:    lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("6")),
 		empty:        lipgloss.NewStyle().Foreground(lipgloss.Color("3")),
 		error:        lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("1")),
 		update:       lipgloss.NewStyle().Foreground(lipgloss.Color("3")),
 	}
+}
+
+// footerHint pairs an actionable key with its short action label. An empty
+// key renders the label as plain guidance text.
+type footerHint struct{ key, label string }
+
+// renderFooterHints renders a footer legend with the key names highlighted so
+// the actionable keys stand out from their descriptions. Hints wrap onto new
+// lines at hint boundaries when the terminal is narrow.
+func renderFooterHints(width int, styles pickerStylesSet, hints []footerHint) string {
+	const separator = "  ·  "
+	if width < 8 {
+		width = 8
+	}
+	var lines []string
+	var current strings.Builder
+	currentWidth := 0
+	for _, hint := range hints {
+		plain := strings.TrimSpace(hint.key + " " + hint.label)
+		hintWidth := len([]rune(plain))
+		if currentWidth > 0 && currentWidth+len(separator)+hintWidth > width-2 {
+			lines = append(lines, current.String())
+			current.Reset()
+			currentWidth = 0
+		}
+		if currentWidth > 0 {
+			current.WriteString(styles.footer.Render(separator))
+			currentWidth += len(separator)
+		}
+		if hint.key == "" {
+			current.WriteString(styles.footer.Render(hint.label))
+		} else {
+			current.WriteString(styles.footerKey.Render(hint.key))
+			if hint.label != "" {
+				current.WriteString(styles.footer.Render(" " + hint.label))
+			}
+		}
+		currentWidth += hintWidth
+	}
+	if current.Len() > 0 {
+		lines = append(lines, current.String())
+	}
+	return strings.Join(lines, "\n")
 }
 
 func pickerAgentMetadata(entry config.AgentCatalogEntry) string {
@@ -441,14 +538,20 @@ func (m *ConfigureWizard) move(delta int) {
 // "Save configuration" row that confirms the wizard.
 func (m ConfigureWizard) saveRowIndex() int { return len(m.phases) }
 
+// defaultsRowIndex is the phase-screen cursor position of the Defaults row.
+// The row renders at the top of the screen but sits after the save row in
+// cursor order so phase and save indexes stay stable; modulo navigation still
+// wraps to and from it exactly as the visually first row.
+func (m ConfigureWizard) defaultsRowIndex() int { return len(m.phases) + 1 }
+
 // movePhaseCursor steps over fixed context rows so the cursor only ever rests
-// on a row the user can toggle or override, or on the save row.
+// on a row the user can toggle or override, or on the defaults or save rows.
 func (m *ConfigureWizard) movePhaseCursor(delta int) {
-	length := len(m.phases) + 1 // phases plus the save row
+	length := len(m.phases) + 2 // phases plus the save and defaults rows
 	cursor := m.cursor
 	for range length {
 		cursor = (cursor + delta + length) % length
-		if cursor == m.saveRowIndex() || m.phases[cursor].configurable() {
+		if cursor == m.saveRowIndex() || cursor == m.defaultsRowIndex() || m.phases[cursor].configurable() {
 			m.cursor = cursor
 			return
 		}
@@ -493,6 +596,28 @@ func (m *ConfigureWizard) exitOverride() {
 	m.screen = PhaseToggleScreen
 }
 
+// startDefaultsEdit re-enters the main agent/model/effort flow from the phase
+// overview's Defaults row, prefilled with the current global selection.
+func (m *ConfigureWizard) startDefaultsEdit() {
+	m.editingDefaults = true
+	m.cursor = 0
+	for i, entry := range m.agents {
+		if entry.Agent == m.result.Agent {
+			m.cursor = i
+			break
+		}
+	}
+	m.screen = AgentPickerScreen
+}
+
+// exitDefaultsEdit returns from the defaults sub-flow to the phase overview
+// with the cursor back on the Defaults row.
+func (m *ConfigureWizard) exitDefaultsEdit() {
+	m.editingDefaults = false
+	m.cursor = m.defaultsRowIndex()
+	m.screen = PhaseToggleScreen
+}
+
 func (m *ConfigureWizard) selectCurrent() {
 	switch m.screen {
 	case AgentPickerScreen:
@@ -514,6 +639,8 @@ func (m *ConfigureWizard) selectCurrent() {
 			if preferred == "" && m.selected == m.result.Agent {
 				preferred = m.result.Model
 			}
+		} else if m.selected == m.result.Agent && m.result.Model != "" {
+			preferred = m.result.Model
 		} else if m.selected != m.defaults.Agent {
 			preferred = ""
 		}
@@ -551,16 +678,23 @@ func (m *ConfigureWizard) selectCurrent() {
 			m.finish()
 			return
 		}
+		if m.editingDefaults {
+			m.exitDefaultsEdit()
+			return
+		}
 		m.cursor = m.firstToggleablePhase()
 		m.screen = PhaseToggleScreen
 	case PhaseToggleScreen:
-		if m.cursor == m.saveRowIndex() {
+		switch m.cursor {
+		case m.saveRowIndex():
 			m.finish()
-			return
+		case m.defaultsRowIndex():
+			m.startDefaultsEdit()
+		default:
+			// Enter on a phase row opens its agent/model/effort editor; only
+			// the explicit save row confirms the wizard.
+			m.startPhaseOverride()
 		}
-		// Enter on a phase row opens its agent/model/effort editor; only the
-		// explicit save row confirms the wizard.
-		m.startPhaseOverride()
 	}
 }
 
@@ -591,6 +725,8 @@ func (m *ConfigureWizard) enterEffortScreen() {
 		if preferred == "" {
 			preferred = m.result.Effort
 		}
+	} else if m.result.Effort != "" {
+		preferred = m.result.Effort
 	}
 	m.cursor = 1 // medium
 	for i, effort := range wizardEfforts {

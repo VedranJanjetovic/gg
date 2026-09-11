@@ -43,7 +43,7 @@ func TestPlanningPromptDemandsOneLeadingRepairPhaseWhenABootstrapIsRequested(t *
 		".gg/logs/unit.log",
 		"EXACTLY ONE new phase",
 		"FIRST phase in execution order",
-		"at most 10 phases in total",
+		"at most 6 phases in total",
 		"Trivial plan must have exactly 1 phase",
 	} {
 		if !strings.Contains(prompt, want) {

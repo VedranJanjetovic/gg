@@ -48,7 +48,7 @@ findings and labels recurrence. As long as every attempt resolves the previous
 findings, the loop continues; the same finding reported three times parks the
 run, and a Development fix agent that keeps failing gets three invocations
 before parking. `--max-iterations` is the absolute ceiling of QA attempts
-(default `10`); reaching it also parks the run. A parked project closes as
+(default `3`); reaching it also parks the run. A parked project closes as
 `stopped` with a durable pause record — reason plus next action — shown as
 `paused` by `gg list`, `gg status`, and the TUI, and `gg resume` clears it.
 Reports from payloads that predate the findings contract fall back to the

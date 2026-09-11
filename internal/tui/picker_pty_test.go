@@ -41,11 +41,11 @@ func TestRunAgentModelPickerPTYNavigatesWithoutCookedEcho(t *testing.T) {
 	}()
 
 	capture := newPTYCapture(master)
-	output := capture.wait(t, "Choose an agent to configure")
+	output := capture.wait(t, "Choose the default agent")
 	writePTY(t, master, []byte("\x1b[B"))
 	output += capture.wait(t, "▸ codex")
 	writePTY(t, master, []byte("\r"))
-	output += capture.wait(t, "Select a model for")
+	output += capture.wait(t, "Select the default model for")
 	writePTY(t, master, []byte("j\r"))
 	output += capture.wait(t, "Select default effort")
 	writePTY(t, master, []byte("\r"))
@@ -81,11 +81,11 @@ func TestRunAgentModelPickerPTYKSelectsPreviousModel(t *testing.T) {
 		resultCh <- pickerRunResult{result: result, err: err}
 	}()
 	capture := newPTYCapture(master)
-	capture.wait(t, "Choose an agent to configure")
+	capture.wait(t, "Choose the default agent")
 	writePTY(t, master, []byte("\x1b[B"))
 	capture.wait(t, "▸ codex")
 	writePTY(t, master, []byte("\r"))
-	capture.wait(t, "Select a model for")
+	capture.wait(t, "Select the default model for")
 	writePTY(t, master, []byte("j"))
 	capture.wait(t, "▸ gpt-4")
 	writePTY(t, master, []byte("k\r"))
@@ -115,7 +115,7 @@ func TestRunAgentModelPickerPTYManualModelEntry(t *testing.T) {
 		resultCh <- pickerRunResult{result: result, err: err}
 	}()
 	capture := newPTYCapture(master)
-	capture.wait(t, "Choose an agent to configure")
+	capture.wait(t, "Choose the default agent")
 	writePTY(t, master, []byte("\r"))
 	capture.wait(t, "Enter model name manually")
 	writePTY(t, master, []byte("k\r")) // wrap up to the manual row and select it
@@ -151,9 +151,9 @@ func TestRunConfigureWizardPTYPhaseCheckboxToggle(t *testing.T) {
 		resultCh <- pickerRunResult{result: result, err: err}
 	}()
 	capture := newPTYCapture(master)
-	capture.wait(t, "Choose an agent to configure")
+	capture.wait(t, "Choose the default agent")
 	writePTY(t, master, []byte("\r")) // claude
-	capture.wait(t, "Select a model for")
+	capture.wait(t, "Select the default model for")
 	writePTY(t, master, []byte("\r")) // sonnet
 	capture.wait(t, "Select default effort")
 	writePTY(t, master, []byte("\r")) // medium
@@ -252,7 +252,7 @@ func TestRunAgentModelPickerPTYEscRestoresTerminal(t *testing.T) {
 		resultCh <- pickerRunResult{result: result, err: err}
 	}()
 	capture := newPTYCapture(master)
-	output := capture.wait(t, "Choose an agent to configure")
+	output := capture.wait(t, "Choose the default agent")
 	writePTY(t, master, []byte("\x1b"))
 	result := waitPickerResult(t, resultCh)
 	if !errors.Is(result.err, ErrPickerCancelled) {
@@ -280,7 +280,7 @@ func TestRunAgentModelPickerPTYContextCancellationRestoresTerminal(t *testing.T)
 		resultCh <- pickerRunResult{result: result, err: err}
 	}()
 	capture := newPTYCapture(master)
-	output := capture.wait(t, "Choose an agent to configure")
+	output := capture.wait(t, "Choose the default agent")
 	cancel()
 	result := waitPickerResult(t, resultCh)
 	if !errors.Is(result.err, context.Canceled) {

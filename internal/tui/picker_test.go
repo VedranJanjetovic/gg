@@ -109,7 +109,7 @@ func TestAgentModelPickerUnavailableAndEmptyModelsOfferManualEntry(t *testing.T)
 			catalog := config.NewAgentCatalog(config.AgentCatalogEntry{Agent: config.AgentClaude, ModelListStatus: tt.status})
 			picker := updatePicker(t, NewConfigureWizard(catalog, WizardDefaults{}), tea.KeyMsg{Type: tea.KeyEnter})
 			view := picker.View()
-			if !strings.Contains(view, "Select a model") || !strings.Contains(strings.ToLower(view), strings.ToLower(tt.text)) || !strings.Contains(view, "manually") {
+			if !strings.Contains(view, "Select the default model") || !strings.Contains(strings.ToLower(view), strings.ToLower(tt.text)) || !strings.Contains(view, "manually") {
 				t.Fatalf("model view = %q", view)
 			}
 			picker = updatePicker(t, picker, tea.KeyMsg{Type: tea.KeyEnter})
@@ -411,14 +411,14 @@ func TestAgentModelPickerViewIsPolishedAndProviderAware(t *testing.T) {
 	})
 	picker := NewConfigureWizard(catalog, WizardDefaults{})
 	view := picker.View()
-	for _, want := range []string{"gg configure", "Choose an agent to configure", "Claude Code", "Provider: anthropic", "Harness: claude-code", "Anthropic harness", "j/k", "Enter select", "Esc cancel"} {
+	for _, want := range []string{"gg configure", "Choose the default agent", "Claude Code", "Provider: anthropic", "Harness: claude-code", "Anthropic harness", "j/k", "Enter select", "Esc cancel"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("agent view = %q, missing %q", view, want)
 		}
 	}
 	picker = updatePicker(t, picker, tea.KeyMsg{Type: tea.KeyEnter})
 	view = picker.View()
-	for _, want := range []string{"Select a model for Claude Code", "Provider: anthropic", "Harness: claude-code", "sonnet", "Fast model"} {
+	for _, want := range []string{"Select the default model for Claude Code", "Provider: anthropic", "Harness: claude-code", "sonnet", "Fast model"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("model view = %q, missing %q", view, want)
 		}
@@ -601,5 +601,110 @@ func TestConfigureWizardPhasesFollowNewlyPickedGlobalDefaults(t *testing.T) {
 	picker = updatePicker(t, picker, tea.KeyMsg{Type: tea.KeyEnter}) // keep low
 	if qa := picker.PhaseStates()[0]; qa.pinned() {
 		t.Fatalf("re-picking the globals must leave the phase unpinned: %#v", qa)
+	}
+}
+
+func TestConfigureWizardReconfigureOpensPhaseOverviewWithEditableDefaults(t *testing.T) {
+	defaults := WizardDefaults{
+		Agent: config.AgentClaude, Model: "sonnet", Effort: config.EffortMedium, Reconfigure: true,
+		Phases: []PhaseState{{Phase: config.PhaseQA, Name: "QA", Enabled: true}},
+	}
+	picker := NewConfigureWizard(pickerCatalog(), defaults)
+	if picker.Screen() != PhaseToggleScreen {
+		t.Fatalf("screen = %q, want the phase overview for reconfiguration", picker.Screen())
+	}
+	if picker.Cursor() != 2 { // one phase, save row 1, defaults row 2
+		t.Fatalf("cursor = %d, want the defaults row", picker.Cursor())
+	}
+	view := picker.View()
+	for _, want := range []string{"Defaults — claude · sonnet · medium", "Save configuration", "edit the defaults"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("overview missing %q: %q", want, view)
+		}
+	}
+	// Enter on the defaults row edits agent/model/effort, prefilled with the
+	// current values, and returns to the overview with the new selection.
+	picker = updatePicker(t, picker, tea.KeyMsg{Type: tea.KeyEnter})
+	if picker.Screen() != AgentPickerScreen || !strings.Contains(picker.View(), "Choose the default agent") {
+		t.Fatalf("screen = %q view = %q, want the default-agent editor", picker.Screen(), picker.View())
+	}
+	picker = updatePicker(t, picker, tea.KeyMsg{Type: tea.KeyEnter}) // keep claude
+	if picker.Models()[picker.Cursor()] != "sonnet" {
+		t.Fatalf("model prefill = %q, want the current default model", picker.Models()[picker.Cursor()])
+	}
+	picker = updatePicker(t, picker, tea.KeyMsg{Type: tea.KeyDown})  // sonnet → opus
+	picker = updatePicker(t, picker, tea.KeyMsg{Type: tea.KeyEnter}) // opus
+	if picker.Screen() != EffortPickerScreen || wizardEfforts[picker.Cursor()] != config.EffortMedium {
+		t.Fatalf("effort prefill = %q, want the current default effort", wizardEfforts[picker.Cursor()])
+	}
+	picker = updatePicker(t, picker, tea.KeyMsg{Type: tea.KeyEnter}) // keep medium
+	if picker.Screen() != PhaseToggleScreen || picker.Cursor() != 2 {
+		t.Fatalf("screen = %q cursor = %d, want back on the defaults row", picker.Screen(), picker.Cursor())
+	}
+	if !strings.Contains(picker.View(), "Defaults — claude · opus · medium") {
+		t.Fatalf("defaults row not updated after the edit: %q", picker.View())
+	}
+	picker = updatePicker(t, picker, tea.KeyMsg{Type: tea.KeyUp}) // defaults row → save row
+	picker = updatePicker(t, picker, tea.KeyMsg{Type: tea.KeyEnter})
+	if picker.Err() != nil {
+		t.Fatalf("err = %v", picker.Err())
+	}
+	assertResult(t, picker.Result(), PickerResult{
+		Agent: config.AgentClaude, Model: "opus", Effort: config.EffortMedium,
+		Phases: []PhaseState{{Phase: config.PhaseQA, Name: "QA", Enabled: true}},
+	})
+}
+
+func TestConfigureWizardReconfigureImmediateSavePreservesConfiguration(t *testing.T) {
+	defaults := WizardDefaults{
+		Agent: config.AgentClaude, Model: "typed-custom", Effort: config.EffortHigh, Manual: true, Reconfigure: true,
+		Phases: []PhaseState{{Phase: config.PhaseQA, Name: "QA", Enabled: true}},
+	}
+	picker := NewConfigureWizard(pickerCatalog(), defaults)
+	picker = updatePicker(t, picker, tea.KeyMsg{Type: tea.KeyUp}) // defaults row → save row
+	picker = updatePicker(t, picker, tea.KeyMsg{Type: tea.KeyEnter})
+	if picker.Err() != nil {
+		t.Fatalf("err = %v", picker.Err())
+	}
+	// The seeded result keeps the manual-model flag so an untouched save does
+	// not re-validate a manually typed model against the catalog.
+	assertResult(t, picker.Result(), PickerResult{
+		Agent: config.AgentClaude, Model: "typed-custom", Manual: true, Effort: config.EffortHigh,
+		Phases: []PhaseState{{Phase: config.PhaseQA, Name: "QA", Enabled: true}},
+	})
+}
+
+func TestConfigureWizardReconfigureEscInDefaultsEditReturnsToOverview(t *testing.T) {
+	defaults := WizardDefaults{
+		Agent: config.AgentClaude, Model: "sonnet", Effort: config.EffortMedium, Reconfigure: true,
+		Phases: []PhaseState{{Phase: config.PhaseQA, Name: "QA", Enabled: true}},
+	}
+	picker := NewConfigureWizard(pickerCatalog(), defaults)
+	picker = updatePicker(t, picker, tea.KeyMsg{Type: tea.KeyEnter}) // edit defaults
+	picker = updatePicker(t, picker, tea.KeyMsg{Type: tea.KeyEsc})
+	if picker.Screen() != PhaseToggleScreen || picker.Err() != nil || picker.Cursor() != 2 {
+		t.Fatalf("screen = %q err = %v cursor = %d; want back on the overview", picker.Screen(), picker.Err(), picker.Cursor())
+	}
+	// Esc on the overview itself still cancels.
+	picker = updatePicker(t, picker, tea.KeyMsg{Type: tea.KeyEsc})
+	if !errors.Is(picker.Err(), ErrPickerCancelled) {
+		t.Fatalf("err = %v, want cancellation", picker.Err())
+	}
+}
+
+func TestConfigureWizardReconfigureRequiresCompleteDefaults(t *testing.T) {
+	complete := WizardDefaults{Agent: config.AgentClaude, Model: "sonnet", Effort: config.EffortMedium,
+		Phases: []PhaseState{{Phase: config.PhaseQA, Name: "QA", Enabled: true}}}
+	if picker := NewConfigureWizard(pickerCatalog(), complete); picker.Screen() != AgentPickerScreen {
+		t.Fatalf("screen = %q, want the agent picker without the reconfigure flag", picker.Screen())
+	}
+	incomplete := WizardDefaults{Agent: config.AgentClaude, Reconfigure: true,
+		Phases: []PhaseState{{Phase: config.PhaseQA, Name: "QA", Enabled: true}}}
+	if picker := NewConfigureWizard(pickerCatalog(), incomplete); picker.Screen() != AgentPickerScreen {
+		t.Fatalf("screen = %q, want the agent picker when the default tuple is incomplete", picker.Screen())
+	}
+	noPhases := WizardDefaults{Agent: config.AgentClaude, Model: "sonnet", Effort: config.EffortMedium, Reconfigure: true}
+	if picker := NewConfigureWizard(pickerCatalog(), noPhases); picker.Screen() != AgentPickerScreen {
+		t.Fatalf("screen = %q, want the agent picker when there is no phase overview to show", picker.Screen())
 	}
 }

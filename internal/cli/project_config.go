@@ -244,6 +244,7 @@ func wizardDefaultsFromProject(project config.ProjectConfig) tui.WizardDefaults 
 	defaults := tui.WizardDefaults{
 		Agent: project.Defaults.Agent, Model: project.Defaults.Model, Effort: project.Defaults.Effort,
 		FullTuples: true, Manual: project.Defaults.Provenance == config.ModelProvenanceManual,
+		Reconfigure: project.Defaults.Agent != "" && project.Defaults.Model != "" && project.Defaults.Effort != "",
 	}
 	byPhase := make(map[config.Phase]config.PhaseConfig, len(project.Phases))
 	for _, phase := range project.Phases {

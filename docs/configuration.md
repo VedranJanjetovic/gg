@@ -72,13 +72,18 @@ continues.
 ## `gg configure`
 
 Run `gg configure` (or `gg --configure`) from the project folder. On a terminal,
-the full-screen wizard is prefilled with the current values:
+the full-screen wizard opens. With an existing configuration it starts directly
+on the pipeline overview, seeded with the current values; the first-time flow
+walks through the default agent, model, and effort before reaching the same
+overview. On the overview:
 
-- choose the default agent, model, and effort;
-- review the complete pipeline in execution order;
-- use `Space` to toggle the optional phases shown by the wizard and `Enter` on
-  a phase to edit its agent, model, and effort; and
-- select `Save configuration` to validate and persist the staged values.
+- the `Defaults` row at the top shows the default agent, model, and effort that
+  every phase without a custom override inherits — `Enter` on it re-opens the
+  agent, model, and effort screens;
+- every phase is listed in execution order with its effective settings;
+- `Space` toggles an optional phase on or off and `Enter` on a phase edits its
+  agent, model, and effort; and
+- `Enter` on `Save configuration` validates and persists the staged values.
 
 The model picker includes a manual model-name option. Every phase stores its own
 complete tuple, so saving writes the whole template rather than pinning only the
@@ -104,7 +109,7 @@ gg run dashboard \
 
 `--parent-branch` and `--base-ref` set GitOps references; `--enable-pr`,
 `--disable-pr`, `--enable-ci`, and `--disable-ci` control release integration;
-`--max-iterations` is the absolute ceiling of QA attempts (default 10 — the
+`--max-iterations` is the absolute ceiling of QA attempts (default 3 — the
 loop normally ends earlier, on a pass or on a finding that keeps recurring); and
 `--repair-existing-verification` opts Development into repairing verification
 failures that predate the run. These operational flags are the complete run-only

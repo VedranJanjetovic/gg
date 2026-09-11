@@ -140,10 +140,12 @@ func (w *ConfigureWorkflow) Run(ctx context.Context) error {
 // the terminal is non-interactive so line-oriented prompts can take over.
 func (w *ConfigureWorkflow) runWizard(ctx context.Context, catalog config.AgentCatalog, global *config.GlobalConfig, project *config.ProjectConfig) (bool, error) {
 	defaults := tui.WizardDefaults{
-		Agent:  global.Defaults.Agent,
-		Model:  global.Defaults.Model,
-		Effort: global.Defaults.Effort,
-		Phases: currentPhaseStates(*global, project),
+		Agent:       global.Defaults.Agent,
+		Model:       global.Defaults.Model,
+		Effort:      global.Defaults.Effort,
+		Manual:      global.Defaults.Provenance == config.ModelProvenanceManual,
+		Reconfigure: global.Defaults.Agent != "" && global.Defaults.Model != "" && global.Defaults.Effort != "",
+		Phases:      currentPhaseStates(*global, project),
 	}
 	picked, err := w.picker(ctx, catalog, defaults, w.input, w.output)
 	if errors.Is(err, tui.ErrPickerNonInteractive) {

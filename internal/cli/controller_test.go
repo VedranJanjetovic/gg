@@ -63,8 +63,8 @@ func TestControllerWiringRunStopResumeUsesCanonicalSelector(t *testing.T) {
 	if got := controller.executes[0].ArtifactRoot; got != root {
 		t.Fatalf("fresh-run artifact root = %q, want configured root %q", got, root)
 	}
-	if controller.executes[0].MaxIterations != 10 {
-		t.Fatalf("default max iterations = %d, want 10", controller.executes[0].MaxIterations)
+	if controller.executes[0].MaxIterations != 3 {
+		t.Fatalf("default max iterations = %d, want 3", controller.executes[0].MaxIterations)
 	}
 	phases := controller.executes[0].Pipeline.Phases()
 	if phases == nil {

@@ -24,7 +24,7 @@ const (
 	PlanningModerate PlanningComplexity = "Moderate"
 	PlanningComplex  PlanningComplexity = "Complex"
 
-	MaxPlanningPhases   = 10
+	MaxPlanningPhases   = 6
 	MaxPlanningAttempts = 3
 )
 
