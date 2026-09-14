@@ -31,6 +31,11 @@ type RunRequest struct {
 	WorkingDirectory string
 	ArtifactPaths    []string
 	RunID            string
+	// OpenQAFindingIDs names the QA findings a Development fix pass must close
+	// in its artifact's `gg_finding_closures` frontmatter. It is per-invocation
+	// data supplied by the QA feedback loop, never persisted, and is empty for
+	// every other invocation.
+	OpenQAFindingIDs []string
 }
 
 // Disposition is the semantic outcome declared by an agent in the canonical
@@ -169,6 +174,10 @@ type RunResult struct {
 	// in the qa-report frontmatter; nil when the payload predates the
 	// findings contract.
 	QAFindings []QAFinding
+	// FindingClosures carries the closure claims a Development fix pass
+	// declared in the development frontmatter; nil for every invocation that
+	// carried no open QA findings.
+	FindingClosures []FindingClosure
 }
 
 // ProcessSpec describes an executable invocation. Args are passed directly

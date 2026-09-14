@@ -274,26 +274,7 @@ func MaterializeCompleteProjectConfig(global GlobalConfig, project *ProjectConfi
 	legacy := classification == ProjectConfigMigrationRequired
 	resolutionProject := project
 	if project != nil && project.Phases != nil {
-		converted := project.Clone()
-		converted.PhaseOverrides = NormalizePhaseOverrides(converted.PhaseOverrides)
-		if converted.PhaseOverrides == nil {
-			converted.PhaseOverrides = make(map[Phase]PhaseOverride, len(converted.Phases))
-		}
-		for _, entry := range converted.Phases {
-			override := converted.PhaseOverrides[entry.Phase]
-			if !IsFixedPhase(entry.Phase) {
-				enabled := entry.Enabled
-				override.Enabled = &enabled
-			}
-			override.AgentSettingsOverride = AgentSettingsOverride{
-				Agent:      entry.AgentSettings.Agent,
-				Model:      entry.AgentSettings.Model,
-				Effort:     entry.AgentSettings.Effort,
-				Provenance: entry.AgentSettings.Provenance,
-			}
-			converted.PhaseOverrides[entry.Phase] = override
-		}
-		converted.Phases = nil
+		converted := SparseFromComplete(*project)
 		resolutionProject = &converted
 	}
 	resolved, err := Resolve(global, resolutionProject, RunOverrides{})
@@ -322,4 +303,61 @@ func MaterializeCompleteProjectConfig(global GlobalConfig, project *ProjectConfi
 		gitops = project.GitOps
 	}
 	return CompleteProjectConfig(CompleteSchemaVersion, defaults, phases, gitops), nil
+}
+
+// SparseFromComplete converts a folder configuration with baked phase entries
+// back into the sparse overrides form used for editing and resolution. Each
+// phase entry becomes a per-phase override; pinned fields matching the folder
+// defaults are dropped so those phases keep inheriting the defaults, and a
+// pre-existing sparse override keeps precedence over the baked entry it
+// shadows. Sparse input is returned as a clone unchanged.
+func SparseFromComplete(project ProjectConfig) ProjectConfig {
+	converted := project.Clone()
+	if converted.Phases == nil {
+		return converted
+	}
+	pins := NormalizePhaseOverrides(converted.PhaseOverrides)
+	if pins == nil {
+		pins = make(map[Phase]PhaseOverride, len(converted.Phases))
+	}
+	for _, entry := range converted.Phases {
+		pin := pins[entry.Phase]
+		if !IsFixedPhase(entry.Phase) && pin.Enabled == nil {
+			enabled := entry.Enabled
+			pin.Enabled = &enabled
+		}
+		if pin.AgentSettingsOverride == (AgentSettingsOverride{}) {
+			pin.AgentSettingsOverride = pinnedSettings(entry.AgentSettings, converted.Defaults)
+		}
+		if pin == (PhaseOverride{}) {
+			delete(pins, entry.Phase)
+			continue
+		}
+		pins[entry.Phase] = pin
+	}
+	converted.PhaseOverrides = pins
+	converted.Phases = nil
+	// The sparse overrides shape is the legacy schema; a complete folder
+	// carries the complete schema version, which sparse validation rejects.
+	converted.Version = CurrentSchemaVersion
+	return converted
+}
+
+// pinnedSettings reduces a baked phase tuple to the fields that differ from
+// the folder defaults, mirroring the wizard's pin semantics: an empty field
+// inherits the defaults, and a model is only meaningful for its agent, so a
+// differing agent pins its model alongside it.
+func pinnedSettings(settings AgentSettings, defaults AgentSettingsOverride) AgentSettingsOverride {
+	var pin AgentSettingsOverride
+	switch {
+	case settings.Agent == defaults.Agent && settings.Model == defaults.Model:
+	case settings.Agent == defaults.Agent:
+		pin.Model, pin.Provenance = settings.Model, settings.Provenance
+	default:
+		pin.Agent, pin.Model, pin.Provenance = settings.Agent, settings.Model, settings.Provenance
+	}
+	if settings.Effort != defaults.Effort {
+		pin.Effort = settings.Effort
+	}
+	return pin
 }

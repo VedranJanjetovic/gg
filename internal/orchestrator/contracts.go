@@ -51,6 +51,10 @@ type Request struct {
 	// verification. It is never persisted; the exact violations are quoted
 	// into the fresh standalone prompt.
 	QAProofRepair *QAProofRepair
+	// QAFindingClosure is transient context for a Development fix pass in the
+	// QA feedback loop. It is never persisted; the open findings and the
+	// earlier subphase's claims are quoted into the fresh standalone prompt.
+	QAFindingClosure *QAFindingClosure
 }
 
 type PlanningRetry struct {
@@ -63,6 +67,15 @@ type PlanningRetry struct {
 // invocation must fix.
 type QAProofRepair struct {
 	Violations []string
+}
+
+// QAFindingClosure carries what one Development fix pass must demonstrably
+// close. Open names the QA findings still counted against the loop; Claims
+// carries the closure claims an earlier subphase of the same pass declared, so
+// the verification subphase can attempt to disprove them.
+type QAFindingClosure struct {
+	Open   []state.QAFindingStrike
+	Claims []agent.FindingClosure
 }
 
 // PlanPhaseScope names the plan phase a Development run is confined to.

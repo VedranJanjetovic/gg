@@ -73,9 +73,13 @@ continues.
 
 Run `gg configure` (or `gg --configure`) from the project folder. On a terminal,
 the full-screen wizard opens. With an existing configuration it starts directly
-on the pipeline overview, seeded with the current values; the first-time flow
+on the pipeline overview, seeded with the folder's effective values — the
+folder configuration layered over the global defaults; the first-time flow
 walks through the default agent, model, and effort before reaching the same
-overview. On the overview:
+overview. Selections are saved to the folder configuration only: the global
+defaults are seeded by the very first `gg configure` and act as the fallback
+for folders that have not been configured, so reconfiguring one folder never
+changes another. On the overview:
 
 - the `Defaults` row at the top shows the default agent, model, and effort that
   every phase without a custom override inherits — `Enter` on it re-opens the

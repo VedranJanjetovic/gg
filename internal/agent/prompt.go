@@ -61,6 +61,14 @@ type PromptInput struct {
 	// non-empty, the QA invocation repairs the artifacts instead of redoing
 	// the verification they already evidence.
 	QAProofViolations []string
+	// OpenQAFindings names the QA findings a Development fix pass must close.
+	// It is per-invocation data supplied by the QA feedback loop, never
+	// persisted project state, and drives the `gg_finding_closures` contract.
+	OpenQAFindings []state.QAFindingStrike
+	// PriorFindingClosures carries the closure claims an earlier subphase of
+	// the same fix pass declared, so the verification subphase can attempt to
+	// disprove them. Per-invocation only, like OpenQAFindings.
+	PriorFindingClosures []FindingClosure
 }
 
 // PromptBuilder constructs a standalone prompt without consulting chat state.
@@ -245,6 +253,13 @@ func BuildPrompt(input PromptInput) (string, error) {
 				writeQuotedValue(&b, path)
 				b.WriteByte('\n')
 			}
+		}
+	}
+	if input.Phase == pipeline.PhaseDevelopment && len(input.OpenQAFindings) > 0 {
+		writeFindingClosureInstruction(&b, input.OpenQAFindings)
+		if input.Subphase == string(pipeline.DevelopmentSubphaseVerification) ||
+			input.Subphase == string(pipeline.DevelopmentSubphaseReview) {
+			writeFindingClosureAdversarialInstruction(&b, input.PriorFindingClosures)
 		}
 	}
 
@@ -441,6 +456,55 @@ func writeQAFindingsInstruction(b *strings.Builder, prior []state.QAFindingStrik
 		if strings.TrimSpace(finding.Summary) != "" {
 			b.WriteString(" summary ")
 			writeQuotedValue(b, finding.Summary)
+		}
+		b.WriteByte('\n')
+	}
+}
+
+// writeFindingClosureInstruction demands machine-checked closure evidence from
+// a Development fix pass and hands it every open finding it must answer. The
+// QA attempt that follows is metered, so a pass that merely asserts a finding
+// is closed spends an attempt proving itself wrong; the contract forces it to
+// name what demonstrates each closure instead.
+func writeFindingClosureInstruction(b *strings.Builder, open []state.QAFindingStrike) {
+	b.WriteString("\n## QA finding closure contract\n")
+	b.WriteString("This run is a fix pass for the QA findings listed below. The development artifact's frontmatter MUST also carry `gg_finding_closures`: a non-empty single-line JSON array with one entry per open finding id, each `{\"id\": \"<the exact open finding id>\", \"evidence\": \"<the command or test that now exercises it, and its observed result>\", \"covered\": [\"<each concrete thing now covered>\", ...]}`.\n")
+	b.WriteString("Every open finding id listed below MUST appear in the array, reusing the id exactly. A missing id, or an entry whose `evidence` is empty or only whitespace, fails this pass immediately — before QA re-runs.\n")
+	b.WriteString("`evidence` must NAME what proves the fix: the exact command or test identity you ran and the result you observed. It must not assert that the finding is fixed; prose such as \"implemented\" or \"the finding is resolved\" is not evidence.\n")
+	b.WriteString("Passing tests alone are NOT evidence for a coverage-completeness finding. When the finding is that something is incompletely covered, `covered` MUST enumerate every concrete item now covered — each operation, branch, input, or case — so the enumeration can be compared against what the finding requires.\n")
+	b.WriteString("Open findings this pass must close:\n")
+	for _, finding := range open {
+		b.WriteString("- id ")
+		writeQuotedValue(b, finding.ID)
+		if strings.TrimSpace(finding.Summary) != "" {
+			b.WriteString(" summary ")
+			writeQuotedValue(b, finding.Summary)
+		}
+		b.WriteByte('\n')
+	}
+}
+
+// writeFindingClosureAdversarialInstruction scopes the fix pass's verification
+// subphase to disproving the implementation subphase's closure claims. It runs
+// before the metered QA attempt, so refuting a claim here is free while letting
+// QA discover it costs one of a bounded number of attempts.
+func writeFindingClosureAdversarialInstruction(b *strings.Builder, claims []FindingClosure) {
+	b.WriteString("\n## Adversarial closure verification\n")
+	b.WriteString("This subphase must attempt to DISPROVE every closure claim the implementation pass made for the open findings above. Do not read a claim and agree with it: independently re-run the evidence it names, and compare its enumerated coverage against what the finding actually requires, item by item, naming anything the claim omits.\n")
+	b.WriteString("A claim you cannot independently verify is a FAILURE, not a pass: report `gg_disposition: failed` and state exactly which claim you could not confirm and what remains missing. Fix what you can within the findings' scope, then rewrite `gg_finding_closures` in your own artifact with the evidence YOU observed, covering every open finding id.\n")
+	if len(claims) == 0 {
+		b.WriteString("The implementation pass declared no closure claims, so nothing is pre-verified: establish and record the closure evidence for every open finding id yourself.\n")
+		return
+	}
+	b.WriteString("Closure claims to disprove:\n")
+	for _, claim := range claims {
+		b.WriteString("- id ")
+		writeQuotedValue(b, claim.ID)
+		b.WriteString(" claimed evidence ")
+		writeQuotedValue(b, claim.Evidence)
+		if len(claim.Covered) > 0 {
+			b.WriteString(" claimed coverage ")
+			writeQuotedValue(b, strings.Join(claim.Covered, ", "))
 		}
 		b.WriteByte('\n')
 	}

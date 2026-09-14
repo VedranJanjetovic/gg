@@ -80,7 +80,10 @@ func (w *ConfigureWorkflow) Run(ctx context.Context) error {
 	if projectMissing {
 		project = config.ProjectConfig{Version: config.CurrentSchemaVersion}
 	} else {
-		project = cloneProjectConfig(project)
+		// Editing works on the sparse overrides form; a complete folder
+		// configuration is converted so its defaults and per-phase pins
+		// prefill the prompts and its baked structure is preserved.
+		project = config.SparseFromComplete(project)
 	}
 
 	if firstTime {
@@ -127,7 +130,7 @@ func (w *ConfigureWorkflow) Run(ctx context.Context) error {
 	if err := w.store.SaveConfiguration(root, global, project); err != nil {
 		return fmt.Errorf("persist configuration: %w", err)
 	}
-	message := "Configuration updated."
+	message := "Project configuration updated."
 	if firstTime || projectMissing {
 		message = "Configuration saved. This project is ready in .gg/projects."
 	}
@@ -139,12 +142,13 @@ func (w *ConfigureWorkflow) Run(ctx context.Context) error {
 // currently effective values. It reports handled=false without an error when
 // the terminal is non-interactive so line-oriented prompts can take over.
 func (w *ConfigureWorkflow) runWizard(ctx context.Context, catalog config.AgentCatalog, global *config.GlobalConfig, project *config.ProjectConfig) (bool, error) {
+	effective := effectiveDefaults(*global, project)
 	defaults := tui.WizardDefaults{
-		Agent:       global.Defaults.Agent,
-		Model:       global.Defaults.Model,
-		Effort:      global.Defaults.Effort,
-		Manual:      global.Defaults.Provenance == config.ModelProvenanceManual,
-		Reconfigure: global.Defaults.Agent != "" && global.Defaults.Model != "" && global.Defaults.Effort != "",
+		Agent:       effective.Agent,
+		Model:       effective.Model,
+		Effort:      effective.Effort,
+		Manual:      effective.Provenance == config.ModelProvenanceManual,
+		Reconfigure: effective.Agent != "" && effective.Model != "" && effective.Effort != "",
 		Phases:      currentPhaseStates(*global, project),
 	}
 	picked, err := w.picker(ctx, catalog, defaults, w.input, w.output)
@@ -157,9 +161,38 @@ func (w *ConfigureWorkflow) runWizard(ctx context.Context, catalog config.AgentC
 	if err := validatePickerSelection(catalog, picked); err != nil {
 		return false, fmt.Errorf("validate staged global configuration: %w", err)
 	}
-	global.Defaults = config.AgentSettings{Agent: picked.Agent, Model: picked.Model, Effort: picked.Effort}
+	project.Defaults = config.AgentSettingsOverride{Agent: picked.Agent, Model: picked.Model, Effort: picked.Effort}
+	// The global defaults are only the machine-wide fallback for folders that
+	// have no configuration yet: they are seeded on the first configuration
+	// and never rewritten by a folder reconfigure.
+	if global.Defaults.Agent == "" || global.Defaults.Model == "" || global.Defaults.Effort == "" {
+		global.Defaults = config.AgentSettings{Agent: picked.Agent, Model: picked.Model, Effort: picked.Effort}
+	}
 	applyPhaseSelections(project, defaults.Phases, picked)
 	return true, nil
+}
+
+// effectiveDefaults layers the folder's default selections over the global
+// defaults so prompts open on the currently effective values instead of the
+// machine-wide fallback.
+func effectiveDefaults(global config.GlobalConfig, project *config.ProjectConfig) config.AgentSettings {
+	defaults := global.Defaults
+	if project == nil {
+		return defaults
+	}
+	if project.Defaults.Agent != "" {
+		defaults.Agent = project.Defaults.Agent
+	}
+	if project.Defaults.Model != "" {
+		defaults.Model = project.Defaults.Model
+	}
+	if project.Defaults.Effort != "" {
+		defaults.Effort = project.Defaults.Effort
+	}
+	if project.Defaults.Provenance != "" {
+		defaults.Provenance = project.Defaults.Provenance
+	}
+	return defaults
 }
 
 // phaseDescriptions annotate the wizard's toggleable phase rows.
@@ -307,15 +340,16 @@ func (w *ConfigureWorkflow) reconfigure(global *config.GlobalConfig, project *co
 	if _, err := fmt.Fprintln(p.output, "Current values are shown in brackets; press Enter to keep them."); err != nil {
 		return err
 	}
-	agent, model, _, err := w.selectAgentModel(p, "Default agent", global.Defaults.Agent, global.Defaults.Model)
+	effective := effectiveDefaults(*global, project)
+	agent, model, _, err := w.selectAgentModel(p, "Default agent", effective.Agent, effective.Model)
 	if err != nil {
 		return err
 	}
-	effort, err := p.effort("Default effort", global.Defaults.Effort, false)
+	effort, err := p.effort("Default effort", effective.Effort, false)
 	if err != nil {
 		return err
 	}
-	global.Defaults = config.AgentSettings{Agent: agent, Model: model, Effort: effort}
+	project.Defaults = config.AgentSettingsOverride{Agent: agent, Model: model, Effort: effort}
 	configurePhases, _, err := p.enabled("Configure per-phase overrides?", false)
 	if err != nil {
 		return err
@@ -550,11 +584,3 @@ func validEffort(v string) bool {
 	return v == string(config.EffortLow) || v == string(config.EffortMedium) || v == string(config.EffortHigh)
 }
 func boolPtr(v bool) *bool { return &v }
-
-func cloneProjectConfig(project config.ProjectConfig) config.ProjectConfig {
-	if project.PhaseOverrides == nil {
-		return project
-	}
-	project.PhaseOverrides = config.NormalizePhaseOverrides(project.PhaseOverrides)
-	return project
-}

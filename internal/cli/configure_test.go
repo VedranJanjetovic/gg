@@ -334,7 +334,7 @@ func TestConfigureEOFDoesNotWriteStagedChanges(t *testing.T) {
 		config.PhaseQA: {Enabled: &disabled, AgentSettingsOverride: config.AgentSettingsOverride{Model: "qa-model"}},
 	}
 	originalGlobal := store.global
-	originalProject := cloneProjectConfig(store.project)
+	originalProject := store.project.Clone()
 	var output bytes.Buffer
 	err := NewConfigureWorkflow(strings.NewReader("codex\n"), &output, func() (string, error) { return "/repo", nil }, store).Run(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "input ended before completion") {
@@ -661,7 +661,7 @@ func TestConfigureWizardKeepsExistingPhaseAgentOverridesWhenToggling(t *testing.
 
 func TestConfigureReconfigurationPickerCancellationDoesNotPersist(t *testing.T) {
 	store := configuredMemoryStore()
-	beforeGlobal, beforeProject := store.global, cloneProjectConfig(store.project)
+	beforeGlobal, beforeProject := store.global, store.project.Clone()
 	workflow := NewConfigureWorkflowWithPicker(strings.NewReader(""), &bytes.Buffer{}, func() (string, error) { return "/repo", nil }, store, config.NewDefaultAgentCatalogSource(), func(context.Context, config.AgentCatalog, tui.WizardDefaults, io.Reader, io.Writer) (tui.PickerResult, error) {
 		return tui.PickerResult{}, tui.ErrPickerCancelled
 	})
@@ -721,8 +721,14 @@ func TestAppConfigureReconfigurationUsesInjectedPicker(t *testing.T) {
 	if code := app.Run(context.Background(), []string{"configure"}, &stdout, &stderr); code != 0 {
 		t.Fatalf("code=%d stderr=%q", code, stderr.String())
 	}
-	if !called || store.savedGlobal.Defaults.Model != "opus" {
-		t.Fatalf("called=%v saved=%#v", called, store.savedGlobal)
+	if !called {
+		t.Fatal("injected picker was not called")
+	}
+	if got := store.savedGlobal.Defaults; got.Model != "sonnet" {
+		t.Fatalf("global defaults = %#v, want the untouched machine-wide fallback", got)
+	}
+	if got := store.savedProject.Defaults; got.Agent != config.AgentClaude || got.Model != "opus" || got.Effort != config.EffortHigh {
+		t.Fatalf("project defaults = %#v, want the picked selection", got)
 	}
 }
 
@@ -797,5 +803,139 @@ func TestConfigureWizardClearsPinWhenPhaseMatchesNewDefaults(t *testing.T) {
 	}
 	if override, ok := store.savedProject.PhaseOverrides[config.PhaseQA]; ok {
 		t.Fatalf("qa override = %#v, want removed after re-picking the defaults", override)
+	}
+}
+
+func TestConfigureWizardPrefillsFromProjectConfigurationNotGlobal(t *testing.T) {
+	store := &memoryConfigureStore{
+		global:  config.GlobalConfig{Version: config.CurrentSchemaVersion, Defaults: config.AgentSettings{Agent: config.AgentClaude, Model: "global-model", Effort: config.EffortMedium}},
+		project: completeTestProjectConfig(config.AgentCodex, "folder-model", config.EffortHigh),
+	}
+	picker := func(_ context.Context, _ config.AgentCatalog, defaults tui.WizardDefaults, _ io.Reader, _ io.Writer) (tui.PickerResult, error) {
+		if defaults.Agent != config.AgentCodex || defaults.Model != "folder-model" || defaults.Effort != config.EffortHigh {
+			t.Fatalf("wizard defaults = %#v, want the folder configuration, not the global defaults", defaults)
+		}
+		for _, state := range defaults.Phases {
+			if state.Agent != "" || state.Model != "" || state.Effort != "" {
+				t.Fatalf("phase %s prefilled with a pin %#v, want inherit: every phase follows the folder defaults", state.Phase, state)
+			}
+		}
+		return tui.PickerResult{Agent: defaults.Agent, Model: defaults.Model, Effort: defaults.Effort, Manual: true, Phases: defaults.Phases}, nil
+	}
+	workflow := NewConfigureWorkflowWithPicker(strings.NewReader(""), &bytes.Buffer{}, func() (string, error) { return "/repo", nil }, store, config.NewDefaultAgentCatalogSource(), picker)
+	if err := workflow.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := store.savedGlobal.Defaults; got.Model != "global-model" {
+		t.Fatalf("global defaults = %#v, want the untouched machine-wide fallback", got)
+	}
+	if got := store.savedProject.Defaults; got.Agent != config.AgentCodex || got.Model != "folder-model" || got.Effort != config.EffortHigh {
+		t.Fatalf("project defaults = %#v, want the folder selection kept", got)
+	}
+}
+
+func TestConfigureWizardSavesSelectionToProjectAndLeavesGlobalUntouched(t *testing.T) {
+	store := completeConfiguredMemoryStore()
+	picker := func(_ context.Context, _ config.AgentCatalog, defaults tui.WizardDefaults, _ io.Reader, _ io.Writer) (tui.PickerResult, error) {
+		return tui.PickerResult{Agent: config.AgentClaude, Model: "opus", Effort: config.EffortHigh, Phases: defaults.Phases}, nil
+	}
+	workflow := NewConfigureWorkflowWithPicker(strings.NewReader(""), &bytes.Buffer{}, func() (string, error) { return "/repo", nil }, store, config.NewDefaultAgentCatalogSource(), picker)
+	if err := workflow.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := store.savedGlobal.Defaults; got.Agent != config.AgentClaude || got.Model != "sonnet" || got.Effort != config.EffortMedium {
+		t.Fatalf("global defaults = %#v, want the untouched machine-wide fallback", got)
+	}
+	if got := store.savedProject.Defaults; got.Model != "opus" || got.Effort != config.EffortHigh {
+		t.Fatalf("project defaults = %#v, want the picked selection", got)
+	}
+	for _, entry := range store.savedProject.Phases {
+		if entry.AgentSettings.Model != "opus" {
+			t.Fatalf("phase %s = %#v, want every unpinned phase to follow the new folder defaults", entry.Phase, entry.AgentSettings)
+		}
+	}
+}
+
+func TestConfigureWizardKeepsPerPhaseSettingsFromCompleteProject(t *testing.T) {
+	store := completeConfiguredMemoryStore()
+	for i := range store.project.Phases {
+		if store.project.Phases[i].Phase == config.PhaseQA {
+			store.project.Phases[i].AgentSettings = config.AgentSettings{Agent: config.AgentCodex, Model: "qa-model", Effort: config.EffortHigh, Provenance: config.ModelProvenanceManual}
+		}
+	}
+	picker := func(_ context.Context, _ config.AgentCatalog, defaults tui.WizardDefaults, _ io.Reader, _ io.Writer) (tui.PickerResult, error) {
+		var qa tui.PhaseState
+		for _, state := range defaults.Phases {
+			if state.Phase == config.PhaseQA {
+				qa = state
+			}
+		}
+		if qa.Agent != config.AgentCodex || qa.Model != "qa-model" || qa.Effort != config.EffortHigh {
+			t.Fatalf("qa prefill = %#v, want the folder's per-phase settings shown as a pin", qa)
+		}
+		return tui.PickerResult{Agent: defaults.Agent, Model: defaults.Model, Effort: defaults.Effort, Phases: defaults.Phases}, nil
+	}
+	workflow := NewConfigureWorkflowWithPicker(strings.NewReader(""), &bytes.Buffer{}, func() (string, error) { return "/repo", nil }, store, config.NewDefaultAgentCatalogSource(), picker)
+	if err := workflow.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range store.savedProject.Phases {
+		want := config.AgentSettings{Agent: config.AgentClaude, Model: "sonnet", Effort: config.EffortMedium}
+		if entry.Phase == config.PhaseQA {
+			want = config.AgentSettings{Agent: config.AgentCodex, Model: "qa-model", Effort: config.EffortHigh}
+		}
+		got := entry.AgentSettings
+		if got.Agent != want.Agent || got.Model != want.Model || got.Effort != want.Effort {
+			t.Fatalf("phase %s = %#v, want %#v preserved across an unchanged reconfigure", entry.Phase, got, want)
+		}
+	}
+}
+
+func TestConfigureWizardPhaseToggleSticksForCompleteProject(t *testing.T) {
+	store := completeConfiguredMemoryStore()
+	picker := func(_ context.Context, _ config.AgentCatalog, defaults tui.WizardDefaults, _ io.Reader, _ io.Writer) (tui.PickerResult, error) {
+		selected := append([]tui.PhaseState(nil), defaults.Phases...)
+		for i := range selected {
+			if selected[i].Phase == config.PhaseQA {
+				if !selected[i].Enabled {
+					t.Fatalf("qa prefill = %#v, want enabled from the folder configuration", selected[i])
+				}
+				selected[i].Enabled = false
+			}
+		}
+		return tui.PickerResult{Agent: defaults.Agent, Model: defaults.Model, Effort: defaults.Effort, Phases: selected}, nil
+	}
+	workflow := NewConfigureWorkflowWithPicker(strings.NewReader(""), &bytes.Buffer{}, func() (string, error) { return "/repo", nil }, store, config.NewDefaultAgentCatalogSource(), picker)
+	if err := workflow.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range store.savedProject.Phases {
+		if entry.Phase == config.PhaseQA && entry.Enabled {
+			t.Fatalf("qa = %#v, want the wizard toggle persisted for an already-complete folder", entry)
+		}
+	}
+}
+
+func TestConfigureFallbackPrefillsFromProjectAndSavesToProject(t *testing.T) {
+	store := &memoryConfigureStore{
+		global:  config.GlobalConfig{Version: config.CurrentSchemaVersion, Defaults: config.AgentSettings{Agent: config.AgentClaude, Model: "global-model", Effort: config.EffortMedium}},
+		project: completeTestProjectConfig(config.AgentCodex, "folder-model", config.EffortHigh),
+	}
+	var output bytes.Buffer
+	// Keep agent, model, and effort; decline the per-phase walk.
+	err := NewConfigureWorkflow(strings.NewReader("\n\n\n\n"), &output, func() (string, error) { return "/repo", nil }, store).Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	for _, want := range []string{"[codex]", "[folder-model]", "[high]"} {
+		if !strings.Contains(output.String(), want) {
+			t.Errorf("output missing folder prefill %q: %q", want, output.String())
+		}
+	}
+	if got := store.savedGlobal.Defaults; got.Model != "global-model" {
+		t.Fatalf("global defaults = %#v, want the untouched machine-wide fallback", got)
+	}
+	if got := store.savedProject.Defaults; got.Agent != config.AgentCodex || got.Model != "folder-model" || got.Effort != config.EffortHigh {
+		t.Fatalf("project defaults = %#v, want the folder selection kept", got)
 	}
 }

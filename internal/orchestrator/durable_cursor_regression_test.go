@@ -131,7 +131,7 @@ func TestStopDuringPostConflictQASurvivesRestartWithoutReplayingRebase(t *testin
 	}
 
 	want := []string{
-		"development/implementation",
+		"development/implementation", "development/verification",
 		"rebase/", "qa/", "test_document/",
 	}
 	if !reflect.DeepEqual(finishRunner.calls, want) {
@@ -212,8 +212,8 @@ func TestResumeAfterSuccessfulQAFixSubphaseStartsAtNextSubphase(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Resume() error = %v", err)
 	}
-	if len(resumeRunner.calls) == 0 || resumeRunner.calls[0] != "qa/" {
-		t.Fatalf("resume dispatches = %v, want QA re-run after the completed implementation fix", resumeRunner.calls)
+	if len(resumeRunner.calls) == 0 || resumeRunner.calls[0] != "development/verification" {
+		t.Fatalf("resume dispatches = %v, want the verification fix subphase after the completed implementation fix", resumeRunner.calls)
 	}
 	if containsRegressionString(resumeRunner.calls, "development/implementation") {
 		t.Fatalf("resume replayed already successful fix subphase: %v", resumeRunner.calls)

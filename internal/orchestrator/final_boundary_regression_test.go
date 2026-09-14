@@ -256,7 +256,7 @@ func TestResumeReconcilesFinishedQAFixCursorAfterReservation(t *testing.T) {
 		finished      string
 		firstDispatch string
 	}{
-		{name: "completed implementation fix returns to QA", finished: "implementation", firstDispatch: "qa/"},
+		{name: "completed implementation fix runs the verification fix subphase", finished: "implementation", firstDispatch: "development/verification"},
 		{name: "legacy testing fix cursor returns to QA", finished: "testing", firstDispatch: "qa/"},
 		{name: "legacy review fix cursor returns to QA", finished: "review", firstDispatch: "qa/"},
 	}

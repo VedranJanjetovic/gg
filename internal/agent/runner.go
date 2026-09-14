@@ -378,6 +378,20 @@ func (r *AgentRunner) Run(ctx context.Context, req RunRequest) (RunResult, error
 			waitErr = errors.Join(waitErr, &SemanticFailureError{Phase: req.Phase, Disposition: disposition})
 		}
 	}
+	if req.Phase == pipeline.PhaseDevelopment && len(req.OpenQAFindingIDs) > 0 && status == state.StatusFinished {
+		// A fix pass that only asserts a finding is closed makes the metered QA
+		// gate discover the gap, spending one of a bounded number of attempts.
+		// Closure must therefore be declared as checkable evidence: a breach is
+		// a semantic failure of this pass, which the orchestrator retries inside
+		// the round without touching the QA attempt or strike counters.
+		result.FindingClosures = readFindingClosures(req.WorkingDirectory)
+		if details := findingClosureViolations(req.OpenQAFindingIDs, result.FindingClosures); details != "" {
+			result.Disposition = DispositionFailed
+			result.Status = state.StatusFailed
+			status, et = state.StatusFailed, EventFailed
+			waitErr = errors.Join(waitErr, &SemanticFailureError{Phase: req.Phase, Disposition: DispositionFailed, Details: details})
+		}
+	}
 	stdoutData, stderrData := log.StreamTails()
 	if pr.ExitCode != 0 {
 		// Surface the reason instead of a bare exit status. claude reports

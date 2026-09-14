@@ -590,12 +590,26 @@ func (c *sequentialController) executeQAFeedbackLoop(ctx context.Context, reques
 			}
 		}
 		resuming := cursor != ""
+		// Closure claims flow forward inside one fix pass only: the
+		// implementation subphase declares them and the verification subphase
+		// tries to disprove them. They are never persisted.
+		var claims []agent.FindingClosure
+		fixRequest := func() Request {
+			scoped := *request
+			if len(request.Project.QAFindingStrikes) > 0 {
+				scoped.QAFindingClosure = &QAFindingClosure{
+					Open:   append([]state.QAFindingStrike(nil), request.Project.QAFindingStrikes...),
+					Claims: append([]agent.FindingClosure(nil), claims...),
+				}
+			}
+			return scoped
+		}
 		for index, subphase := range fixSubphases {
 			if resuming && subphase != cursor {
 				continue
 			}
 			resuming = false
-			fixOutcome, fixErr := c.executePhase(ctx, *request, development, subphase, iteration, feedback)
+			fixOutcome, fixErr := c.executePhase(ctx, fixRequest(), development, subphase, iteration, feedback)
 			outcomes = append(outcomes, fixOutcome)
 			request.Project.ArtifactPaths = appendUnique(request.Project.ArtifactPaths, fixOutcome.Result.ArtifactPaths...)
 			// The fix agent itself gets a bounded budget: a pure failed verdict
@@ -610,7 +624,7 @@ func (c *sequentialController) executeQAFeedbackLoop(ctx context.Context, reques
 					return errors.Join(fixErr, publishErr)
 				}
 				fixFeedback := appendUnique(append([]string(nil), feedback...), fixOutcome.Result.ArtifactPaths...)
-				fixOutcome, fixErr = c.executePhase(ctx, *request, development, subphase, iteration, fixFeedback)
+				fixOutcome, fixErr = c.executePhase(ctx, fixRequest(), development, subphase, iteration, fixFeedback)
 				outcomes = append(outcomes, fixOutcome)
 				request.Project.ArtifactPaths = appendUnique(request.Project.ArtifactPaths, fixOutcome.Result.ArtifactPaths...)
 			}
@@ -623,6 +637,9 @@ func (c *sequentialController) executeQAFeedbackLoop(ctx context.Context, reques
 					}
 				}
 				return fixErr
+			}
+			if len(fixOutcome.Result.FindingClosures) > 0 {
+				claims = fixOutcome.Result.FindingClosures
 			}
 			if index+1 < len(fixSubphases) {
 				next := fixSubphases[index+1]
@@ -641,9 +658,10 @@ func (c *sequentialController) executeQAFeedbackLoop(ctx context.Context, reques
 			if !c.completedLegacyFixCursor(cursor, request.Subphases) {
 				return fmt.Errorf("resume Development fix subphase %q is not configured", cursor)
 			}
-			// The persisted cursor names a checking subphase an older binary
-			// re-ran per fix pass; the QA re-run below now owns that
-			// responsibility, so the fix stage is already complete.
+			// The persisted cursor names a subphase this binary's fix pass does
+			// not run — a legacy split checking subphase, or one that follows
+			// the fix sequence. The QA re-run below owns those, so the fix
+			// stage is already complete.
 		}
 		rebaseOutcome, rebaseErr := c.executeRebaseBeforeQA(ctx, request, iteration, feedback)
 		if rebaseOutcome.Result.Phase != "" {
@@ -1530,6 +1548,16 @@ func (c *sequentialController) executePhase(ctx context.Context, request Request
 	if request.QAProofRepair != nil && phase == pipeline.PhaseQA {
 		promptInput.QAProofViolations = append([]string(nil), request.QAProofRepair.Violations...)
 	}
+	var openQAFindingIDs []string
+	if request.QAFindingClosure != nil && phase == pipeline.PhaseDevelopment {
+		promptInput.OpenQAFindings = append([]state.QAFindingStrike(nil), request.QAFindingClosure.Open...)
+		promptInput.PriorFindingClosures = append([]agent.FindingClosure(nil), request.QAFindingClosure.Claims...)
+		for _, finding := range request.QAFindingClosure.Open {
+			if id := strings.TrimSpace(finding.ID); id != "" {
+				openQAFindingIDs = append(openQAFindingIDs, id)
+			}
+		}
+	}
 	if request.PlanScope != nil {
 		promptInput.PlanPhase = request.PlanScope.Name
 		promptInput.PlanPhaseIndex = request.PlanScope.Index
@@ -1637,11 +1665,11 @@ func (c *sequentialController) executePhase(ctx context.Context, request Request
 				}
 			} else {
 				dispatched = true
-				runResult, runErr = c.runner.Run(ctx, agent.RunRequest{Project: request.Project, Phase: phase, Subphase: subphase, Settings: settings, Prompt: prompt, WorkingDirectory: request.Project.WorktreePath, ArtifactPaths: artifacts, RunID: invocationID})
+				runResult, runErr = c.runner.Run(ctx, agent.RunRequest{Project: request.Project, Phase: phase, Subphase: subphase, Settings: settings, Prompt: prompt, WorkingDirectory: request.Project.WorktreePath, ArtifactPaths: artifacts, RunID: invocationID, OpenQAFindingIDs: openQAFindingIDs})
 			}
 		} else {
 			dispatched = true
-			runResult, runErr = c.runner.Run(ctx, agent.RunRequest{Project: request.Project, Phase: phase, Subphase: subphase, Settings: settings, Prompt: prompt, WorkingDirectory: request.Project.WorktreePath, ArtifactPaths: artifacts, RunID: invocationID})
+			runResult, runErr = c.runner.Run(ctx, agent.RunRequest{Project: request.Project, Phase: phase, Subphase: subphase, Settings: settings, Prompt: prompt, WorkingDirectory: request.Project.WorktreePath, ArtifactPaths: artifacts, RunID: invocationID, OpenQAFindingIDs: openQAFindingIDs})
 		}
 	}
 	if phase == pipeline.PhaseRebase && c.conflictState != nil && !request.Project.GitDisabled {
@@ -2126,31 +2154,50 @@ func (c *sequentialController) subphases(phase pipeline.PhaseID, generation pipe
 }
 
 // qaFixSubphases returns the Development subphases one QA feedback iteration
-// re-runs. Fixes are confined to the first (implementation) subphase: the QA
-// attempt that follows every fix pass is the verification gate, so re-running
-// the later checking subphases per iteration would only duplicate it.
+// re-runs: implementation, then verification. Running an unmetered check
+// before the metered QA gate is not duplication. QA re-verifies every
+// acceptance criterion and consumes one of a bounded number of attempts, so a
+// fix pass that only asserts a finding is closed spends an attempt discovering
+// otherwise; a findings-scoped verification is cheap, free of that counter,
+// and can disprove the fix pass's own closure claims first. Later subphases of
+// an override sequence stay with the QA re-run.
 func (c *sequentialController) qaFixSubphases(generation pipeline.DevelopmentSubphaseGeneration) ([]string, error) {
 	subphases, err := c.subphases(pipeline.PhaseDevelopment, generation)
-	if err != nil || len(subphases) == 0 {
+	if err != nil || len(subphases) <= maxQAFixSubphases {
 		return subphases, err
 	}
-	return subphases[:1], nil
+	return subphases[:maxQAFixSubphases], nil
 }
 
+// maxQAFixSubphases is how many leading Development subphases one QA fix pass
+// re-runs: implementation and the verification that adversarially checks it.
+const maxQAFixSubphases = 2
+
 // completedLegacyFixCursor reports whether a persisted QA fix cursor names a
-// subphase that no longer runs in the fix pipeline — either a legacy split
-// checking subphase from an older binary or a later subphase of the full
-// generated sequence. Both mean every remaining fix responsibility now belongs
-// to the QA re-run, so the fix stage is complete.
+// subphase the fix pipeline does not run — either a legacy split checking
+// subphase from an older binary, or a subphase that follows the fix sequence
+// in the full generated order. Both mean every remaining fix responsibility
+// belongs to the QA re-run, so the fix stage is complete.
+//
+// The boundary is derived from the live fix sequence rather than hardcoded at
+// index 1. That keeps cursors this binary persists (implementation and
+// verification, both inside the fix sequence) resuming into their own subphase
+// instead of being mistaken for a completed stage, while a cursor an older
+// binary left beyond the fix sequence — including the testing/review aliases —
+// still resumes straight into the QA re-run.
 func (c *sequentialController) completedLegacyFixCursor(cursor string, generation pipeline.DevelopmentSubphaseGeneration) bool {
 	if _, ok := pipeline.LegacyDevelopmentSubphaseAlias(cursor); ok {
 		return true
 	}
 	subphases, err := c.subphases(pipeline.PhaseDevelopment, generation)
-	if err != nil || len(subphases) < 2 {
+	if err != nil {
 		return false
 	}
-	for _, subphase := range subphases[1:] {
+	fixSubphases, err := c.qaFixSubphases(generation)
+	if err != nil || len(subphases) <= len(fixSubphases) {
+		return false
+	}
+	for _, subphase := range subphases[len(fixSubphases):] {
 		if subphase == cursor {
 			return true
 		}

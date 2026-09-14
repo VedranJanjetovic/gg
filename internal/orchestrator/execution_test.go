@@ -793,6 +793,7 @@ func TestLegacyQARetryDoesNotInjectNewRebaseInvariant(t *testing.T) {
 		statuses: []state.LifecycleStatus{
 			state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFailed,
 			state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFinished,
+			state.StatusFinished,
 		},
 		artifacts: []string{"qa-feedback.md"},
 	}
@@ -803,14 +804,14 @@ func TestLegacyQARetryDoesNotInjectNewRebaseInvariant(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(outcomes) != 8 {
-		t.Fatalf("outcomes = %d, want 8 for legacy QA-before-Rebase retry", len(outcomes))
+	if len(outcomes) != 9 {
+		t.Fatalf("outcomes = %d, want 9 for legacy QA-before-Rebase retry", len(outcomes))
 	}
 	want := []pipeline.PhaseID{
 		pipeline.PhaseAcceptanceCriteria,
 		pipeline.PhaseDevelopment, pipeline.PhaseDevelopment,
 		pipeline.PhaseQA,
-		pipeline.PhaseDevelopment,
+		pipeline.PhaseDevelopment, pipeline.PhaseDevelopment,
 		pipeline.PhaseQA, pipeline.PhaseRebase, pipeline.PhaseTestDocument,
 	}
 	if !reflect.DeepEqual(runnerRequestsPhases(runner.requests), want) {
@@ -852,7 +853,7 @@ func TestExecuteQAPassesOnFirstAttemptWithoutFeedbackDispatch(t *testing.T) {
 }
 
 func TestExecuteQAFailThenFixDevelopmentThenPass(t *testing.T) {
-	runner := &feedbackRunner{statuses: []state.LifecycleStatus{state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFailed, state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFinished}, artifacts: []string{"qa-feedback.md"}}
+	runner := &feedbackRunner{statuses: []state.LifecycleStatus{state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFailed, state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFinished}, artifacts: []string{"qa-feedback.md"}}
 	store := &feedbackState{}
 	req := request(t, pipelineWithQA(t))
 	req.MaxIterations = 2
@@ -860,21 +861,22 @@ func TestExecuteQAFailThenFixDevelopmentThenPass(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(outcomes) != 9 {
-		t.Fatalf("outcomes=%d, want 9", len(outcomes))
+	if len(outcomes) != 10 {
+		t.Fatalf("outcomes=%d, want 10", len(outcomes))
 	}
-	if got := runner.calls; got != 9 {
-		t.Fatalf("dispatches=%d, want 9", got)
+	if got := runner.calls; got != 10 {
+		t.Fatalf("dispatches=%d, want 10", got)
 	}
-	for _, call := range runner.requests[5:6] {
-		if call.Phase != pipeline.PhaseDevelopment || call.Subphase != "implementation" || len(call.ArtifactPaths) != 1 || call.ArtifactPaths[0] != "qa-feedback.md" {
+	for index, wantSubphase := range map[int]string{5: "implementation", 6: "verification"} {
+		call := runner.requests[index]
+		if call.Phase != pipeline.PhaseDevelopment || call.Subphase != wantSubphase || len(call.ArtifactPaths) != 1 || call.ArtifactPaths[0] != "qa-feedback.md" {
 			t.Fatalf("fix request=%#v", call)
 		}
 	}
-	if runner.requests[6].Phase != pipeline.PhaseRebase || runner.requests[7].Phase != pipeline.PhaseQA {
-		t.Fatalf("feedback loop phases = %v, want Rebase then QA", []pipeline.PhaseID{runner.requests[6].Phase, runner.requests[7].Phase})
+	if runner.requests[7].Phase != pipeline.PhaseRebase || runner.requests[8].Phase != pipeline.PhaseQA {
+		t.Fatalf("feedback loop phases = %v, want Rebase then QA", []pipeline.PhaseID{runner.requests[7].Phase, runner.requests[8].Phase})
 	}
-	if got := runner.requests[7].ArtifactPaths; len(got) != 1 || got[0] != "qa-feedback.md" {
+	if got := runner.requests[8].ArtifactPaths; len(got) != 1 || got[0] != "qa-feedback.md" {
 		t.Fatalf("rerun QA artifacts=%v", got)
 	}
 	found := false
@@ -903,7 +905,7 @@ func TestQAFixRebaseFailurePersistsConflictRouting(t *testing.T) {
 		statuses: []state.LifecycleStatus{
 			state.StatusFinished, state.StatusFinished, state.StatusFinished,
 			state.StatusFinished, state.StatusFailed,
-			state.StatusFinished, state.StatusFailed,
+			state.StatusFinished, state.StatusFinished, state.StatusFailed,
 		},
 		artifacts: []string{"rebase-conflict.md"},
 	}
@@ -919,7 +921,7 @@ func TestQAFixRebaseFailurePersistsConflictRouting(t *testing.T) {
 	if err == nil {
 		t.Fatal("QA feedback Rebase failure unexpectedly succeeded")
 	}
-	if len(outcomes) != 7 || outcomes[len(outcomes)-1].Result.Phase != pipeline.PhaseRebase {
+	if len(outcomes) != 8 || outcomes[len(outcomes)-1].Result.Phase != pipeline.PhaseRebase {
 		t.Fatalf("outcomes = %#v, want terminal feedback Rebase", outcomes)
 	}
 	if !outcomes[len(outcomes)-1].ConflictResolutionNeeded {
@@ -968,7 +970,7 @@ func TestExecuteCIFailureRemediationRebasesBeforeQA(t *testing.T) {
 		pipeline.PhaseAcceptanceCriteria,
 		pipeline.PhaseDevelopment, pipeline.PhaseDevelopment,
 		pipeline.PhaseRebase, pipeline.PhaseQA, pipeline.PhaseTestDocument,
-		pipeline.PhaseDevelopment,
+		pipeline.PhaseDevelopment, pipeline.PhaseDevelopment,
 		pipeline.PhaseRebase, pipeline.PhaseQA,
 	}
 	if !reflect.DeepEqual(runner.phases, want) {
@@ -1037,7 +1039,7 @@ func TestLifecycleBackedQAFailureKeepsDispatchClaimThroughFixAndPass(t *testing.
 }
 
 func TestExecuteQARepeatedFailureStopsAtMaxIterationsWithoutExtraDispatch(t *testing.T) {
-	statuses := []state.LifecycleStatus{state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFailed, state.StatusFinished, state.StatusFinished, state.StatusFailed}
+	statuses := []state.LifecycleStatus{state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFailed, state.StatusFinished, state.StatusFinished, state.StatusFinished, state.StatusFailed}
 	runner := &feedbackRunner{statuses: statuses, artifacts: []string{"feedback.md"}}
 	store := &feedbackState{}
 	req := request(t, pipelineWithQA(t))
@@ -1046,8 +1048,8 @@ func TestExecuteQARepeatedFailureStopsAtMaxIterationsWithoutExtraDispatch(t *tes
 	if err == nil {
 		t.Fatal("expected max-iteration error")
 	}
-	if len(outcomes) != 8 || runner.calls != 8 {
-		t.Fatalf("outcomes=%d dispatches=%d, want 8", len(outcomes), runner.calls)
+	if len(outcomes) != 9 || runner.calls != 9 {
+		t.Fatalf("outcomes=%d dispatches=%d, want 9", len(outcomes), runner.calls)
 	}
 	if runner.requests[len(runner.requests)-1].Phase != pipeline.PhaseQA {
 		t.Fatalf("last request=%#v", runner.requests[len(runner.requests)-1])
