@@ -147,7 +147,9 @@ func TestRealCLIFakePipelineOrdersAgentsAndCopiesCanonicalProof(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"acceptance_criteria", "grooming", "planning", "development", "development", "rebase", "qa", "development", "rebase", "qa", "test_document"}
+	// The QA fix pass re-runs both leading Development subphases, so the
+	// implementation/verification pair appears again after the failed QA gate.
+	want := []string{"acceptance_criteria", "grooming", "planning", "development", "development", "rebase", "qa", "development", "development", "rebase", "qa", "test_document"}
 	if got := phase3Phases(t, data); !equalStrings(got, want) {
 		t.Fatalf("phase order = %v, want %v\nlog=%s", got, want, data)
 	}
@@ -320,7 +322,9 @@ func TestRealCLIFakePipelineBoundsQAAttempts(t *testing.T) {
 		t.Fatalf("bounded run unexpectedly succeeded: %+v", result)
 	}
 	phases := phase3Phases(t, mustRead(t, log))
-	if len(phases) != 10 || phases[6] != "qa" || phases[9] != "qa" {
+	// Two QA attempts, each preceded by a Development fix pass that re-runs the
+	// implementation and verification subphases.
+	if len(phases) != 11 || phases[6] != "qa" || phases[10] != "qa" {
 		t.Fatalf("bounded phases = %v", phases)
 	}
 	store, err := state.NewFileStore(repo.Root)
