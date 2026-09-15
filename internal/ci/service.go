@@ -250,6 +250,7 @@ func parseChecks(data string) ([]Check, error) {
 	sort.Slice(checks, func(i, j int) bool { return checks[i].Name < checks[j].Name })
 	return checks, nil
 }
+
 // verdict is the provider-neutral reading of a check set. It carries no policy:
 // how long an empty or pending set may be tolerated belongs to Monitor, which
 // owns the polling budgets, so this stays a pure function over one observation.
