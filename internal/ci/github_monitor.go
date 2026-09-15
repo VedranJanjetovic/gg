@@ -30,8 +30,12 @@ func (p *GitHubCheckProvider) Observe(ctx context.Context, identity, cursor stri
 		switch strings.ToLower(strings.TrimSpace(check.Bucket)) {
 		case "fail", "error", "cancel":
 			result.Failed = append(result.Failed, check.Name)
-		case "pending", "skipping":
+		case "pending":
 			result.Pending = true
+		// "skipping" is terminal, not pending: GitHub never promotes a skipped
+		// or neutral check to "pass", so reporting it as pending would keep the
+		// lifecycle monitor polling a check that can never settle.
+		case "pass", "skipping":
 		}
 	}
 	return result, nil

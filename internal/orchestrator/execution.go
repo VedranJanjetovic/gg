@@ -400,7 +400,13 @@ func (c *sequentialController) execute(ctx context.Context, request Request, res
 					request.Project = project
 				}
 			}
-			if err != nil && phase == pipeline.PhaseCI && request.GitOps.Configured && c.checks != nil {
+			// Gate on the same flag that runs the phase. GitOps.Configured
+			// only records whether a config file carried an explicit gitops
+			// section, so gating here left every project that relies on
+			// defaults with a CI phase that runs but whose failure never
+			// reaches the fix loop.
+			if err != nil && phase == pipeline.PhaseCI && request.GitOps.EnableCI && c.checks != nil &&
+				outcome.Result.Disposition == agent.DispositionFeedback {
 				retryOutcomes, retryOutcome, retryErr := c.retryCIFailure(ctx, &request, executable, maxAttempts, outcome.Result.ArtifactPaths)
 				outcomes = append(outcomes, retryOutcomes...)
 				if retryErr == nil {
@@ -2021,15 +2027,26 @@ func (c *sequentialController) runCI(ctx context.Context, request Request) (agen
 		identity = request.Project.BranchName
 	}
 	result.ExternalIdentity = identity
-	ciResult, err := c.checks.Monitor(ctx, ci.Config{Enabled: request.GitOps.EnableCI, Identity: identity, Worktree: request.Project.WorktreePath, ArtifactRoot: request.ArtifactRoot, ProjectSlug: request.Project.Slug, RunID: request.RunID, MaxPolls: 3})
+	ciResult, err := c.checks.Monitor(ctx, ci.Config{Enabled: request.GitOps.EnableCI, Identity: identity, Worktree: request.Project.WorktreePath, ArtifactRoot: request.ArtifactRoot, ProjectSlug: request.Project.Slug, RunID: request.RunID, PollInterval: ci.DefaultPollInterval, MaxPolls: ci.DefaultMaxPolls, MaxRegistrationPolls: ci.DefaultMaxRegistrationPolls})
 	result.ArtifactPaths = append(result.ArtifactPaths, ciResult.ReportPath, ciResult.FeedbackPath)
 	if err != nil {
 		result.Status = state.StatusFailed
 		return result, err
 	}
 	if ciResult.Outcome != ci.OutcomePassed {
-		result.Status, result.Disposition = state.StatusFailed, agent.DispositionFeedback
-		return result, &agent.SemanticFailureError{Phase: pipeline.PhaseCI, Disposition: agent.DispositionFeedback, Details: "CI checks did not pass"}
+		// Only a check that judged the change and rejected it is feedback a
+		// Development agent can act on. Blocked evidence — cancelled runs,
+		// unreadable checks, checks still pending when the budget ran out —
+		// escalates instead, because looping an agent over a failure it cannot
+		// fix burns bounded attempts and invites it to weaken tests until the
+		// gate passes.
+		disposition := agent.DispositionBlocked
+		details := "CI evidence is blocked or incomplete"
+		if ciResult.Outcome == ci.OutcomeFailed {
+			disposition, details = agent.DispositionFeedback, "CI checks did not pass"
+		}
+		result.Status, result.Disposition = state.StatusFailed, disposition
+		return result, &agent.SemanticFailureError{Phase: pipeline.PhaseCI, Disposition: disposition, Details: details}
 	}
 	result.Status, result.Disposition = state.StatusFinished, agent.DispositionPassed
 	return result, nil

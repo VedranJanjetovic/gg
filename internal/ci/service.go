@@ -29,6 +29,20 @@ const (
 	OutcomeBlocked Outcome = "blocked"
 )
 
+// Production polling budgets. The composition root passes these; the service
+// itself never invents a wait, so tests can drive it with a zero interval.
+const (
+	// DefaultPollInterval paces observation: responsive enough that a fast
+	// pipeline is not left waiting, cheap enough that a long CI run costs on
+	// the order of a hundred gh invocations.
+	DefaultPollInterval = 20 * time.Second
+	// DefaultMaxPolls bounds total observation at roughly thirty minutes.
+	DefaultMaxPolls = 90
+	// DefaultMaxRegistrationPolls bounds the zero-check window at roughly two
+	// minutes. See Config.MaxRegistrationPolls for why it is separate.
+	DefaultMaxRegistrationPolls = 6
+)
+
 type Executor interface {
 	Execute(context.Context, []string) (string, error)
 }
@@ -65,6 +79,16 @@ type Config struct {
 	RunID        string
 	PollInterval time.Duration
 	MaxPolls     int
+	// MaxRegistrationPolls bounds how many consecutive polls may report zero
+	// checks before CI is deemed absent for this change.
+	//
+	// "CI has not started yet" and "this repository runs no CI for this
+	// change" are the same observation — an empty check set — so only elapsed
+	// time separates them. Checks register within seconds of a push, which is
+	// why this window is deliberately far shorter than MaxPolls: it decides
+	// the absent case quickly instead of making a project with no CI wait out
+	// the whole completion timeout. Defaults to MaxPolls when unset.
+	MaxRegistrationPolls int
 }
 type Service struct{ gh Executor }
 
@@ -126,26 +150,40 @@ func (s *Service) Monitor(ctx context.Context, cfg Config) (Result, error) {
 	if cfg.MaxPolls <= 0 {
 		cfg.MaxPolls = 1
 	}
+	if cfg.MaxRegistrationPolls <= 0 || cfg.MaxRegistrationPolls > cfg.MaxPolls {
+		cfg.MaxRegistrationPolls = cfg.MaxPolls
+	}
 	if cfg.PollInterval < 0 {
 		return Result{}, errors.New("ci poll interval cannot be negative")
 	}
+	emptyPolls := 0
 	for poll := 1; poll <= cfg.MaxPolls; poll++ {
 		if err := ctx.Err(); err != nil {
 			return Result{}, err
 		}
-		out, runErr := s.gh.Execute(ctx, []string{"pr", "checks", id, "--json", "name,state,bucket,link"})
-		if runErr != nil {
-			return s.finish(ctx, cfg, Result{Outcome: OutcomeBlocked, Identity: id, Polls: poll}, fmt.Sprintf("GitHub checks could not be read: %v", runErr))
+		checks, obsErr := s.observe(ctx, id)
+		if obsErr != nil {
+			return s.finish(ctx, cfg, Result{Outcome: OutcomeBlocked, Identity: id, Polls: poll}, obsErr.Error())
 		}
-		checks, parseErr := parseChecks(out)
-		if parseErr != nil {
-			return s.finish(ctx, cfg, Result{Outcome: OutcomeBlocked, Identity: id, Polls: poll}, "GitHub returned malformed check data: "+parseErr.Error())
+		observed := classify(checks)
+		if observed == verdictNoChecks {
+			// Keep waiting for checks to register. Only an exhausted
+			// registration window may conclude that no CI exists, because
+			// until then this is indistinguishable from a poll that raced
+			// ahead of GitHub registering the workflow runs.
+			if emptyPolls++; emptyPolls >= cfg.MaxRegistrationPolls {
+				return s.finish(ctx, cfg, Result{Outcome: OutcomePassed, Identity: id, Polls: poll}, "")
+			}
+			if err := wait(ctx, cfg.PollInterval); err != nil {
+				return Result{}, err
+			}
+			continue
 		}
-		outcome, terminal := classify(checks)
+		outcome, terminal := dispose(observed)
 		if terminal || poll == cfg.MaxPolls {
 			feedback := ""
 			if outcome != OutcomePassed {
-				feedback = feedbackFor(outcome, checks)
+				feedback = feedbackFor(outcome, observed, checks)
 			}
 			return s.finish(ctx, cfg, Result{Outcome: outcome, Identity: id, Checks: checks, Polls: poll}, feedback)
 		}
@@ -154,6 +192,30 @@ func (s *Service) Monitor(ctx context.Context, cfg Config) (Result, error) {
 		}
 	}
 	return Result{}, errors.New("ci polling ended unexpectedly")
+}
+
+// observe reads the pull request's checks. GitHub reports "no checks reported"
+// as a gh exit failure rather than as an empty list, so that one message is
+// normalized to an empty check set: it means CI has not registered yet, not
+// that the provider is unreachable. Every other gh failure stays an error so a
+// bad token or a missing pull request is never mistaken for a quiet pipeline.
+func (s *Service) observe(ctx context.Context, id string) ([]Check, error) {
+	out, err := s.gh.Execute(ctx, []string{"pr", "checks", id, "--json", "name,state,bucket,link"})
+	if err != nil {
+		if isNoChecksReported(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("GitHub checks could not be read: %w", err)
+	}
+	checks, parseErr := parseChecks(out)
+	if parseErr != nil {
+		return nil, fmt.Errorf("GitHub returned malformed check data: %w", parseErr)
+	}
+	return checks, nil
+}
+
+func isNoChecksReported(err error) bool {
+	return err != nil && strings.Contains(strings.ToLower(err.Error()), "no checks reported")
 }
 func normalizeIdentity(v string) (string, error) {
 	v = strings.TrimSpace(v)
@@ -188,41 +250,100 @@ func parseChecks(data string) ([]Check, error) {
 	sort.Slice(checks, func(i, j int) bool { return checks[i].Name < checks[j].Name })
 	return checks, nil
 }
-func classify(checks []Check) (Outcome, bool) {
+// verdict is the provider-neutral reading of a check set. It carries no policy:
+// how long an empty or pending set may be tolerated belongs to Monitor, which
+// owns the polling budgets, so this stays a pure function over one observation.
+type verdict int
+
+const (
+	verdictNoChecks verdict = iota
+	verdictPending
+	verdictPassed
+	verdictFailed
+	// verdictInfra covers checks that ended without judging the change —
+	// cancelled runs and dead runners. No code edit can turn these green.
+	verdictInfra
+	verdictUnknown
+)
+
+func classify(checks []Check) verdict {
 	if len(checks) == 0 {
-		return OutcomeBlocked, true
+		return verdictNoChecks
 	}
-	pending := false
+	pending, infra := false, false
 	for _, c := range checks {
 		switch strings.ToLower(strings.TrimSpace(c.Bucket)) {
-		case "fail", "error", "cancel":
-			return OutcomeFailed, true
-		case "pending", "skipping":
+		case "fail", "error":
+			return verdictFailed
+		case "cancel":
+			infra = true
+		case "pending":
 			pending = true
-		case "pass":
+		// A skipped or neutral check is terminal. GitHub never promotes it to
+		// "pass" — an aggregating check run such as CodeQL reports neutral
+		// while the Analyze jobs beneath it succeed — so treating it as
+		// pending waits forever for a transition that cannot happen.
+		case "pass", "skipping":
 		default:
-			return OutcomeBlocked, true
+			return verdictUnknown
 		}
 	}
-	if pending {
-		return OutcomeBlocked, false
+	switch {
+	case pending:
+		return verdictPending
+	case infra:
+		return verdictInfra
 	}
-	return OutcomePassed, true
+	return verdictPassed
 }
-func feedbackFor(outcome Outcome, checks []Check) string {
+
+// dispose maps an observation to a disposition and reports whether it is
+// terminal. Only a pending set is worth re-observing.
+func dispose(observed verdict) (Outcome, bool) {
+	switch observed {
+	case verdictPassed:
+		return OutcomePassed, true
+	case verdictFailed:
+		return OutcomeFailed, true
+	case verdictPending:
+		return OutcomeBlocked, false
+	default:
+		return OutcomeBlocked, true
+	}
+}
+
+// blocking reports whether a check belongs in feedback as something to resolve.
+// Passed and skipped checks are both terminal successes.
+func blocking(bucket string) bool {
+	switch strings.ToLower(strings.TrimSpace(bucket)) {
+	case "pass", "skipping":
+		return false
+	}
+	return true
+}
+
+func feedbackFor(outcome Outcome, observed verdict, checks []Check) string {
 	var b strings.Builder
 	b.WriteString("# CI Feedback\n\nThe required pull-request checks did not pass. Resolve the checks below and retry CI.\n\n")
 	for _, c := range checks {
-		if strings.ToLower(c.Bucket) != "pass" {
-			fmt.Fprintf(&b, "- **%s**: %s", c.Name, c.Bucket)
-			if c.Link != "" {
-				fmt.Fprintf(&b, " ([details](%s))", c.Link)
-			}
-			b.WriteByte('\n')
+		if !blocking(c.Bucket) {
+			continue
 		}
+		fmt.Fprintf(&b, "- **%s**: %s", c.Name, c.Bucket)
+		if c.Link != "" {
+			fmt.Fprintf(&b, " ([details](%s))", c.Link)
+		}
+		b.WriteByte('\n')
 	}
-	if outcome == OutcomeBlocked {
-		b.WriteString("\nCI evidence is blocked or incomplete; do not claim readiness.\n")
+	switch observed {
+	case verdictInfra:
+		b.WriteString("\nThese checks were cancelled rather than failing on the change: this is CI infrastructure state, not a code defect. Re-run CI instead of editing code.\n")
+	case verdictUnknown:
+		b.WriteString("\nAt least one check reported an unrecognized state, so CI evidence is incomplete. Inspect the checks above before claiming readiness.\n")
+	default:
+		if outcome == OutcomeBlocked {
+			b.WriteString("\nCI evidence is blocked or incomplete; do not claim readiness.\n")
+		}
 	}
 	return b.String()
 }
